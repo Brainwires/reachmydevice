@@ -2722,6 +2722,7 @@ dependencies = [
  "openreach-codec",
  "openreach-input",
  "openreach-protocol",
+ "openreach-rendezvous",
  "openreach-transport",
  "serde",
  "serde_json",

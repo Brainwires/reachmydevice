@@ -115,17 +115,22 @@ async fn run(
     // Outbound messages we can't address yet (host, before it knows the viewer).
     let mut pending: Vec<SignalMsg> = Vec::new();
 
-    // Viewer announces itself so the host learns our id and can send the offer.
-    if let Some(to) = &peer {
-        let hello = serde_json::to_string(&Outbound {
-            to,
-            payload: Payload::Hello,
-        })?;
-        write.send(Message::text(hello)).await?;
-    }
+    // The viewer (which knows the target upfront) re-announces until the host is
+    // online and replies; otherwise an early `hello` sent before the host's socket
+    // registers would be dropped by the relay and the pairing would never form.
+    let is_viewer = peer.is_some();
+    let mut received_any = false;
+    let mut announce = tokio::time::interval(std::time::Duration::from_millis(500));
 
     loop {
         tokio::select! {
+            // Re-announce presence (viewer only, until we hear back). First tick is immediate.
+            _ = announce.tick(), if is_viewer && !received_any => {
+                if let Some(to) = &peer {
+                    let hello = serde_json::to_string(&Outbound { to, payload: Payload::Hello })?;
+                    write.send(Message::text(hello)).await?;
+                }
+            }
             // Session wants to send a signaling message.
             maybe = out_rx.recv() => {
                 let Some(msg) = maybe else { break; }; // sender dropped
@@ -145,6 +150,7 @@ async fn run(
                     tracing::debug!("bad rendezvous frame");
                     continue;
                 };
+                received_any = true;
                 // Learn/lock the peer id on first contact and flush anything buffered.
                 if peer.is_none() {
                     peer = Some(inbound.from.clone());
