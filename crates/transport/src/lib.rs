@@ -72,9 +72,6 @@ pub enum TransportEvent {
 }
 
 /// Commands from the [`Transport`] handle to the driver thread.
-// The driver stub does not yet read these; the real driver (driver.rs) consumes
-// them. Remove this once implemented.
-#[allow(dead_code)]
 pub(crate) enum DriverCmd {
     /// Encoded H.264 access unit to send on the video track (host side).
     Video {
@@ -90,39 +87,18 @@ pub(crate) enum DriverCmd {
     Shutdown,
 }
 
-/// `Send` handle to the transport driver thread.
-pub struct Transport {
+/// Cloneable command side of the transport.
+///
+/// Holds only `Send` senders, so it can be cloned to any thread (the encode
+/// thread, the UI thread) that needs to push video/data/signaling or read the
+/// GCC bitrate. The event *consumer* side lives on a single [`Transport`].
+#[derive(Clone)]
+pub struct TransportSender {
     cmd_tx: mpsc::Sender<DriverCmd>,
-    event_rx: mpsc::Receiver<TransportEvent>,
-    /// Latest GCC target bitrate (bits/sec), published by the driver.
     bitrate_bps: Arc<AtomicU32>,
-    handle: Option<JoinHandle<()>>,
 }
 
-impl Transport {
-    /// Spawn the driver thread and return a handle.
-    pub fn spawn(config: TransportConfig) -> anyhow::Result<Self> {
-        let (cmd_tx, cmd_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
-        let bitrate_bps = Arc::new(AtomicU32::new(config.video_bitrate_bps));
-        let driver_bitrate = bitrate_bps.clone();
-
-        let handle = std::thread::Builder::new()
-            .name("openreach-transport".into())
-            .spawn(move || {
-                if let Err(e) = driver::run(config, cmd_rx, event_tx, driver_bitrate) {
-                    tracing::error!("transport driver exited with error: {e:?}");
-                }
-            })?;
-
-        Ok(Self {
-            cmd_tx,
-            event_rx,
-            bitrate_bps,
-            handle: Some(handle),
-        })
-    }
-
+impl TransportSender {
     /// Queue an encoded H.264 access unit for sending (host).
     pub fn send_video(&self, annexb: Bytes, is_keyframe: bool, ts_micros: u64) {
         let _ = self.cmd_tx.send(DriverCmd::Video {
@@ -142,6 +118,55 @@ impl Transport {
         let _ = self.cmd_tx.send(DriverCmd::Signal(msg));
     }
 
+    /// Latest GCC target bitrate (bits/sec) — feed this to the encoder.
+    pub fn target_bitrate_bps(&self) -> u32 {
+        self.bitrate_bps.load(Ordering::Relaxed)
+    }
+}
+
+/// Owning handle to the transport driver thread and its event stream.
+///
+/// The event receiver is single-consumer, so `Transport` is not shared across
+/// threads — keep it on one thread and hand [`TransportSender`] clones (via
+/// [`Transport::sender`]) to the others. Convenience command methods delegate to
+/// the inner sender for the owning thread's use.
+pub struct Transport {
+    sender: TransportSender,
+    event_rx: mpsc::Receiver<TransportEvent>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Transport {
+    /// Spawn the driver thread and return the owning handle.
+    pub fn spawn(config: TransportConfig) -> anyhow::Result<Self> {
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let bitrate_bps = Arc::new(AtomicU32::new(config.video_bitrate_bps));
+        let driver_bitrate = bitrate_bps.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("openreach-transport".into())
+            .spawn(move || {
+                if let Err(e) = driver::run(config, cmd_rx, event_tx, driver_bitrate) {
+                    tracing::error!("transport driver exited with error: {e:?}");
+                }
+            })?;
+
+        Ok(Self {
+            sender: TransportSender {
+                cmd_tx,
+                bitrate_bps,
+            },
+            event_rx,
+            handle: Some(handle),
+        })
+    }
+
+    /// A cloneable command handle for other threads.
+    pub fn sender(&self) -> TransportSender {
+        self.sender.clone()
+    }
+
     /// Non-blocking event poll.
     pub fn try_event(&self) -> Option<TransportEvent> {
         self.event_rx.try_recv().ok()
@@ -152,15 +177,32 @@ impl Transport {
         self.event_rx.recv_timeout(timeout).ok()
     }
 
-    /// Latest GCC target bitrate (bits/sec) — feed this to the encoder.
+    // Convenience command methods for the owning thread (delegate to the sender).
+
+    /// Queue an encoded H.264 access unit for sending (host).
+    pub fn send_video(&self, annexb: Bytes, is_keyframe: bool, ts_micros: u64) {
+        self.sender.send_video(annexb, is_keyframe, ts_micros);
+    }
+
+    /// Queue bytes for the data channel (both roles).
+    pub fn send_data(&self, data: Bytes) {
+        self.sender.send_data(data);
+    }
+
+    /// Feed a signaling message received from the peer.
+    pub fn feed_signal(&self, msg: SignalMsg) {
+        self.sender.feed_signal(msg);
+    }
+
+    /// Latest GCC target bitrate (bits/sec).
     pub fn target_bitrate_bps(&self) -> u32 {
-        self.bitrate_bps.load(Ordering::Relaxed)
+        self.sender.target_bitrate_bps()
     }
 }
 
 impl Drop for Transport {
     fn drop(&mut self) {
-        let _ = self.cmd_tx.send(DriverCmd::Shutdown);
+        let _ = self.sender.cmd_tx.send(DriverCmd::Shutdown);
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }

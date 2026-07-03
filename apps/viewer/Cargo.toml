@@ -14,7 +14,13 @@ openreach-protocol.workspace = true
 openreach-session.workspace = true
 openreach-codec.workspace = true
 openreach-transport.workspace = true
-tokio.workspace = true
+bytes.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# GPU-accelerated frame rendering + windowing/input (spec requires wgpu).
+winit = "0.30"
+wgpu = "30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
