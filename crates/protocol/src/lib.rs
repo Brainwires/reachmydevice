@@ -119,7 +119,9 @@ pub fn hello_ack_reject(reason: impl Into<String>) -> Envelope {
 
 /// Wrap an [`InputEvent`] in an envelope.
 pub fn input(event: input_event::Event) -> Envelope {
-    envelope(pb::envelope::Payload::Input(InputEvent { event: Some(event) }))
+    envelope(pb::envelope::Payload::Input(InputEvent {
+        event: Some(event),
+    }))
 }
 
 /// A `Ping` stamped with a monotonic microsecond timestamp.
@@ -130,6 +132,21 @@ pub fn ping(t_micros: u64) -> Envelope {
 /// A `Pong` echoing a ping's timestamp.
 pub fn pong(t_micros: u64) -> Envelope {
     envelope(pb::envelope::Payload::Pong(Pong { t_micros }))
+}
+
+/// Microseconds since a process-global monotonic epoch.
+///
+/// All OpenReach crates call this one function so that timestamps produced in
+/// different crates within the **same process** share an epoch and are directly
+/// comparable (e.g. capture→encode→send stage latency on the host). It is *not*
+/// comparable across processes or machines — cross-process latency is measured
+/// via data-channel Ping/Pong RTT or externally (see the Phase 1 report).
+pub fn monotonic_micros() -> u64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let epoch = EPOCH.get_or_init(Instant::now);
+    epoch.elapsed().as_micros() as u64
 }
 
 #[cfg(test)]
