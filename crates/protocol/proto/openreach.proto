@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+// OpenReach control/data-channel wire schema.
+//
+// Versioning contract (see crate root): every message travels inside an `Envelope`
+// that carries the SENDER's protocol version. A receiver whose MAJOR differs must
+// reject the peer (a v1 viewer cleanly refuses an incompatible host, and vice
+// versa). Fields are only ever *added* with new tag numbers within a MAJOR line;
+// tags are never reused or repurposed, so MINOR bumps stay backward-compatible.
+package openreach.v1;
+
+// Top-level frame. One encoded Envelope == one data-channel message.
+message Envelope {
+  // Protocol version of the sender.
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+
+  oneof payload {
+    Hello hello = 10;
+    HelloAck hello_ack = 11;
+    InputEvent input = 12;
+    Ping ping = 13;
+    Pong pong = 14;
+    Bye bye = 15;
+  }
+}
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_HOST = 1;
+  ROLE_VIEWER = 2;
+}
+
+// First message each side sends after the data channel opens.
+message Hello {
+  string device_name = 1;
+  Role role = 2;
+  // Reserved feature bitmask for Phase-4 negotiation (clipboard/files/audio).
+  uint64 features = 3;
+}
+
+// Response to Hello. `accepted=false` carries a human-readable `reason`
+// (e.g. "incompatible protocol major: host=2 viewer=1").
+message HelloAck {
+  bool accepted = 1;
+  string reason = 2;
+  string device_name = 3;
+  uint64 features = 4;
+}
+
+// --- Input (viewer -> host) ------------------------------------------------
+
+message InputEvent {
+  oneof event {
+    MouseMove mouse_move = 1;
+    MouseButton mouse_button = 2;
+    MouseScroll mouse_scroll = 3;
+    KeyEvent key = 4;
+  }
+}
+
+// Pointer position normalized to [0,1] over the captured display, so the host
+// maps it onto its own resolution regardless of the viewer's window size.
+message MouseMove {
+  double x = 1;
+  double y = 2;
+}
+
+enum MouseBtn {
+  MOUSE_BTN_UNSPECIFIED = 0;
+  MOUSE_BTN_LEFT = 1;
+  MOUSE_BTN_RIGHT = 2;
+  MOUSE_BTN_MIDDLE = 3;
+}
+
+message MouseButton {
+  MouseBtn button = 1;
+  bool pressed = 2;
+  // Position at the time of the click, normalized [0,1] (keeps click and move atomic).
+  double x = 3;
+  double y = 4;
+}
+
+message MouseScroll {
+  double dx = 1;
+  double dy = 2;
+}
+
+// Keys travel as USB HID usage codes (platform-neutral) so layouts stay sane
+// across OSes; each platform's input backend maps to/from native keycodes.
+message KeyEvent {
+  uint32 hid_usage = 1;
+  bool pressed = 2;
+  uint32 modifiers = 3; // bitmask, see Modifiers in Rust
+}
+
+// --- Liveness / latency ----------------------------------------------------
+
+message Ping {
+  uint64 t_micros = 1; // sender monotonic clock, microseconds
+}
+
+message Pong {
+  uint64 t_micros = 1; // echoes the Ping's t_micros for RTT measurement
+}
+
+message Bye {
+  string reason = 1;
+}
