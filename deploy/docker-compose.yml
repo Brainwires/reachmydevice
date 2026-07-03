@@ -1,0 +1,64 @@
+# OpenReach rendezvous — single-unit deployment for a 1 vCPU / 1 GB VPS.
+#
+#   caddy      — TLS termination + reverse proxy (automatic Let's Encrypt/ACME)
+#   rendezvous — signaling + device registry (axum + SQLite)
+#   coturn     — STUN + TURN relay for NAT traversal
+#
+# Copy .env.example to .env and set OPENREACH_DOMAIN, TURN_SECRET, etc.
+# Then: docker compose up -d
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      OPENREACH_DOMAIN: ${OPENREACH_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - rendezvous
+
+  rendezvous:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    environment:
+      OPENREACH_RZ_ADDR: 0.0.0.0:8080
+      DATABASE_URL: sqlite:/data/openreach.db?mode=rwc
+      OPENREACH_RZ_OPEN_REGISTRATION: ${OPENREACH_RZ_OPEN_REGISTRATION:-true}
+      # Shared secret used to mint short-lived TURN credentials (must match coturn).
+      OPENREACH_TURN_SECRET: ${TURN_SECRET}
+      OPENREACH_TURN_HOST: ${OPENREACH_DOMAIN}
+    volumes:
+      - rendezvous_data:/data
+    # Not published directly; only reachable via caddy.
+    expose:
+      - "8080"
+
+  coturn:
+    image: coturn/coturn:4
+    restart: unless-stopped
+    network_mode: host # TURN needs the host network for the relay port range
+    command:
+      - -n
+      - --log-file=stdout
+      - --min-port=49160
+      - --max-port=49200
+      - --realm=${OPENREACH_DOMAIN}
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET}
+      - --no-cli
+      - --no-tlsv1
+      - --no-tlsv1_1
+      # STUN also works out of the box on 3478.
+    # Ports (host network): 3478/udp+tcp (STUN/TURN), 49160-49200/udp (relay).
+
+volumes:
+  caddy_data:
+  caddy_config:
+  rendezvous_data:

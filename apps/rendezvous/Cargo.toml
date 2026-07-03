@@ -1,0 +1,36 @@
+[package]
+name = "openreach-rendezvous"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "openreach-rendezvous"
+path = "src/main.rs"
+
+[dependencies]
+openreach-protocol.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util", "signal"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower-http = { version = "0.6", features = ["trace"] }
+tower_governor = "0.7"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "macros",
+    "migrate",
+] }
+# "std" pulls in password_hash's getrandom-backed OsRng (salt + token RNG).
+argon2 = { version = "0.5", features = ["std"] }
+rand = "0.9"
+hex = "0.4"
+sha2 = "0.10"
+base64 = "0.22"
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }

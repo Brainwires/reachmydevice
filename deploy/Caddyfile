@@ -1,0 +1,7 @@
+# Automatic HTTPS via Let's Encrypt for the rendezvous API + WebSocket.
+# Set OPENREACH_DOMAIN in .env; Caddy provisions and renews the certificate.
+{$OPENREACH_DOMAIN} {
+	encode gzip
+	# WebSocket upgrade + REST both proxy to the rendezvous service.
+	reverse_proxy rendezvous:8080
+}

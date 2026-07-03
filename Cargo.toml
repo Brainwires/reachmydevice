@@ -12,6 +12,7 @@ members = [
     "apps/host",
     "apps/viewer",
     "apps/signal-dev",
+    "apps/rendezvous",
 ]
 
 [workspace.package]
