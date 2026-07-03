@@ -1,29 +1,57 @@
 //! OpenReach host agent (spike).
 //!
 //! Headless: captures the screen, encodes H.264, streams it over WebRTC, and
-//! injects the viewer's input. Configured via environment variables (a proper
-//! CLI/service wrapper comes in Phase 3):
+//! injects the viewer's input. Configured via environment variables:
 //!
 //! | env | default | meaning |
 //! |-----|---------|---------|
-//! | `OPENREACH_SIGNAL_ADDR` | `127.0.0.1:9000` | signal-dev relay address |
-//! | `OPENREACH_DISPLAY`     | `0`              | display index to capture |
-//! | `OPENREACH_WIDTH`       | `1920`           | encoded width |
-//! | `OPENREACH_HEIGHT`      | `1080`           | encoded height |
-//! | `OPENREACH_FPS`         | `30`             | capture/encode fps |
-//! | `OPENREACH_BITRATE`     | `8000000`        | initial bitrate (bps) |
-//! | `OPENREACH_NAME`        | hostname         | this device's name |
+//! | `OPENREACH_DISPLAY`     | `0`         | display index to capture |
+//! | `OPENREACH_WIDTH/HEIGHT/FPS/BITRATE` | 1920/1080/30/8000000 | encode params |
+//! | `OPENREACH_NAME`        | hostname    | this device's name |
+//! | `OPENREACH_ICE`         | (none)      | comma-separated STUN/TURN URLs |
+//! | `OPENREACH_RENDEZVOUS_URL` | (none)   | `wss://host/ws` — use rendezvous if set |
+//! | `OPENREACH_TOKEN`       | (none)      | device bearer token (rendezvous mode) |
+//! | `OPENREACH_SIGNAL_ADDR` | `127.0.0.1:9000` | LAN signal-dev relay (fallback) |
 //!
 //! Requires **Screen Recording** (capture) and **Accessibility** (input)
 //! permissions on macOS — see `docs/macos-permissions.md`.
 
-use openreach_session::{run_host, HostConfig};
+use anyhow::Context;
+use openreach_session::rendezvous::RendezvousClient;
+use openreach_session::{run_host, HostConfig, SignalClient, Signaling};
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+fn ice_servers() -> Vec<String> {
+    std::env::var("OPENREACH_ICE")
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Build the signaling backend: rendezvous WebSocket if configured, else LAN relay.
+/// `peer` is the device to address (None for the host — it learns the viewer).
+fn build_signaling(peer: Option<String>) -> anyhow::Result<Box<dyn Signaling>> {
+    if let Ok(url) = std::env::var("OPENREACH_RENDEZVOUS_URL") {
+        let token = std::env::var("OPENREACH_TOKEN")
+            .context("OPENREACH_TOKEN is required in rendezvous mode")?;
+        tracing::info!(%url, "signaling via rendezvous");
+        Ok(Box::new(RendezvousClient::connect(&url, &token, peer)?))
+    } else {
+        let addr =
+            std::env::var("OPENREACH_SIGNAL_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".to_string());
+        tracing::info!(%addr, "signaling via LAN relay");
+        Ok(Box::new(SignalClient::connect(&addr)?))
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -34,8 +62,6 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = HostConfig {
-        signal_addr: std::env::var("OPENREACH_SIGNAL_ADDR")
-            .unwrap_or_else(|_| "127.0.0.1:9000".to_string()),
         display_index: env_or("OPENREACH_DISPLAY", 0),
         width: env_or("OPENREACH_WIDTH", 1920),
         height: env_or("OPENREACH_HEIGHT", 1080),
@@ -44,13 +70,15 @@ fn main() -> anyhow::Result<()> {
         device_name: std::env::var("OPENREACH_NAME").unwrap_or_else(|_| {
             std::env::var("HOSTNAME").unwrap_or_else(|_| "openreach-host".to_string())
         }),
+        ice_servers: ice_servers(),
     };
 
     tracing::info!(
-        signal = %cfg.signal_addr,
         display = cfg.display_index,
         res = format!("{}x{}@{}", cfg.width, cfg.height, cfg.fps),
         "starting OpenReach host"
     );
-    run_host(cfg)
+    // The host is the offerer; it learns the viewer's id from the rendezvous hello.
+    let signaling = build_signaling(None)?;
+    run_host(cfg, signaling)
 }

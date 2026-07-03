@@ -5,7 +5,7 @@
 //! the WebRTC offerer and the video sender; it validates the viewer's protocol
 //! version, injects the viewer's input, and answers Ping with Pong.
 
-use crate::signal::SignalClient;
+use crate::signal::Signaling;
 use bytes::Bytes;
 use openreach_capture as capture;
 use openreach_codec as codec;
@@ -23,40 +23,38 @@ use std::time::Duration;
 /// Host configuration.
 #[derive(Clone, Debug)]
 pub struct HostConfig {
-    /// `signal-dev` relay address, e.g. `"192.168.1.10:9000"`.
-    pub signal_addr: String,
     pub display_index: usize,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
     pub bitrate_bps: u32,
     pub device_name: String,
+    /// ICE server URLs (STUN/TURN); empty for LAN/loopback.
+    pub ice_servers: Vec<String>,
 }
 
 impl Default for HostConfig {
     fn default() -> Self {
         Self {
-            signal_addr: "127.0.0.1:9000".to_string(),
             display_index: 0,
             width: 1920,
             height: 1080,
             fps: 30,
             bitrate_bps: 8_000_000,
             device_name: "openreach-host".to_string(),
+            ice_servers: Vec::new(),
         }
     }
 }
 
-/// Run the host session. Blocks until the process is stopped.
-pub fn run_host(cfg: HostConfig) -> anyhow::Result<()> {
+/// Run the host session with the given signaling backend. Blocks until stopped.
+pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<()> {
     let transport = Transport::spawn(TransportConfig {
         role: TransportRole::Host,
-        ice_servers: Vec::new(), // spike: LAN / loopback host candidates. STUN/TURN in Phase 2.
+        ice_servers: cfg.ice_servers.clone(),
         bind_addr: "0.0.0.0:0".parse().unwrap(),
         video_bitrate_bps: cfg.bitrate_bps,
     })?;
-
-    let signal = SignalClient::connect(&cfg.signal_addr)?;
 
     // Capture -> frame channel.
     let (frame_tx, frame_rx) = mpsc::channel();

@@ -11,6 +11,25 @@ use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
+/// A signaling transport: the LAN relay ([`SignalClient`]) or the rendezvous
+/// WebSocket ([`crate::rendezvous::RendezvousClient`]). The host/viewer sessions
+/// are generic over this so they work in either mode.
+pub trait Signaling: Send {
+    /// Deliver a signaling message to the peer.
+    fn send(&self, msg: &SignalMsg) -> anyhow::Result<()>;
+    /// Non-blocking receive of an inbound signaling message.
+    fn try_recv(&self) -> Option<SignalMsg>;
+}
+
+impl Signaling for SignalClient {
+    fn send(&self, msg: &SignalMsg) -> anyhow::Result<()> {
+        SignalClient::send(self, msg)
+    }
+    fn try_recv(&self) -> Option<SignalMsg> {
+        SignalClient::try_recv(self)
+    }
+}
+
 /// Connected signaling client.
 pub struct SignalClient {
     /// Write side of the TCP stream (line-buffered by us).

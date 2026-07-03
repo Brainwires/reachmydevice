@@ -5,7 +5,7 @@
 //! viewer *app* drives winit/wgpu and simply polls [`ViewerSession::poll_update`]
 //! for decoded frames and connection state, and calls [`ViewerSession::send_input`].
 
-use crate::signal::SignalClient;
+use crate::signal::Signaling;
 use bytes::Bytes;
 use openreach_codec as codec;
 use openreach_protocol as proto;
@@ -19,15 +19,16 @@ use std::time::Duration;
 /// Viewer configuration.
 #[derive(Clone, Debug)]
 pub struct ViewerConfig {
-    pub signal_addr: String,
     pub device_name: String,
+    /// ICE server URLs (STUN/TURN); empty for LAN/loopback.
+    pub ice_servers: Vec<String>,
 }
 
 impl Default for ViewerConfig {
     fn default() -> Self {
         Self {
-            signal_addr: "127.0.0.1:9000".to_string(),
             device_name: "openreach-viewer".to_string(),
+            ice_servers: Vec::new(),
         }
     }
 }
@@ -49,16 +50,15 @@ pub struct ViewerSession {
 }
 
 impl ViewerSession {
-    /// Connect signaling, spawn the transport + pump + decode threads.
-    pub fn start(cfg: ViewerConfig) -> anyhow::Result<Self> {
+    /// Spawn the transport + pump + decode threads with the given signaling backend.
+    pub fn start(cfg: ViewerConfig, signal: Box<dyn Signaling>) -> anyhow::Result<Self> {
         let transport = Transport::spawn(TransportConfig {
             role: TransportRole::Viewer,
-            ice_servers: Vec::new(),
+            ice_servers: cfg.ice_servers.clone(),
             bind_addr: "0.0.0.0:0".parse().unwrap(),
             video_bitrate_bps: 8_000_000, // viewer doesn't encode; nominal
         })?;
         let sender = transport.sender();
-        let signal = SignalClient::connect(&cfg.signal_addr)?;
 
         let (updates_tx, updates) = mpsc::channel();
         let (annexb_tx, annexb_rx) = mpsc::channel::<(Bytes, u64)>();

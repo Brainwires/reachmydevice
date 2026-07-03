@@ -17,10 +17,33 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use openreach_protocol as proto;
 use openreach_protocol::input_event::Event as InputEvent;
 use openreach_protocol::{KeyEvent, MouseButton, MouseMove, MouseScroll};
-use openreach_session::{ViewerConfig, ViewerSession, ViewerUpdate};
+use openreach_session::rendezvous::RendezvousClient;
+use openreach_session::{SignalClient, Signaling, ViewerConfig, ViewerSession, ViewerUpdate};
+
+/// Build the signaling backend: rendezvous WebSocket if configured, else LAN relay.
+fn build_signaling() -> anyhow::Result<Box<dyn Signaling>> {
+    if let Ok(url) = std::env::var("OPENREACH_RENDEZVOUS_URL") {
+        let token = std::env::var("OPENREACH_TOKEN")
+            .context("OPENREACH_TOKEN is required in rendezvous mode")?;
+        let peer = std::env::var("OPENREACH_PEER_DEVICE_ID")
+            .context("OPENREACH_PEER_DEVICE_ID (the host's id) is required in rendezvous mode")?;
+        tracing::info!(%url, %peer, "signaling via rendezvous");
+        Ok(Box::new(RendezvousClient::connect(
+            &url,
+            &token,
+            Some(peer),
+        )?))
+    } else {
+        let addr =
+            std::env::var("OPENREACH_SIGNAL_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".to_string());
+        tracing::info!(%addr, "signaling via LAN relay");
+        Ok(Box::new(SignalClient::connect(&addr)?))
+    }
+}
 
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
@@ -42,17 +65,31 @@ fn main() {
 
     // Build the viewer config from the environment.
     let mut cfg = ViewerConfig::default();
-    if let Ok(addr) = std::env::var("OPENREACH_SIGNAL_ADDR") {
-        cfg.signal_addr = addr;
-    }
     if let Ok(name) = std::env::var("OPENREACH_NAME") {
         cfg.device_name = name;
     }
-    tracing::info!(signal = %cfg.signal_addr, name = %cfg.device_name, "starting openreach-viewer");
+    cfg.ice_servers = std::env::var("OPENREACH_ICE")
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    tracing::info!(name = %cfg.device_name, "starting openreach-viewer");
+
+    // Build the signaling backend (rendezvous if configured, else LAN relay).
+    let signaling = match build_signaling() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "signaling setup failed; exiting");
+            std::process::exit(1);
+        }
+    };
 
     // Start the session up front. If signaling can't be reached we log and exit
     // cleanly rather than opening a dead window.
-    let session = match ViewerSession::start(cfg) {
+    let session = match ViewerSession::start(cfg, signaling) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "failed to start viewer session; exiting");
