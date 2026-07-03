@@ -6,7 +6,60 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+openreach-protocol.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 bytes.workspace = true
+
+# macOS screen capture via ScreenCaptureKit, using the pure-Rust objc2 framework
+# bindings (ADR-0005 primary). No Swift/Metal build step — unlike the
+# `screencapturekit` convenience crate, whose mandatory `apple-metal` dep runs a
+# Swift bridge build that is broken against the current SDK. Feature flags gate
+# each ObjC class/method and are tuned in this manifest.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSArray",
+    "NSError",
+] }
+# ScreenCaptureKit classes live in the `SCStream` / `SCShareableContent` modules
+# (there is no per-class feature). `block2` gates the async completion-handler
+# methods; `dispatch2` gates `addStreamOutput:type:sampleHandlerQueue:error:`;
+# `objc2-core-media` pulls in `CMTime`/`CMSampleBuffer` used by the stream config
+# and the output callback.
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "dispatch2",
+    "objc2-core-media",
+    "SCStream",
+    "SCShareableContent",
+] }
+# `objc2-core-video` enables `CMSampleBuffer::image_buffer()`; `objc2` enables the
+# objc2 `RefEncode` impls so `CMSampleBuffer`/`CMTime` can appear in method sigs.
+objc2-core-media = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2",
+    "CMSampleBuffer",
+    "CMTime",
+    "objc2-core-video",
+] }
+# CV pixel-buffer lock/geometry FFI. `CVBase`/`CVReturn` are required by the
+# `CVPixelBufferLockBaseAddress` cfg gate.
+objc2-core-video = { version = "0.3", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
+] }
+dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
+block2 = "0.6"
+
+[[example]]
+name = "capture_smoke"
+path = "examples/capture_smoke.rs"

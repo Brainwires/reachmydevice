@@ -57,6 +57,29 @@ extension point without reformatting the wire.
 **Rationale.** Actively maintained, idiomatic, single consistent objc runtime.
 **Consequences.** Fallbacks if binding friction is high: `cidre` (ergonomic VT+SCK) or the `screencapturekit`
 crate. Validating compile-and-capture is the first spike task. *(Revisit if the primary proves impractical.)*
+**Update (capture built).** The `screencapturekit` convenience crate was tried first and **abandoned**: it
+has a *mandatory* (non-optional) `apple-metal` dependency whose build.rs runs a Swift bridge build that is
+broken against the current SDK (`MTLSamplerReductionMode` unresolved), and a mandatory Swift/Metal build
+chain is a CI/portability liability regardless. The capture backend is now the objc2 family as decided here:
+a custom `SCStreamOutput`/`SCStreamDelegate` via `define_class!`, `SCShareableContent`'s async fetch bridged
+to a channel, and CVPixelBuffer lock→copy→unlock. SCK's objc2 features gate by *module* (`SCStream`,
+`SCShareableContent`), not per class. See `crates/capture/src/mac.rs`.
+
+## ADR-0007 — Codec: software H.264 (openh264) first, VideoToolbox next
+
+**Decision.** The `codec` crate defines `Encoder`/`Decoder` traits and ships a **software H.264**
+backend (`openh264`, which builds from source — no system lib) for the Phase-1 pipeline, with
+`yuvutils-rs` for BGRA↔I420 conversion. A **VideoToolbox hardware** backend is the immediate next
+increment behind the same traits.
+**Context.** ADR-0005 targets VideoToolbox. The Phase-1 *goal*, though, is to prove the end-to-end
+pipeline (capture→encode→transport→decode→display) and measure latency; hardware encode is an
+optimization on top. The spec explicitly permits a software fallback (x264/openh264).
+**Rationale.** Software-first is the lower-risk sequencing: it removes heavy VideoToolbox FFI from the
+critical path to a *working* demo, and openh264 encode/decode is portable (also serves Linux/Windows in
+Phase 3). Once the pipeline is proven and measured, the VideoToolbox backend swaps in behind the trait
+to hit the 1080p30/<8 Mbps hardware target.
+**Consequences.** Higher CPU during the spike; a per-frame BGRA→I420 conversion. Both acceptable at
+720p/1080p30 for de-risking. VideoToolbox remains the macOS production target (tracked, not dropped).
 
 ## ADR-0006 — Reference-only asset: the browser `webrtc` demo
 
