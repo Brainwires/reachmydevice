@@ -10,3 +10,9 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 bytes.workspace = true
+# Software H.264 for the Phase-1 pipeline (ADR-0007). openh264-sys2 builds the
+# encoder from source, so no system codec library is required. VideoToolbox
+# hardware backend is the next increment behind the same traits.
+openh264 = "0.9"
+# Fast BGRA -> I420 (encoder input) and I420 -> BGRA (decoder output).
+yuvutils-rs = "0.8"
