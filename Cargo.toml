@@ -1,0 +1,59 @@
+# OpenReach — cross-platform self-hostable remote KVM.
+# Workspace root. See docs/architecture.md for the crate map.
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/transport",
+    "crates/capture",
+    "crates/codec",
+    "crates/input",
+    "crates/session",
+    "apps/host",
+    "apps/viewer",
+    "apps/signal-dev",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Brainwires/openreach"
+authors = ["Brainwires"]
+
+# Shared dependency versions. Individual crates opt in via `foo.workspace = true`.
+[workspace.dependencies]
+# async runtime + utils
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
+bytes = "1"
+futures = "0.3"
+# error handling
+anyhow = "1"
+thiserror = "2"
+# logging / diagnostics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+prost = "0.13"
+prost-build = "0.13"
+# internal crates
+openreach-protocol = { path = "crates/protocol" }
+openreach-transport = { path = "crates/transport" }
+openreach-capture = { path = "crates/capture" }
+openreach-codec = { path = "crates/codec" }
+openreach-input = { path = "crates/input" }
+openreach-session = { path = "crates/session" }
+
+# Fast, small release binaries; keep debug symbols off the hot path.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# The spike measures latency; a lightly-optimized dev profile keeps it honest
+# without paying full release build times during iteration.
+[profile.dev]
+opt-level = 1

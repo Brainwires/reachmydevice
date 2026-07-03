@@ -1,0 +1,17 @@
+[package]
+name = "openreach-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+openreach-protocol.workspace = true
+openreach-transport.workspace = true
+openreach-capture.workspace = true
+openreach-codec.workspace = true
+openreach-input.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -1,0 +1,15 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Local secrets / env
+.env
+*.local
+
+# OpenReach runtime artifacts
+/debug-bundles
+*.log
+
+# OS cruft
+.DS_Store
