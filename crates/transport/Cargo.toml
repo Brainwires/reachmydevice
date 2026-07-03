@@ -14,3 +14,9 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# WebRTC via the sans-IO `rtc` fork (ADR-0003). Pinned to the Brainwires fork
+# whose master carries GCC congestion control, jitter buffer, DTLS-restart, etc.
+# Everything we need (peer_connection, rtp, media, interceptor, sansio, sdp,
+# shared) is re-exported from the top-level `rtc` crate.
+rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", branch = "master", package = "rtc" }

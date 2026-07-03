@@ -10,3 +10,8 @@ openreach-protocol.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+# macOS input injection via CGEvent. `highsierra` enables new_scroll_event.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.25", features = ["highsierra"] }
+core-foundation = "0.10"
