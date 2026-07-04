@@ -73,11 +73,11 @@ pub struct WsAuth {
     token: String,
 }
 
-/// Inbound client frame.
+/// Inbound client frame (public for fuzz harnesses).
 #[derive(Deserialize)]
-struct RelayFrame {
-    to: String,
-    payload: serde_json::Value,
+pub struct RelayFrame {
+    pub to: String,
+    pub payload: serde_json::Value,
 }
 
 /// `GET /ws?token=...` — upgrade to the signaling socket after authenticating.

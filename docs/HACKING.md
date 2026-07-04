@@ -25,6 +25,8 @@ cargo build                       # build everything
 cargo test -p openreach-protocol  # test one crate
 cargo clippy --all-targets --all-features
 cargo fmt --all
+# Fuzzing (needs nightly + `cargo install cargo-fuzz`):
+cd fuzz && cargo +nightly fuzz run protocol_decode   # or filexfer_handle / relay_frame
 RUST_LOG=debug cargo run -p openreach-host    # run host with debug logs
 ```
 

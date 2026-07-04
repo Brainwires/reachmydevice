@@ -50,6 +50,14 @@ const SHAREABLE_CONTENT_TIMEOUT: Duration = Duration::from_secs(5);
 /// to absorb jitter between the capture queue and the encoder.
 const QUEUE_DEPTH: isize = 6;
 
+/// Upper bound on a single captured frame's byte length (guards the OS-supplied
+/// `bytes_per_row * height` against overflow/corruption before `from_raw_parts`).
+/// 512 MiB comfortably covers an 8K BGRA frame (~256 MiB) with headroom.
+const MAX_FRAME_BYTES: usize = 512 * 1024 * 1024;
+
+/// Upper bound on a single audio buffer's byte length (same rationale).
+const MAX_AUDIO_BYTES: usize = 8 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Custom SCStreamOutput / SCStreamDelegate class
 // ---------------------------------------------------------------------------
@@ -140,24 +148,37 @@ impl StreamOutput {
         let bytes_per_row = CVPixelBufferGetBytesPerRow(pixel_buffer);
         let base = CVPixelBufferGetBaseAddress(pixel_buffer);
 
-        let frame = if base.is_null() || width == 0 || height == 0 {
-            None
-        } else {
-            let len = bytes_per_row * height;
-            // SAFETY: `base` points to `bytes_per_row * height` bytes of locked,
-            // contiguous pixel data (single-plane BGRA); it stays valid until we
-            // unlock. We copy out immediately so the slice never outlives the lock.
-            let data = Bytes::copy_from_slice(unsafe {
-                std::slice::from_raw_parts(base.cast::<u8>(), len)
-            });
-            Some(Frame {
-                width: width as u32,
-                height: height as u32,
-                bytes_per_row: bytes_per_row as u32,
-                format: PixelFormat::Bgra,
-                data,
-                capture_ts_micros: monotonic_micros(),
-            })
+        // Guard the length arithmetic on OS-supplied geometry: reject null base,
+        // zero/absurd dimensions, and any `bytes_per_row * height` that overflows
+        // or exceeds a sane cap, so `from_raw_parts` can never be handed a bogus len.
+        let len = bytes_per_row.checked_mul(height);
+        let frame = match len {
+            Some(len)
+                if !base.is_null()
+                    && width != 0
+                    && height != 0
+                    && len != 0
+                    && len <= MAX_FRAME_BYTES =>
+            {
+                // SAFETY: `base` points to `len` (= bytes_per_row * height) bytes of
+                // locked, contiguous single-plane BGRA data, valid until we unlock
+                // below; we copy out immediately so the slice never outlives the lock.
+                let data = Bytes::copy_from_slice(unsafe {
+                    std::slice::from_raw_parts(base.cast::<u8>(), len)
+                });
+                Some(Frame {
+                    width: width as u32,
+                    height: height as u32,
+                    bytes_per_row: bytes_per_row as u32,
+                    format: PixelFormat::Bgra,
+                    data,
+                    capture_ts_micros: monotonic_micros(),
+                })
+            }
+            _ => {
+                tracing::debug!(width, height, bytes_per_row, "implausible frame geometry; dropped");
+                None
+            }
         };
 
         // SAFETY: matches the lock above with the same flags.
@@ -446,13 +467,17 @@ impl AudioStreamOutput {
         let _block = unsafe { Retained::from_raw(block_buffer) };
 
         let buffer = &abl.mBuffers[0];
-        if buffer.mData.is_null() || buffer.mDataByteSize == 0 {
+        let byte_size = buffer.mDataByteSize as usize;
+        // Reject a null pointer or an implausible byte size before deriving a
+        // slice length from the OS-supplied value.
+        if buffer.mData.is_null() || byte_size == 0 || byte_size > MAX_AUDIO_BYTES {
             return;
         }
         let channels = buffer.mNumberChannels.max(1) as usize;
-        let n_f32 = buffer.mDataByteSize as usize / std::mem::size_of::<f32>();
-        // SAFETY: `mData` points to `mDataByteSize` bytes of Float32 PCM, valid
-        // while `_block` is alive; we copy out immediately.
+        let n_f32 = byte_size / std::mem::size_of::<f32>();
+        // SAFETY: `mData` points to `mDataByteSize` (`byte_size`) bytes of Float32
+        // PCM, valid while `_block` is alive; `n_f32` floats fit within it. We copy
+        // out immediately, so the slice never outlives `_block`.
         let samples = unsafe { std::slice::from_raw_parts(buffer.mData.cast::<f32>(), n_f32) };
 
         let to_i16 = |s: f32| (s.clamp(-1.0, 1.0) * 32767.0) as i16;

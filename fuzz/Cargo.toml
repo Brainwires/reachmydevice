@@ -1,0 +1,43 @@
+[package]
+name = "openreach-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Detach from the parent workspace: fuzzing uses its own (nightly) toolchain.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+openreach-protocol = { path = "../crates/protocol" }
+openreach-session = { path = "../crates/session" }
+openreach-rendezvous = { path = "../apps/rendezvous" }
+
+[[bin]]
+name = "protocol_decode"
+path = "fuzz_targets/protocol_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "filexfer_handle"
+path = "fuzz_targets/filexfer_handle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "relay_frame"
+path = "fuzz_targets/relay_frame.rs"
+test = false
+doc = false
+bench = false
+
+# Faster fuzz builds; keep debug assertions on to catch UB-ish bugs.
+[profile.release]
+debug = 1

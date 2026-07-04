@@ -95,6 +95,32 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # Fuzz the untrusted-input parsers (protobuf decode, file-transfer state
+  # machine, signaling frame) for a short time each. Uses nightly + cargo-fuzz;
+  # the crates' stable `*_fuzz_smoke`/`fuzz_smoke` tests run in the normal jobs.
+  fuzz:
+    name: fuzz (short)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler nasm pkg-config \
+            libx11-dev libxext-dev libxtst-dev libxdamage-dev libxcb1-dev \
+            libxkbcommon-dev libwayland-dev libasound2-dev cmake
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run fuzz targets (60s each)
+        run: |
+          for t in protocol_decode filexfer_handle relay_frame; do
+            cargo fuzz run "$t" -- -max_total_time=60 -rss_limit_mb=4096
+          done
+
   # Windows: Phase 3 target. Build the portable, non-GUI crates only for now.
   build-windows:
     name: build (Windows) [Phase 3]
