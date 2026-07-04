@@ -55,6 +55,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/devices/{device_id}", delete(api::delete_device))
         .route("/ws", get(signaling::ws_handler))
+        // Stateless direct-pairing mailbox (no account) — QR/PAKE flow.
+        .route("/pair", get(signaling::ws_pair_handler))
         .layer(GovernorLayer { config: governor })
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
