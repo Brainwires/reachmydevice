@@ -14,12 +14,15 @@ All notable changes to OpenReach. Format loosely follows Keep a Changelog.
   Docker container behind a Cloudflare tunnel (or Caddy/ACME).
 
 ### Added
-- **Unattended-access gate**: a host with `require_authorization` accepts a
-  session only from a viewer that presents a valid ed25519 **access proof** whose
-  derived `device_id` is in the host's `authorized_keys`. Enabled by populating
-  `~/.config/openreach/authorized_keys` (or `OPENREACH_AUTHORIZED_KEYS`) or
-  `OPENREACH_REQUIRE_AUTH=1`; off by default for LAN/dev. Hello gains
-  `public_key`/`signature`; proof verification is unit-tested. See threat-model A4.
+- **Unattended-access gate (DTLS-channel-bound)**: a host with
+  `require_authorization` accepts a session only from a viewer that presents a
+  valid ed25519 **access proof** whose derived `device_id` is in the host's
+  `authorized_keys`. The proof is signed over the session's **DTLS fingerprint**,
+  so a malicious rendezvous that MITMs the transport is rejected (the fingerprint
+  it must present no longer matches the signed one) — closing the earlier
+  proof-replay residual. Enabled by populating `~/.config/openreach/authorized_keys`
+  (or `OPENREACH_AUTHORIZED_KEYS`) or `OPENREACH_REQUIRE_AUTH=1`; off for LAN/dev.
+  Accept/MITM-reject and proof-binding are unit-tested. See threat-model A4.
 - **`deploy/install-host.sh`**: one-command host install — builds, installs the
   binary + service unit (systemd/launchd), and seeds the config dir.
 - **Host tray companion** (`--features tray`, opt-in via `OPENREACH_TRAY=1`): a

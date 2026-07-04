@@ -17,7 +17,7 @@ use openreach_input as input;
 use openreach_protocol as proto;
 use openreach_protocol::pb::envelope::Payload;
 use openreach_transport::{
-    Transport, TransportConfig, TransportEvent, TransportRole, TransportSender,
+    SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole, TransportSender,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -75,17 +75,20 @@ struct AccessControl {
 }
 
 impl AccessControl {
-    /// Decide whether a `Hello` is authorized. Returns `Ok(())` to accept, or an
-    /// error whose message is the rejection reason.
-    fn authorize(&self, hello: &proto::Hello) -> Result<(), String> {
+    /// Decide whether a `Hello` is authorized. `binding` is the DTLS fingerprint
+    /// of the actual session (from the viewer's answer), which the proof must be
+    /// signed over — defeating proof-replay by a malicious relay. Returns `Ok`
+    /// to accept, or an error whose message is the rejection reason.
+    fn authorize(&self, hello: &proto::Hello, binding: &[u8]) -> Result<(), String> {
         if !self.require {
             return Ok(());
         }
         if hello.public_key.is_empty() || hello.signature.is_empty() {
             return Err("authorization required but viewer sent no identity proof".into());
         }
-        let device_id = crate::identity::verify_access_proof(&hello.public_key, &hello.signature)
-            .map_err(|e| format!("identity proof rejected: {e}"))?;
+        let device_id =
+            crate::identity::verify_access_proof(&hello.public_key, &hello.signature, binding)
+                .map_err(|e| format!("identity proof rejected: {e}"))?;
         if self.authorized.contains(&device_id) {
             Ok(())
         } else {
@@ -233,9 +236,18 @@ where
     tracing::info!(device = %cfg.device_name, "host ready; waiting for a viewer to connect");
     on_status(HostStatus::Waiting);
 
+    // The viewer's DTLS fingerprint (from its answer), used to bind its access
+    // proof to this session.
+    let mut remote_fingerprint: Option<String> = None;
+
     // Control / event loop: forward peer signaling in, react to transport events.
     loop {
         while let Some(msg) = signal.try_recv() {
+            if let SignalMsg::Answer(json) = &msg {
+                if let Some(fp) = crate::identity::fingerprint_from_session_json(json) {
+                    remote_fingerprint = Some(fp);
+                }
+            }
             transport.feed_signal(msg);
         }
         while let Ok(ev) = file_ev_rx.try_recv() {
@@ -272,6 +284,7 @@ where
                     &mut files,
                     &mut capture_ctl,
                     &access,
+                    remote_fingerprint.as_deref().unwrap_or_default().as_bytes(),
                     &cfg.device_name,
                 );
             }
@@ -411,6 +424,7 @@ fn handle_control(
     files: &mut FileTransfers,
     capture_ctl: &mut CaptureController,
     access: &AccessControl,
+    channel_binding: &[u8],
     device_name: &str,
 ) {
     let env = match proto::decode(bytes) {
@@ -432,7 +446,7 @@ fn handle_control(
             // 1. Protocol compatibility, then 2. unattended-access authorization.
             let decision = proto::check_compatibility(env.protocol_major)
                 .map_err(|e| format!("{e}"))
-                .and_then(|()| access.authorize(&h));
+                .and_then(|()| access.authorize(&h, channel_binding));
             match decision {
                 Ok(()) => {
                     let ack = proto::hello_ack_ok(device_name, 0);
@@ -481,5 +495,80 @@ fn log_file_event(ev: FileEvent) {
         }
         FileEvent::Failed { reason, .. } => tracing::warn!(%reason, "file transfer failed"),
         FileEvent::Progress { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AccessControl;
+    use crate::identity::DeviceIdentity;
+    use openreach_protocol as proto;
+    use std::collections::HashSet;
+
+    /// Build a viewer `Hello` carrying an access proof bound to `binding`.
+    fn authed_hello(id: &DeviceIdentity, binding: &[u8]) -> proto::Hello {
+        let env = proto::hello_authenticated(
+            "viewer",
+            proto::Role::Viewer,
+            0,
+            id.public_key_bytes().to_vec(),
+            id.access_proof(binding).to_vec(),
+        );
+        match env.payload.unwrap() {
+            proto::pb::envelope::Payload::Hello(h) => h,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn authorize_accepts_bound_proof_and_rejects_mitm() {
+        let id = DeviceIdentity::generate().unwrap();
+        let fp = b"SHA-256 AA:BB:CC";
+        let hello = authed_hello(&id, fp);
+
+        let mut authorized = HashSet::new();
+        authorized.insert(id.device_id());
+        let access = AccessControl {
+            require: true,
+            authorized,
+        };
+
+        // Correct device + matching session fingerprint → accepted.
+        assert!(access.authorize(&hello, fp).is_ok());
+
+        // Same proof but a DIFFERENT fingerprint (a relay that MITM'd the DTLS
+        // and had to present its own cert) → rejected.
+        assert!(access.authorize(&hello, b"SHA-256 99:88:77").is_err());
+    }
+
+    #[test]
+    fn authorize_rejects_unknown_device_and_missing_proof() {
+        let id = DeviceIdentity::generate().unwrap();
+        let fp = b"SHA-256 AA:BB:CC";
+        let access = AccessControl {
+            require: true,
+            authorized: HashSet::new(), // empty → nobody authorized
+        };
+        assert!(access.authorize(&authed_hello(&id, fp), fp).is_err());
+
+        // No proof at all is rejected when authorization is required.
+        let bare = match proto::hello("v", proto::Role::Viewer, 0).payload.unwrap() {
+            proto::pb::envelope::Payload::Hello(h) => h,
+            _ => unreachable!(),
+        };
+        assert!(access.authorize(&bare, fp).is_err());
+    }
+
+    #[test]
+    fn authorize_is_open_when_not_required() {
+        let access = AccessControl {
+            require: false,
+            authorized: HashSet::new(),
+        };
+        let bare = match proto::hello("v", proto::Role::Viewer, 0).payload.unwrap() {
+            proto::pb::envelope::Payload::Hello(h) => h,
+            _ => unreachable!(),
+        };
+        assert!(access.authorize(&bare, b"").is_ok());
     }
 }

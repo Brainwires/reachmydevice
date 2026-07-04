@@ -61,17 +61,18 @@ trust boundaries, the guarantees the design provides, and residual risks.
   authenticates the signaling channel, and the DTLS handshake + TOFU authenticate the
   peer. Every active session shows a **visible host indicator** (`★ REMOTE SESSION
   ACTIVE ★`; tray state in the UI).
-- **Unattended-access gate (implemented):** a host with `require_authorization`
-  accepts a session only from a viewer whose `Hello` carries a valid **access proof**
-  — an ed25519 signature over `"openreach-access-proof-v1" || public_key` — *and* whose
+- **Unattended-access gate (implemented, channel-bound):** a host with
+  `require_authorization` accepts a session only from a viewer whose `Hello` carries a
+  valid **access proof** — an ed25519 signature over
+  `"openreach-access-proof-v2" || public_key || 0x00 || dtls_fingerprint` — *and* whose
   derived `device_id` is in the host's `authorized_keys` list. The signature proves the
-  viewer holds the private key for the claimed identity (not merely a spoofable id
-  claim). Enabled by placing device_ids in `~/.config/openreach/authorized_keys` (or
+  viewer holds the private key for the claimed identity (not a spoofable id claim), and
+  the **DTLS-fingerprint binding ties the proof to this exact session**: a malicious
+  rendezvous that MITMs the DTLS must present its own certificate to the host, so the
+  fingerprint the host verifies no longer matches the one the viewer signed, and the
+  proof is rejected (see `host::tests::authorize_accepts_bound_proof_and_rejects_mitm`).
+  Enabled by placing device_ids in `~/.config/openreach/authorized_keys` (or
   `OPENREACH_AUTHORIZED_KEYS`), or with `OPENREACH_REQUIRE_AUTH=1`.
-- **Residual:** the proof is not yet bound to the specific DTLS session, so a fully
-  malicious rendezvous could in principle pair a captured proof with its own DTLS
-  session to the host (hardening item 1). The relay still cannot read or inject into the
-  E2EE media/data, and unauthorized *devices* are already excluded.
 
 ### A5. Stolen device / extracted identity key
 - **Mitigation:** the identity private key is stored `0600` in the user config dir.
@@ -98,8 +99,11 @@ trust boundaries, the guarantees the design provides, and residual risks.
   registration) on a maintained VPS.
 
 ## Open hardening items (tracked)
-1. Bind the DTLS fingerprint to the signed device identity — defeats A2 first-connect
-   MITM *and* fully closes the A4 residual (proof-replay by a malicious rendezvous).
+1. Extend the DTLS-fingerprint binding (already used for A4 unattended access) to the
+   *interactive* first-connect path so A2's manual SAS/TOFU is backstopped automatically.
 2. Passphrase-wrap the identity key at rest (A5).
 3. Optional per-host password as a second factor alongside the authorized-key gate.
+
+*(Resolved: the A4 unattended-access proof is now bound to the session DTLS fingerprint,
+closing the prior proof-replay residual — see A4.)*
 4. Account lockout / optional MFA on the rendezvous (A3).

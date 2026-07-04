@@ -14,16 +14,22 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// Domain-separation tag for the unattended-access proof-of-possession. The
-/// viewer signs `TAG || public_key`; verifying it under the presented public key
-/// proves the sender holds the matching private key (and thus owns the
-/// `device_id`, which is a hash of that public key).
-pub const AUTH_PROOF_TAG: &[u8] = b"openreach-access-proof-v1";
+/// viewer signs `TAG || public_key || 0x00 || channel_binding`; verifying it
+/// under the presented public key proves the sender holds the matching private
+/// key (and thus owns the `device_id`, a hash of that public key), and the
+/// `channel_binding` (the session's DTLS certificate fingerprint) ties the proof
+/// to *this* connection so a malicious relay cannot replay it into another.
+pub const AUTH_PROOF_TAG: &[u8] = b"openreach-access-proof-v2";
 
-/// The message a device signs to prove possession of its key for host access.
-pub fn access_proof_message(public_key: &[u8]) -> Vec<u8> {
-    let mut m = Vec::with_capacity(AUTH_PROOF_TAG.len() + public_key.len());
+/// The message a device signs to prove key possession for host access, bound to
+/// a channel value. `binding` is the DTLS fingerprint of this session; pass an
+/// empty slice only for unauthenticated LAN/dev flows.
+pub fn access_proof_message(public_key: &[u8], binding: &[u8]) -> Vec<u8> {
+    let mut m = Vec::with_capacity(AUTH_PROOF_TAG.len() + public_key.len() + binding.len() + 1);
     m.extend_from_slice(AUTH_PROOF_TAG);
     m.extend_from_slice(public_key);
+    m.push(0); // separator so key/binding can't be shifted into each other
+    m.extend_from_slice(binding);
     m
 }
 
@@ -34,9 +40,13 @@ pub fn device_id_from_public_key(public_key: &[u8]) -> String {
     hex::encode(h.finalize())[..32].to_string()
 }
 
-/// Verify an access proof: `signature` over [`access_proof_message`] under
-/// `public_key`. Returns the proven `device_id` on success.
-pub fn verify_access_proof(public_key: &[u8], signature: &[u8]) -> anyhow::Result<String> {
+/// Verify an access proof: `signature` over [`access_proof_message`] (with
+/// `binding`) under `public_key`. Returns the proven `device_id` on success.
+pub fn verify_access_proof(
+    public_key: &[u8],
+    signature: &[u8],
+    binding: &[u8],
+) -> anyhow::Result<String> {
     let key_bytes: [u8; 32] = public_key
         .try_into()
         .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))?;
@@ -45,14 +55,45 @@ pub fn verify_access_proof(public_key: &[u8], signature: &[u8]) -> anyhow::Resul
         .try_into()
         .map_err(|_| anyhow::anyhow!("signature must be 64 bytes"))?;
     let sig = Signature::from_bytes(&sig_bytes);
-    vk.verify(&access_proof_message(public_key), &sig)
+    vk.verify(&access_proof_message(public_key, binding), &sig)
         .map_err(|e| anyhow::anyhow!("signature invalid: {e}"))?;
     Ok(device_id_from_public_key(public_key))
 }
 
+/// Extract the DTLS certificate fingerprint from an SDP blob (the
+/// `a=fingerprint:<hash> <value>` attribute), normalized to uppercase for a
+/// stable channel-binding value. Returns `None` if absent.
+pub fn dtls_fingerprint_from_sdp(sdp: &str) -> Option<String> {
+    for line in sdp.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("a=fingerprint:") {
+            // rest = "sha-256 AB:CD:...". Keep hash + value, normalized.
+            return Some(rest.trim().to_ascii_uppercase());
+        }
+    }
+    None
+}
+
+/// Extract the DTLS fingerprint from a signaling payload — the JSON of an
+/// `RTCSessionDescription` (`{"type":..,"sdp":".."}`) carried in a `SignalMsg`.
+pub fn fingerprint_from_session_json(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    dtls_fingerprint_from_sdp(v.get("sdp")?.as_str()?)
+}
+
 /// A device's long-lived identity keypair.
+#[derive(Clone)]
 pub struct DeviceIdentity {
     signing: SigningKey,
+}
+
+impl std::fmt::Debug for DeviceIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the private key; the public device_id is safe.
+        f.debug_struct("DeviceIdentity")
+            .field("device_id", &self.device_id())
+            .finish()
+    }
 }
 
 impl DeviceIdentity {
@@ -81,9 +122,10 @@ impl DeviceIdentity {
     }
 
     /// Produce the unattended-access proof: a signature over
-    /// [`access_proof_message`] of this device's own public key.
-    pub fn access_proof(&self) -> [u8; 64] {
-        self.sign(&access_proof_message(&self.public_key_bytes()))
+    /// [`access_proof_message`] of this device's own public key, bound to the
+    /// given channel value (this session's DTLS fingerprint; empty for LAN/dev).
+    pub fn access_proof(&self, binding: &[u8]) -> [u8; 64] {
+        self.sign(&access_proof_message(&self.public_key_bytes(), binding))
     }
 
     /// SHA-256 fingerprint (hex) of the public key.
@@ -224,20 +266,35 @@ mod tests {
     fn access_proof_verifies_and_binds_device_id() {
         let id = DeviceIdentity::generate().unwrap();
         let pk = id.public_key_bytes();
-        let proof = id.access_proof();
-        // A valid proof yields the device's own id.
-        let got = verify_access_proof(&pk, &proof).unwrap();
+        let binding = b"sha-256 AA:BB:CC";
+        let proof = id.access_proof(binding);
+        // A valid proof (same binding) yields the device's own id.
+        let got = verify_access_proof(&pk, &proof, binding).unwrap();
         assert_eq!(got, id.device_id());
         assert_eq!(got, device_id_from_public_key(&pk));
+
+        // A DIFFERENT channel binding (relay-swapped DTLS fingerprint) fails —
+        // this is what defeats proof-replay by a malicious rendezvous.
+        assert!(verify_access_proof(&pk, &proof, b"sha-256 99:88:77").is_err());
 
         // A tampered signature is rejected.
         let mut bad = proof;
         bad[0] ^= 0xFF;
-        assert!(verify_access_proof(&pk, &bad).is_err());
+        assert!(verify_access_proof(&pk, &bad, binding).is_err());
 
         // Another device's key doesn't validate this signature.
         let other = DeviceIdentity::generate().unwrap();
-        assert!(verify_access_proof(&other.public_key_bytes(), &proof).is_err());
+        assert!(verify_access_proof(&other.public_key_bytes(), &proof, binding).is_err());
+    }
+
+    #[test]
+    fn parses_dtls_fingerprint_from_sdp() {
+        let sdp = "v=0\r\na=group:BUNDLE 0\r\na=fingerprint:sha-256 ab:cd:ef\r\nm=video\r\n";
+        assert_eq!(
+            dtls_fingerprint_from_sdp(sdp).as_deref(),
+            Some("SHA-256 AB:CD:EF")
+        );
+        assert_eq!(dtls_fingerprint_from_sdp("v=0\r\n"), None);
     }
 
     #[test]

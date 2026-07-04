@@ -13,7 +13,7 @@ use openreach_codec as codec;
 use openreach_protocol as proto;
 use openreach_protocol::pb::envelope::Payload;
 use openreach_transport::{
-    Transport, TransportConfig, TransportEvent, TransportRole, TransportSender,
+    SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole, TransportSender,
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -30,12 +30,11 @@ pub struct ViewerConfig {
     pub bind_addr: String,
     /// Play host audio if the host streams it. Off by default.
     pub enable_audio: bool,
-    /// This device's 32-byte ed25519 public key, for unattended-access proof.
-    /// Empty for anonymous (LAN/dev) connections.
-    pub identity_public_key: Vec<u8>,
-    /// Signature over the access-proof message (see `identity::access_proof`).
-    /// Empty when `identity_public_key` is empty.
-    pub identity_proof: Vec<u8>,
+    /// This device's identity. When present, the viewer proves possession of it
+    /// to hosts that enforce unattended access — the proof is signed at connect
+    /// time and bound to this session's DTLS fingerprint. `None` for anonymous
+    /// (LAN/dev) connections.
+    pub identity: Option<Arc<crate::identity::DeviceIdentity>>,
 }
 
 impl Default for ViewerConfig {
@@ -45,8 +44,7 @@ impl Default for ViewerConfig {
             ice_servers: Vec::new(),
             bind_addr: "0.0.0.0:0".to_string(),
             enable_audio: false,
-            identity_public_key: Vec::new(),
-            identity_proof: Vec::new(),
+            identity: None,
         }
     }
 }
@@ -144,8 +142,7 @@ impl ViewerSession {
         {
             let device_name = cfg.device_name.clone();
             let enable_audio = cfg.enable_audio;
-            let id_pubkey = cfg.identity_public_key.clone();
-            let id_proof = cfg.identity_proof.clone();
+            let identity = cfg.identity.clone();
             std::thread::Builder::new()
                 .name("openreach-viewer-pump".into())
                 .spawn(move || {
@@ -164,6 +161,9 @@ impl ViewerSession {
                     } else {
                         None
                     };
+                    // Our own DTLS fingerprint, learned from the answer we emit;
+                    // signed into the access proof to bind it to this session.
+                    let mut local_fingerprint: Option<String> = None;
                     loop {
                         while let Some(msg) = signal.try_recv() {
                             transport.feed_signal(msg);
@@ -181,18 +181,30 @@ impl ViewerSession {
                         };
                         match ev {
                             TransportEvent::LocalSignal(msg) => {
+                                // Learn our own DTLS fingerprint from the answer we send.
+                                if let SignalMsg::Answer(json) = &msg {
+                                    if let Some(fp) =
+                                        crate::identity::fingerprint_from_session_json(json)
+                                    {
+                                        local_fingerprint = Some(fp);
+                                    }
+                                }
                                 let _ = signal.send(&msg);
                             }
                             TransportEvent::Connected => {
                                 // Introduce ourselves; host validates our version and
-                                // (if it enforces unattended access) our identity proof.
-                                let hello = if !id_pubkey.is_empty() && !id_proof.is_empty() {
+                                // (if it enforces unattended access) our identity proof,
+                                // which is bound to this session's DTLS fingerprint.
+                                let hello = if let Some(id) = identity.as_ref() {
+                                    let binding =
+                                        local_fingerprint.clone().unwrap_or_default();
+                                    let proof = id.access_proof(binding.as_bytes());
                                     proto::hello_authenticated(
                                         &device_name,
                                         proto::Role::Viewer,
                                         0,
-                                        id_pubkey.clone(),
-                                        id_proof.clone(),
+                                        id.public_key_bytes().to_vec(),
+                                        proof.to_vec(),
                                     )
                                 } else {
                                     proto::hello(&device_name, proto::Role::Viewer, 0)

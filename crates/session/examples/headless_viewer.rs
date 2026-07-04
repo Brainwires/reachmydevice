@@ -56,10 +56,8 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_default(),
         bind_addr: std::env::var("OPENREACH_BIND").unwrap_or_else(|_| "0.0.0.0:0".into()),
         enable_audio: std::env::var("OPENREACH_AUDIO").is_ok(),
-        // Present an access proof if an identity file is configured (so this can
-        // test a host with unattended-access enforcement).
-        identity_public_key: identity.as_ref().map(|i| i.public_key_bytes().to_vec()).unwrap_or_default(),
-        identity_proof: identity.as_ref().map(|i| i.access_proof().to_vec()).unwrap_or_default(),
+        // Present an identity if configured (to test unattended-access enforcement).
+        identity: identity.map(std::sync::Arc::new),
     };
 
     let signaling = build_signaling()?;
