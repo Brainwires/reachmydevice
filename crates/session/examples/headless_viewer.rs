@@ -71,6 +71,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 ViewerUpdate::Disconnected => eprintln!("[headless] disconnected"),
                 ViewerUpdate::Latency(rtt) => eprintln!("[headless] rtt={rtt:?}"),
+                ViewerUpdate::File(ev) => eprintln!("[headless] file {ev:?}"),
             }
         }
         std::thread::sleep(Duration::from_millis(5));

@@ -31,8 +31,8 @@ use openreach_protocol::input_event::Event as InputEvent;
 use openreach_protocol::{KeyEvent, MouseButton, MouseMove, MouseScroll};
 use openreach_session::rendezvous::RendezvousClient;
 use openreach_session::{
-    identity::known_peers, AccountClient, DeviceIdentity, DeviceInfo, SignalClient, Signaling,
-    ViewerConfig, ViewerSession, ViewerUpdate,
+    identity::known_peers, AccountClient, DeviceIdentity, DeviceInfo, FileEvent, SignalClient,
+    Signaling, ViewerConfig, ViewerSession, ViewerUpdate,
 };
 
 use egui_wgpu::ScreenDescriptor;
@@ -167,6 +167,8 @@ struct App {
     // in-session UI
     view_only: bool,
     hud_visible: bool,
+    /// Latest file-transfer status line, shown in the HUD.
+    file_status: Option<String>,
 
     // input bookkeeping
     /// Current keyboard modifier bitmask (`openreach_protocol::modifiers`).
@@ -245,6 +247,7 @@ impl App {
             last_ping: Instant::now(),
             view_only: false,
             hud_visible: true,
+            file_status: None,
             modifiers: 0,
             last_cursor: (0.0, 0.0),
             job: None,
@@ -306,6 +309,7 @@ impl App {
         self.latency = None;
         self.view_only = false;
         self.hud_visible = true;
+        self.file_status = None;
         // Drop fullscreen so the user isn't stranded.
         if let Some(win) = &self.window {
             win.set_fullscreen(None);
@@ -344,6 +348,27 @@ impl App {
             }
             ViewerUpdate::Latency(rtt) => {
                 self.latency = Some(rtt);
+            }
+            ViewerUpdate::File(ev) => {
+                self.file_status = Some(match ev {
+                    FileEvent::Offered { name, size, .. } => {
+                        format!("receiving {name} ({})", human_bytes(size))
+                    }
+                    FileEvent::Progress {
+                        transferred, total, ..
+                    } => {
+                        let pct = transferred
+                            .checked_mul(100)
+                            .and_then(|v| v.checked_div(total))
+                            .unwrap_or(0);
+                        format!("transfer {pct}%")
+                    }
+                    FileEvent::Completed { path, .. } => match path {
+                        Some(p) => format!("received {}", p.display()),
+                        None => "file sent".into(),
+                    },
+                    FileEvent::Failed { reason, .. } => format!("transfer failed: {reason}"),
+                });
             }
             ViewerUpdate::Disconnected => {
                 if self.screen == Screen::InSession {
@@ -930,6 +955,13 @@ impl App {
                 ui.checkbox(&mut self.view_only, "View only");
                 ui.separator();
 
+                // File transfer: status + hint (drop a file on the window to send).
+                match &self.file_status {
+                    Some(s) => ui.label(format!("📁 {s}")),
+                    None => ui.weak("drop a file to send"),
+                };
+                ui.separator();
+
                 let is_fs = self.window.as_ref().and_then(|w| w.fullscreen()).is_some();
                 if ui
                     .button(if is_fs { "Windowed" } else { "Fullscreen" })
@@ -1046,6 +1078,19 @@ impl ApplicationHandler for App {
                 window.request_redraw();
             }
             WindowEvent::RedrawRequested => self.render(),
+
+            // Drop a file on the window to send it to the host.
+            WindowEvent::DroppedFile(path) => {
+                if let Some(session) = self.session.as_ref() {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.file_status = Some(format!("sending {name}…"));
+                    session.send_file(path);
+                    window.request_redraw();
+                }
+            }
 
             // --- input translation (viewer -> host) ------------------------
             WindowEvent::CursorMoved { position, .. } => {
@@ -1188,6 +1233,22 @@ fn config_dir() -> PathBuf {
         return PathBuf::from(home).join(".config").join("openreach");
     }
     PathBuf::from(".openreach")
+}
+
+/// Human-readable byte count (e.g. `3.2 MB`).
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
 }
 
 /// Truncate a long hex id to `head…tail` for display.

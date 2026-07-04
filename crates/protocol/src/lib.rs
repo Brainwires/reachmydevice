@@ -149,6 +149,63 @@ pub fn clipboard_text(text: impl Into<String>, seq: u64) -> Envelope {
     }))
 }
 
+/// Announce a file transfer. The receiver replies with [`file_ack`] at the
+/// offset to start from (0 for a fresh transfer, `>0` to resume a partial one).
+pub fn file_offer(
+    transfer_id: impl Into<String>,
+    name: impl Into<String>,
+    size: u64,
+    mime: impl Into<String>,
+) -> Envelope {
+    envelope(pb::envelope::Payload::FileOffer(FileOffer {
+        transfer_id: transfer_id.into(),
+        name: name.into(),
+        size,
+        mime: mime.into(),
+    }))
+}
+
+/// A chunk of file data at `offset` within the transfer.
+pub fn file_chunk(transfer_id: impl Into<String>, offset: u64, data: Vec<u8>) -> Envelope {
+    envelope(pb::envelope::Payload::FileChunk(FileChunk {
+        transfer_id: transfer_id.into(),
+        offset,
+        data,
+    }))
+}
+
+/// Flow-control / resume ack: "I have up to `offset` bytes; send from there."
+pub fn file_ack(transfer_id: impl Into<String>, offset: u64) -> Envelope {
+    envelope(pb::envelope::Payload::FileAck(FileAck {
+        transfer_id: transfer_id.into(),
+        offset,
+    }))
+}
+
+/// Signal that all bytes have been sent, with a SHA-256 prefix for an integrity
+/// check. `sha256_prefix` is the first 8 bytes of the digest as a little-endian
+/// `u64`.
+pub fn file_complete(transfer_id: impl Into<String>, sha256_prefix: u64) -> Envelope {
+    envelope(pb::envelope::Payload::FileComplete(FileComplete {
+        transfer_id: transfer_id.into(),
+        sha256_prefix,
+    }))
+}
+
+/// Abort a transfer.
+pub fn file_cancel(transfer_id: impl Into<String>, reason: impl Into<String>) -> Envelope {
+    envelope(pb::envelope::Payload::FileCancel(FileCancel {
+        transfer_id: transfer_id.into(),
+        reason: reason.into(),
+    }))
+}
+
+/// The first 8 bytes of a SHA-256 digest as a little-endian `u64` — the quick
+/// integrity check carried in [`FileComplete::sha256_prefix`].
+pub fn sha256_prefix(digest: &[u8; 32]) -> u64 {
+    u64::from_le_bytes(digest[..8].try_into().unwrap())
+}
+
 /// Request an IDR/keyframe from the host.
 pub fn request_keyframe() -> Envelope {
     envelope(pb::envelope::Payload::RequestKeyframe(RequestKeyframe {}))

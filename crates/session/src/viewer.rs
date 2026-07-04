@@ -6,6 +6,7 @@
 //! for decoded frames and connection state, and calls [`ViewerSession::send_input`].
 
 use crate::clipboard::ClipboardSync;
+use crate::filexfer::{FileEvent, FileTransferConfig, FileTransfers};
 use crate::signal::Signaling;
 use bytes::Bytes;
 use openreach_codec as codec;
@@ -14,7 +15,9 @@ use openreach_protocol::pb::envelope::Payload;
 use openreach_transport::{
     Transport, TransportConfig, TransportEvent, TransportRole, TransportSender,
 };
-use std::sync::mpsc::{self, Receiver};
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Viewer configuration.
@@ -47,12 +50,16 @@ pub enum ViewerUpdate {
     Paired(bool),
     /// Round-trip latency measured from a data-channel `Ping`/`Pong` exchange.
     Latency(Duration),
+    /// A file-transfer event (incoming offer, progress, completion, failure).
+    File(FileEvent),
 }
 
 /// Running viewer session.
 pub struct ViewerSession {
     sender: TransportSender,
     updates: Receiver<ViewerUpdate>,
+    /// Queue a local file to send to the host.
+    file_cmd: Sender<PathBuf>,
 }
 
 impl ViewerSession {
@@ -108,6 +115,18 @@ impl ViewerSession {
             ClipboardSync::spawn(move |env| sender.send_data(Bytes::from(proto::encode(&env))))
         };
 
+        // File transfer: manager lives in the pump thread. Sends are queued from
+        // the UI thread via `file_cmd`; events surface as `ViewerUpdate::File`.
+        let (file_cmd_tx, file_cmd_rx) = mpsc::channel::<PathBuf>();
+        let (file_ev_tx, file_ev_rx) = mpsc::channel::<FileEvent>();
+        let mut files = {
+            let sender = transport.sender();
+            let out = Arc::new(move |env: proto::Envelope| {
+                sender.send_data(Bytes::from(proto::encode(&env)))
+            });
+            FileTransfers::new(out, file_ev_tx, FileTransferConfig::default())
+        };
+
         // Pump thread: owns the transport, bridges signaling, routes media to decode.
         {
             let device_name = cfg.device_name.clone();
@@ -117,6 +136,14 @@ impl ViewerSession {
                     loop {
                         while let Some(msg) = signal.try_recv() {
                             transport.feed_signal(msg);
+                        }
+                        while let Ok(path) = file_cmd_rx.try_recv() {
+                            if let Err(e) = files.send_file(path) {
+                                tracing::warn!(error=%e, "failed to start file send");
+                            }
+                        }
+                        while let Ok(ev) = file_ev_rx.try_recv() {
+                            let _ = updates_tx.send(ViewerUpdate::File(ev));
                         }
                         let Some(ev) = transport.recv_event_timeout(Duration::from_millis(4)) else {
                             continue;
@@ -158,7 +185,11 @@ impl ViewerSession {
                                         Some(Payload::Clipboard(update)) => {
                                             clipboard.apply_remote(update);
                                         }
-                                        _ => {}
+                                        Some(p) => {
+                                            // File-transfer payloads route to the manager.
+                                            files.handle(&p);
+                                        }
+                                        None => {}
                                     }
                                 }
                             }
@@ -167,12 +198,22 @@ impl ViewerSession {
                 })?;
         }
 
-        Ok(Self { sender, updates })
+        Ok(Self {
+            sender,
+            updates,
+            file_cmd: file_cmd_tx,
+        })
     }
 
     /// Non-blocking poll for the next UI update.
     pub fn poll_update(&self) -> Option<ViewerUpdate> {
         self.updates.try_recv().ok()
+    }
+
+    /// Queue a local file to send to the host. Progress and completion arrive as
+    /// [`ViewerUpdate::File`].
+    pub fn send_file(&self, path: PathBuf) {
+        let _ = self.file_cmd.send(path);
     }
 
     /// Send an input event to the host over the control channel.

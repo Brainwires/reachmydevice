@@ -10,6 +10,7 @@
 
 pub mod account;
 pub mod clipboard;
+pub mod filexfer;
 pub mod host;
 pub mod identity;
 pub mod rendezvous;
@@ -17,6 +18,7 @@ pub mod signal;
 pub mod viewer;
 
 pub use account::{AccountClient, DeviceInfo};
+pub use filexfer::{FileEvent, FileTransferConfig};
 pub use host::{run_host, HostConfig};
 pub use identity::DeviceIdentity;
 pub use signal::{SignalClient, Signaling};

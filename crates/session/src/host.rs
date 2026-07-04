@@ -6,6 +6,7 @@
 //! version, injects the viewer's input, and answers Ping with Pong.
 
 use crate::clipboard::ClipboardSync;
+use crate::filexfer::{FileEvent, FileTransferConfig, FileTransfers};
 use crate::signal::Signaling;
 use bytes::Bytes;
 use openreach_capture as capture;
@@ -109,12 +110,26 @@ pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<(
         ClipboardSync::spawn(move |env| sender.send_data(Bytes::from(proto::encode(&env))))
     };
 
+    // File transfer (receive side; files land in the download dir). Events are
+    // logged since the host is headless.
+    let (file_ev_tx, file_ev_rx) = mpsc::channel();
+    let mut files = {
+        let sender = transport.sender();
+        let out = Arc::new(move |env: proto::Envelope| {
+            sender.send_data(Bytes::from(proto::encode(&env)))
+        });
+        FileTransfers::new(out, file_ev_tx, FileTransferConfig::default())
+    };
+
     tracing::info!(device = %cfg.device_name, "host ready; waiting for a viewer to connect");
 
     // Control / event loop: forward peer signaling in, react to transport events.
     loop {
         while let Some(msg) = signal.try_recv() {
             transport.feed_signal(msg);
+        }
+        while let Ok(ev) = file_ev_rx.try_recv() {
+            log_file_event(ev);
         }
         // Block briefly on transport events so the loop isn't a busy-spin.
         let Some(ev) = transport.recv_event_timeout(Duration::from_millis(4)) else {
@@ -137,7 +152,14 @@ pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<(
                 connected.store(false, Ordering::Relaxed);
             }
             TransportEvent::Data(bytes) => {
-                handle_control(&bytes, &transport, &mut injector, &clipboard, &cfg.device_name);
+                handle_control(
+                    &bytes,
+                    &transport,
+                    &mut injector,
+                    &clipboard,
+                    &mut files,
+                    &cfg.device_name,
+                );
             }
             TransportEvent::Video { .. } => {} // host does not receive video
         }
@@ -197,11 +219,13 @@ fn spawn_encode_thread(
 }
 
 /// Handle one control-channel message from the viewer.
+#[allow(clippy::too_many_arguments)]
 fn handle_control(
     bytes: &[u8],
     transport: &Transport,
     injector: &mut Option<Box<dyn input::Injector>>,
     clipboard: &ClipboardSync,
+    files: &mut FileTransfers,
     device_name: &str,
 ) {
     let env = match proto::decode(bytes) {
@@ -211,8 +235,15 @@ fn handle_control(
             return;
         }
     };
-    match env.payload {
-        Some(Payload::Hello(h)) => match proto::check_compatibility(env.protocol_major) {
+    let Some(payload) = env.payload else {
+        return;
+    };
+    // File-transfer payloads are handled by the transfer manager.
+    if files.handle(&payload) {
+        return;
+    }
+    match payload {
+        Payload::Hello(h) => match proto::check_compatibility(env.protocol_major) {
             Ok(()) => {
                 let ack = proto::hello_ack_ok(device_name, 0);
                 transport.send_data(Bytes::from(proto::encode(&ack)));
@@ -224,18 +255,35 @@ fn handle_control(
                 tracing::warn!(error=%e, "rejected incompatible viewer");
             }
         },
-        Some(Payload::Input(ie)) => {
+        Payload::Input(ie) => {
             if let (Some(inj), Some(ev)) = (injector.as_deref_mut(), ie.event) {
                 if let Err(e) = inj.inject(&ev) {
                     tracing::trace!(error=%e, "inject failed");
                 }
             }
         }
-        Some(Payload::Ping(p)) => {
+        Payload::Ping(p) => {
             let pong = proto::pong(p.t_micros);
             transport.send_data(Bytes::from(proto::encode(&pong)));
         }
-        Some(Payload::Clipboard(update)) => clipboard.apply_remote(update),
+        Payload::Clipboard(update) => clipboard.apply_remote(update),
         _ => {}
+    }
+}
+
+/// Log a file-transfer event (the host is headless; the viewer surfaces these
+/// in its UI).
+fn log_file_event(ev: FileEvent) {
+    match ev {
+        FileEvent::Offered { name, size, .. } => {
+            tracing::info!(%name, size, "incoming file")
+        }
+        FileEvent::Completed { path, .. } => {
+            if let Some(p) = path {
+                tracing::warn!(path = %p.display(), "file received");
+            }
+        }
+        FileEvent::Failed { reason, .. } => tracing::warn!(%reason, "file transfer failed"),
+        FileEvent::Progress { .. } => {}
     }
 }
