@@ -21,9 +21,27 @@ use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt, ImageFormat};
 
+/// Warn honestly when running under Wayland: X11 capture works via XWayland but
+/// may miss native-Wayland windows/overlays; full Wayland needs the PipeWire
+/// portal backend (roadmap). Silent partial capture would be worse than a note.
+fn warn_if_wayland() {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        tracing::warn!(
+            "WAYLAND_DISPLAY is set: capturing via XWayland (X11). Native-Wayland \
+             surfaces may not be captured; a PipeWire/xdg-desktop-portal backend is \
+             the roadmap for full Wayland support."
+        );
+    }
+}
+
 /// Enumerate X screens as displays.
 pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
-    let (conn, _) = x11rb::connect(None).map_err(|e| CaptureError::Backend(format!("{e}")))?;
+    warn_if_wayland();
+    let (conn, _) = x11rb::connect(None).map_err(|e| {
+        CaptureError::Backend(format!(
+            "{e} (no reachable X server; under Wayland ensure XWayland is running)"
+        ))
+    })?;
     Ok(conn
         .setup()
         .roots
