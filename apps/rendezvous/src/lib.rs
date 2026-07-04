@@ -44,6 +44,7 @@ pub fn router(state: AppState) -> Router {
     );
 
     Router::new()
+        .route("/", get(root))
         .route("/health", get(health))
         .route("/api/register", post(api::register_user))
         .route(
@@ -66,6 +67,24 @@ pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> anyhow
     )
     .await?;
     Ok(())
+}
+
+/// Friendly root landing so hitting the domain in a browser confirms it's alive
+/// (this is an API/WebSocket service — there is no web UI).
+async fn root() -> axum::response::Html<&'static str> {
+    axum::response::Html(
+        "<!doctype html><meta charset=utf-8><title>OpenReach rendezvous</title>\
+         <body style=\"font-family:system-ui;max-width:40rem;margin:4rem auto;padding:0 1rem\">\
+         <h1>OpenReach rendezvous</h1>\
+         <p>Self-hostable signaling + device registry. This is an API / WebSocket \
+         service — there is no web UI.</p>\
+         <ul>\
+         <li><a href=\"/health\"><code>GET /health</code></a> — liveness</li>\
+         <li><code>POST /api/register</code> — create an account</li>\
+         <li><code>POST/GET/DELETE /api/devices</code> — device registry</li>\
+         <li><code>GET /ws?token=…</code> — signaling WebSocket</li>\
+         </ul></body>",
+    )
 }
 
 /// Liveness probe.

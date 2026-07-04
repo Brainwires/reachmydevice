@@ -33,6 +33,10 @@ futures = { workspace = true }
 name = "headless_viewer"
 path = "examples/headless_viewer.rs"
 
+[[example]]
+name = "rzv_relay_check"
+path = "examples/rzv_relay_check.rs"
+
 [dev-dependencies]
 # Start the rendezvous server in-process for the end-to-end signaling test.
 openreach-rendezvous = { path = "../../apps/rendezvous" }
