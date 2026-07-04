@@ -16,6 +16,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Install protoc
         run: brew install protobuf
       - uses: dtolnay/rust-toolchain@stable
@@ -39,6 +41,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -71,6 +75,26 @@ jobs:
           DISPLAY=:99 cargo run -q -p openreach-capture --example capture_smoke
           DISPLAY=:99 cargo run -q -p openreach-input --example input_smoke
 
+  # Supply-chain gate: advisories, licenses, banned crates, and — critically —
+  # that no external git/unknown sources sneak in (the webrtc fork must stay a
+  # vendored submodule path dep). Plus a redundant advisory scan via cargo-audit.
+  supply-chain:
+    name: supply chain (deny + audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+      - name: cargo-audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   # Windows: Phase 3 target. Build the portable, non-GUI crates only for now.
   build-windows:
     name: build (Windows) [Phase 3]
@@ -78,6 +102,8 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install protoc

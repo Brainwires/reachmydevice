@@ -41,6 +41,14 @@ mDNS (LAN discovery, Phase 3) will be ported from the async fork into our I/O la
 sans-IO driver loop blocks the Phase-1 timeline, fall back to the async fork for the spike and revisit GCC
 before Phase 2.
 
+**Amendment (security hardening).** The fork is no longer a `git = …, branch = "master"` dependency —
+that was only branch-pinned (a moving target) and fetched from GitHub at build time. It is now a **git
+submodule** at `third_party/webrtc-rs-rtc`, pinned to an **exact commit**, with `transport` depending on it
+via a `path`. Rationale: reproducible/offline builds, an exact pin, and the fork's source present locally
+for audit (it is `rtc 0.20.0-alpha.1` — pre-1.0, unaudited crypto, and thus the primary target of the
+external security audit). Clone with `--recurse-submodules`; `cargo deny check` forbids any external
+git/registry source from creeping back in.
+
 ## ADR-0004 — Wire format: Protobuf via `prost`
 
 **Decision.** Control/data-channel messages use Protobuf (`prost`), with a `ProtocolVersion` handshake as

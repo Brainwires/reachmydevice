@@ -22,11 +22,13 @@ rand = "0.9"
 # candidates when the transport socket binds to the wildcard address.
 if-addrs = "0.13"
 
-# WebRTC via the sans-IO `rtc` fork (ADR-0003). Pinned to the Brainwires fork
-# whose master carries GCC congestion control, jitter buffer, DTLS-restart, etc.
-# Everything we need (peer_connection, rtp, media, interceptor, sansio, sdp,
+# WebRTC via the sans-IO `rtc` fork (ADR-0003), vendored as a git SUBMODULE at
+# third_party/webrtc-rs-rtc and pinned to an exact commit (not a moving branch),
+# so builds are offline/reproducible and the code is present locally for audit.
+# The fork's master carries GCC congestion control, jitter buffer, DTLS-restart,
+# etc.; everything we use (peer_connection, rtp, media, interceptor, sansio, sdp,
 # shared) is re-exported from the top-level `rtc` crate.
-rtc = { git = "https://github.com/Brainwires/webrtc-rs-rtc", branch = "master", package = "rtc" }
+rtc = { path = "../../third_party/webrtc-rs-rtc/rtc", package = "rtc" }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

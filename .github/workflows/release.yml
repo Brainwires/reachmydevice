@@ -28,6 +28,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # the webrtc-rs-rtc fork is a submodule
 
       - name: Install protoc + deps (macOS)
         if: runner.os == 'macOS'
@@ -48,6 +50,14 @@ jobs:
 
       - name: Build host + viewer (release)
         run: cargo build --release --target ${{ matrix.target }} -p openreach-host -p openreach-viewer
+
+      # Software Bill of Materials (CycloneDX) — records every dependency +
+      # version, including the vendored fork, for each release artifact.
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          cargo install cargo-cyclonedx --locked || true
+          mkdir -p dist
+          cargo cyclonedx --format json --all --override-filename dist/openreach-sbom-${{ matrix.name }} || true
 
       # --- Code signing hooks (no-ops without secrets) -----------------------
       # macOS: codesign + notarize when APPLE_* secrets are present.
@@ -73,6 +83,21 @@ jobs:
             tar czf dist/openreach-rendezvous-deploy.tar.gz deploy/ docs/vps-deployment.md
           fi
           (cd dist && ls -la && shasum -a 256 * > SHA256SUMS || sha256sum * > SHA256SUMS)
+
+      # Detached signatures over every artifact (incl. SHA256SUMS + SBOM) with
+      # minisign — verifiable with the published public key. No-op without the
+      # MINISIGN_SECRET secret. Verify: `minisign -Vm <file> -P <pubkey>`.
+      - name: Sign artifacts (minisign)
+        if: env.MINISIGN_SECRET != ''
+        env:
+          MINISIGN_SECRET: ${{ secrets.MINISIGN_SECRET }}
+        run: |
+          cargo install minisign || true
+          printf '%s' "$MINISIGN_SECRET" > /tmp/minisign.key
+          for f in dist/*; do
+            [ -f "$f" ] && minisign -S -s /tmp/minisign.key -m "$f" || true
+          done
+          rm -f /tmp/minisign.key
 
       - uses: actions/upload-artifact@v4
         with:

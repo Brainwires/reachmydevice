@@ -1,0 +1,59 @@
+# cargo-deny configuration — supply-chain policy for OpenReach.
+# Run: `cargo deny check` (advisories, licenses, bans, sources). Enforced in CI.
+
+[graph]
+# Check all targets we actually ship on.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[advisories]
+version = 2
+# Fail the build on any crate with a known security advisory or a yanked release.
+yanked = "deny"
+# Add specific RUSTSEC IDs here ONLY with a written justification + expiry.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses compatible with our MIT OR Apache-2.0 distribution.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.9
+# `ring` ships a bespoke license file; clear it explicitly rather than allow-all.
+[[licenses.clarify]]
+crate = "ring"
+expression = "ISC AND MIT AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+# Duplicate versions bloat the audit surface — surface them, don't fail (yet).
+multiple-versions = "warn"
+wildcards = "deny"        # no `*` version requirements
+allow-wildcard-paths = true   # ...except intra-repo path deps
+# Crates we never want pulled in (add with justification).
+deny = []
+
+[sources]
+# The whole point of the submodule work: no external git/registry sources.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# No allow-git entries: the webrtc-rs-rtc fork is a vendored path dep (submodule),
+# not a git dependency, so nothing here should ever need a git source.
+allow-git = []

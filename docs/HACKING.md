@@ -1,8 +1,18 @@
 # HACKING — OpenReach developer guide
 
 ## Prerequisites
-- Rust stable (see `rust-toolchain.toml`), `protoc` (Protobuf compiler) for the `protocol` crate.
+- Rust (pinned in `rust-toolchain.toml`), `protoc` (Protobuf compiler) for the `protocol` crate.
 - macOS 13+ for the spike. Grant **Screen Recording** + **Accessibility** (see `macos-permissions.md`).
+
+## Clone (submodule required)
+The WebRTC transport (`rtc` fork) is vendored as a **git submodule** at
+`third_party/webrtc-rs-rtc`, so the build needs it checked out:
+```sh
+git clone --recurse-submodules <repo>
+# already cloned without it?
+git submodule update --init --recursive
+```
+Builds are then offline/reproducible — no crates.io/git fetch for the transport.
 
 ## Layout
 - `crates/` — shared libraries (`protocol`, `transport`, `capture`, `codec`, `input`, `session`).

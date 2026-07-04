@@ -1,3 +1,5 @@
 [toolchain]
-channel = "stable"
+# Pinned to an exact version for reproducible builds (supply-chain hardening).
+# Bump deliberately, in a reviewed commit — not implicitly via "stable".
+channel = "1.92.0"
 components = ["rustfmt", "clippy"]
