@@ -89,8 +89,9 @@ fn main() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(5));
     }
 
+    let audio_frames = session.audio_frames_received();
     println!(
-        "RESULT connected={connected} frames={frames} dims={dims:?} first_frame_after={first:?}"
+        "RESULT connected={connected} frames={frames} audio_frames={audio_frames} dims={dims:?} first_frame_after={first:?}"
     );
     anyhow::ensure!(frames > 0, "no frames decoded end-to-end");
     Ok(())

@@ -71,6 +71,9 @@ pub struct ViewerSession {
     updates: Receiver<ViewerUpdate>,
     /// Queue a local file to send to the host.
     file_cmd: Sender<PathBuf>,
+    /// Count of audio frames received from the host over the data channel
+    /// (incremented regardless of whether playback is enabled).
+    audio_rx: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ViewerSession {
@@ -138,11 +141,14 @@ impl ViewerSession {
             FileTransfers::new(out, file_ev_tx, FileTransferConfig::default())
         };
 
+        let audio_rx = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
         // Pump thread: owns the transport, bridges signaling, routes media to decode.
         {
             let device_name = cfg.device_name.clone();
             let enable_audio = cfg.enable_audio;
             let identity = cfg.identity.clone();
+            let audio_rx = audio_rx.clone();
             std::thread::Builder::new()
                 .name("openreach-viewer-pump".into())
                 .spawn(move || {
@@ -243,6 +249,10 @@ impl ViewerSession {
                                                 .send(ViewerUpdate::Displays(list.displays));
                                         }
                                         Some(Payload::Audio(frame)) => {
+                                            audio_rx.fetch_add(
+                                                1,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            );
                                             if let Some(a) = audio.as_mut() {
                                                 a.push_packet(&frame.opus, frame.seq);
                                             }
@@ -264,7 +274,14 @@ impl ViewerSession {
             sender,
             updates,
             file_cmd: file_cmd_tx,
+            audio_rx,
         })
+    }
+
+    /// Number of audio frames received from the host so far (over the real data
+    /// channel). Used to confirm cross-machine audio delivery.
+    pub fn audio_frames_received(&self) -> u64 {
+        self.audio_rx.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Non-blocking poll for the next UI update.

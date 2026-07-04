@@ -34,12 +34,14 @@ pub struct AudioCapture {
 }
 
 /// The kept-alive capture handle. `Desktop` is real system audio (macOS
-/// ScreenCaptureKit); `Device` is the cpal fallback (microphone / default input).
-/// Both variants are RAII guards — held only so capture stops when dropped.
+/// ScreenCaptureKit); `Device` is the cpal fallback (microphone / default input);
+/// `Synthetic` is a generated tone (headless hosts / cross-machine delivery
+/// tests, where no capture device exists). All are RAII guards.
 #[allow(dead_code)]
 enum AudioSource {
     Desktop(Box<dyn openreach_capture::CaptureSession>),
     Device(cpal::Stream),
+    Synthetic,
 }
 
 impl AudioCapture {
@@ -52,6 +54,37 @@ impl AudioCapture {
     where
         F: Fn(Vec<u8>) + Send + 'static,
     {
+        // Synthetic source: a generated 440 Hz tone, for headless hosts with no
+        // capture device (e.g. proving cross-machine audio delivery). Opt-in.
+        if std::env::var("OPENREACH_AUDIO_SYNTH").is_ok() {
+            tracing::info!("audio source: synthetic 440 Hz tone");
+            let (tx, rx) = mpsc::channel::<Vec<i16>>();
+            std::thread::Builder::new()
+                .name("openreach-audio-synth".into())
+                .spawn(move || {
+                    let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
+                    let mut phase = 0.0_f32;
+                    loop {
+                        let frame: Vec<i16> = (0..960)
+                            .map(|_| {
+                                let s = (phase.sin() * 12000.0) as i16;
+                                phase += step;
+                                s
+                            })
+                            .collect();
+                        if tx.send(frame).is_err() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                })
+                .ok();
+            spawn_encode(48_000, bitrate_bps, rx, on_packet);
+            return Ok(Self {
+                _source: AudioSource::Synthetic,
+            });
+        }
+
         // Preferred path: desktop/system audio (mono 48 kHz i16 from the backend).
         let (desk_tx, desk_rx) = mpsc::channel::<Vec<i16>>();
         match openreach_capture::start_audio_capture(0, desk_tx) {
