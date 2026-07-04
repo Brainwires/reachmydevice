@@ -14,6 +14,7 @@ pub mod clipboard;
 pub mod filexfer;
 pub mod host;
 pub mod identity;
+pub mod power;
 pub mod rendezvous;
 pub mod signal;
 pub mod viewer;

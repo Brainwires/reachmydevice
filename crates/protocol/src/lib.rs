@@ -29,8 +29,9 @@ pub use pb::{
 pub const PROTOCOL_MAJOR: u32 = 1;
 /// Protocol minor version. Backward-compatible additions bump this.
 /// MINOR 1 added clipboard/file-transfer/multi-monitor/session-control messages;
-/// MINOR 2 added the Opus `AudioFrame`.
-pub const PROTOCOL_MINOR: u32 = 2;
+/// MINOR 2 added the Opus `AudioFrame`;
+/// MINOR 3 replaced `FileComplete.sha256_prefix` (64-bit) with a full `sha256`.
+pub const PROTOCOL_MINOR: u32 = 3;
 
 /// Errors from encoding/decoding or handshake validation.
 #[derive(Debug, thiserror::Error)]
@@ -204,13 +205,12 @@ pub fn file_ack(transfer_id: impl Into<String>, offset: u64) -> Envelope {
     }))
 }
 
-/// Signal that all bytes have been sent, with a SHA-256 prefix for an integrity
-/// check. `sha256_prefix` is the first 8 bytes of the digest as a little-endian
-/// `u64`.
-pub fn file_complete(transfer_id: impl Into<String>, sha256_prefix: u64) -> Envelope {
+/// Signal that all bytes have been sent, carrying the **full** 32-byte SHA-256
+/// of the file for a collision-resistant integrity check.
+pub fn file_complete(transfer_id: impl Into<String>, sha256: [u8; 32]) -> Envelope {
     envelope(pb::envelope::Payload::FileComplete(FileComplete {
         transfer_id: transfer_id.into(),
-        sha256_prefix,
+        sha256: sha256.to_vec(),
     }))
 }
 
@@ -222,11 +222,6 @@ pub fn file_cancel(transfer_id: impl Into<String>, reason: impl Into<String>) ->
     }))
 }
 
-/// The first 8 bytes of a SHA-256 digest as a little-endian `u64` — the quick
-/// integrity check carried in [`FileComplete::sha256_prefix`].
-pub fn sha256_prefix(digest: &[u8; 32]) -> u64 {
-    u64::from_le_bytes(digest[..8].try_into().unwrap())
-}
 
 /// Request an IDR/keyframe from the host.
 pub fn request_keyframe() -> Envelope {

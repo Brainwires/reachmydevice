@@ -170,7 +170,9 @@ message FileAck {
 
 message FileComplete {
   string transfer_id = 1;
-  fixed64 sha256_prefix = 2; // first 8 bytes of the SHA-256, for a quick integrity check
+  reserved 2;                 // was `fixed64 sha256_prefix` — a weak 64-bit check
+  reserved "sha256_prefix";
+  bytes sha256 = 3;           // full 32-byte SHA-256 of the file, for integrity
 }
 
 message FileCancel {

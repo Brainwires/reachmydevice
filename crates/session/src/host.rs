@@ -163,14 +163,19 @@ where
         require: cfg.require_authorization,
         authorized: cfg.authorized_device_ids.iter().cloned().collect(),
     };
-    if access.require {
+    // An unattended host must stay reachable, so inhibit system idle sleep for
+    // the host's lifetime (opt out with OPENREACH_NO_KEEPAWAKE). Held in `_keep_awake`.
+    let _keep_awake = if access.require {
         tracing::info!(
             authorized = access.authorized.len(),
             "unattended access ENFORCED: only authorized devices may connect"
         );
+        (std::env::var("OPENREACH_NO_KEEPAWAKE").is_err())
+            .then(|| crate::power::prevent_sleep("OpenReach unattended host"))
     } else {
         tracing::warn!("unattended access gate OFF: any viewer completing the handshake is accepted");
-    }
+        None
+    };
 
     // Encode thread: frames -> H.264 -> transport, with GCC-driven bitrate.
     spawn_encode_thread(

@@ -303,7 +303,8 @@ impl FileTransfers {
             return;
         }
         let digest: [u8; 32] = st.hasher.finalize().into();
-        if proto::sha256_prefix(&digest) != c.sha256_prefix {
+        // Full 32-byte SHA-256 (a public integrity digest, not a MAC).
+        if digest.as_slice() != c.sha256.as_slice() {
             self.fail(&c.transfer_id, "integrity check failed".into());
             let _ = std::fs::remove_file(&st.part_path);
             return;
@@ -402,10 +403,7 @@ fn send_loop(
         if next >= size {
             // All bytes sent; wait for the final ack, then complete.
             if acked >= size {
-                (out)(proto::file_complete(
-                    &transfer_id,
-                    proto::sha256_prefix(&digest),
-                ));
+                (out)(proto::file_complete(&transfer_id, digest));
                 let _ = events.send(FileEvent::Completed {
                     transfer_id: transfer_id.clone(),
                     path: None,
@@ -653,7 +651,7 @@ mod tests {
         }
 
         feed_chunks(&mut r2, partial, size);
-        let complete = proto::file_complete(tid, proto::sha256_prefix(&digest));
+        let complete = proto::file_complete(tid, digest);
         r2.handle(&complete.payload.unwrap());
 
         let mut final_path = None;
