@@ -92,6 +92,25 @@ pub fn hid_to_macos(hid: u32) -> Option<u16> {
         0x50 => 123, // Left
         0x51 => 125, // Down
         0x52 => 126, // Up
+        // Keypad (HID 0x53..0x63, 0x67)
+        0x53 => 71,  // NumLock/Clear
+        0x54 => 75,  // KP /
+        0x55 => 67,  // KP *
+        0x56 => 78,  // KP -
+        0x57 => 69,  // KP +
+        0x58 => 76,  // KP Enter
+        0x59 => 83,  // KP 1
+        0x5A => 84,  // KP 2
+        0x5B => 85,  // KP 3
+        0x5C => 86,  // KP 4
+        0x5D => 87,  // KP 5
+        0x5E => 88,  // KP 6
+        0x5F => 89,  // KP 7
+        0x60 => 91,  // KP 8
+        0x61 => 92,  // KP 9
+        0x62 => 82,  // KP 0
+        0x63 => 65,  // KP .
+        0x67 => 81,  // KP =
         // Modifiers
         0xE0 => 59, // Left Control
         0xE1 => 56, // Left Shift
@@ -188,6 +207,25 @@ pub fn hid_to_x_keycode(hid: u32) -> Option<u8> {
         0x50 => 105, // Left
         0x51 => 108, // Down
         0x52 => 103, // Up
+        // Keypad (HID 0x53..0x63, 0x67) -> Linux evdev codes
+        0x53 => 69,  // NumLock
+        0x54 => 98,  // KP /
+        0x55 => 55,  // KP *
+        0x56 => 74,  // KP -
+        0x57 => 78,  // KP +
+        0x58 => 96,  // KP Enter
+        0x59 => 79,  // KP 1
+        0x5A => 80,  // KP 2
+        0x5B => 81,  // KP 3
+        0x5C => 75,  // KP 4
+        0x5D => 76,  // KP 5
+        0x5E => 77,  // KP 6
+        0x5F => 71,  // KP 7
+        0x60 => 72,  // KP 8
+        0x61 => 73,  // KP 9
+        0x62 => 82,  // KP 0
+        0x63 => 83,  // KP .
+        0x67 => 117, // KP =
         0xE0 => 29,  // LeftCtrl
         0xE1 => 42,  // LeftShift
         0xE2 => 56,  // LeftAlt
