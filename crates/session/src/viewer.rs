@@ -52,6 +52,8 @@ pub enum ViewerUpdate {
     Latency(Duration),
     /// A file-transfer event (incoming offer, progress, completion, failure).
     File(FileEvent),
+    /// The host's available displays (for the multi-monitor picker).
+    Displays(Vec<proto::DisplayDescriptor>),
 }
 
 /// Running viewer session.
@@ -185,6 +187,10 @@ impl ViewerSession {
                                         Some(Payload::Clipboard(update)) => {
                                             clipboard.apply_remote(update);
                                         }
+                                        Some(Payload::DisplayList(list)) => {
+                                            let _ = updates_tx
+                                                .send(ViewerUpdate::Displays(list.displays));
+                                        }
                                         Some(p) => {
                                             // File-transfer payloads route to the manager.
                                             files.handle(&p);
@@ -214,6 +220,18 @@ impl ViewerSession {
     /// [`ViewerUpdate::File`].
     pub fn send_file(&self, path: PathBuf) {
         let _ = self.file_cmd.send(path);
+    }
+
+    /// Ask the host to switch the captured display (multi-monitor).
+    pub fn select_display(&self, id: u32) {
+        let env = proto::select_display(id);
+        self.sender.send_data(Bytes::from(proto::encode(&env)));
+    }
+
+    /// Ask the host for a fresh keyframe (e.g. after switching displays).
+    pub fn request_keyframe(&self) {
+        let env = proto::request_keyframe();
+        self.sender.send_data(Bytes::from(proto::encode(&env)));
     }
 
     /// Send an input event to the host over the control channel.

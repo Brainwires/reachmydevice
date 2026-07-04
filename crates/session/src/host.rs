@@ -66,21 +66,25 @@ pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<(
         video_bitrate_bps: cfg.bitrate_bps,
     })?;
 
-    // Capture -> frame channel.
-    let (frame_tx, frame_rx) = mpsc::channel();
-    let _capture = capture::start_capture(
-        capture::CaptureConfig {
-            width: cfg.width,
-            height: cfg.height,
-            fps: cfg.fps,
-            show_cursor: true,
-        },
-        cfg.display_index,
-        frame_tx,
-    )?;
-
     // Force a keyframe on start and whenever a viewer (re)connects.
     let force_keyframe = Arc::new(AtomicBool::new(true));
+
+    // Capture -> frame channel. The controller owns the capture session so it
+    // can restart on a different display (multi-monitor) without disturbing the
+    // encode thread, which keeps reading the same channel.
+    let (frame_tx, frame_rx) = mpsc::channel();
+    let capture_cfg = capture::CaptureConfig {
+        width: cfg.width,
+        height: cfg.height,
+        fps: cfg.fps,
+        show_cursor: true,
+    };
+    let mut capture_ctl = CaptureController::start(
+        capture_cfg,
+        cfg.display_index,
+        frame_tx,
+        force_keyframe.clone(),
+    )?;
     // Whether a viewer is connected. Video is only encoded/sent while true, so we
     // don't blast RTP before DTLS-SRTP is ready (and we save CPU when idle).
     let connected = Arc::new(AtomicBool::new(false));
@@ -158,10 +162,80 @@ pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<(
                     &mut injector,
                     &clipboard,
                     &mut files,
+                    &mut capture_ctl,
                     &cfg.device_name,
                 );
             }
             TransportEvent::Video { .. } => {} // host does not receive video
+        }
+    }
+}
+
+/// Owns the live capture session and can restart it on another display
+/// (multi-monitor). The encode thread reads a stable frame channel, so switching
+/// displays only swaps the producer — the encoded output size is unchanged
+/// (the backend scales each display to the configured dimensions).
+struct CaptureController {
+    config: capture::CaptureConfig,
+    frame_tx: mpsc::Sender<capture::Frame>,
+    displays: Vec<capture::DisplayInfo>,
+    current: usize,
+    /// Kept alive to keep capturing; dropped (then replaced) on a display switch.
+    _handle: Box<dyn capture::CaptureSession>,
+    force_keyframe: Arc<AtomicBool>,
+}
+
+impl CaptureController {
+    fn start(
+        config: capture::CaptureConfig,
+        display_index: usize,
+        frame_tx: mpsc::Sender<capture::Frame>,
+        force_keyframe: Arc<AtomicBool>,
+    ) -> anyhow::Result<Self> {
+        let displays = capture::list_displays().unwrap_or_default();
+        let handle = capture::start_capture(config.clone(), display_index, frame_tx.clone())?;
+        Ok(Self {
+            config,
+            frame_tx,
+            displays,
+            current: display_index,
+            _handle: handle,
+            force_keyframe,
+        })
+    }
+
+    /// The host's displays as protocol descriptors (id = enumeration index).
+    fn descriptors(&self) -> Vec<proto::DisplayDescriptor> {
+        self.displays
+            .iter()
+            .map(|d| proto::DisplayDescriptor {
+                id: d.index as u32,
+                width: d.width,
+                height: d.height,
+                name: format!("Display {}", d.index + 1),
+                primary: d.index == 0,
+            })
+            .collect()
+    }
+
+    /// Switch capture to display `id` (a no-op if already current or invalid).
+    fn select(&mut self, id: u32) {
+        let idx = id as usize;
+        if idx == self.current {
+            return;
+        }
+        if idx >= self.displays.len().max(1) {
+            tracing::warn!(id, "select_display: no such display");
+            return;
+        }
+        match capture::start_capture(self.config.clone(), idx, self.frame_tx.clone()) {
+            Ok(handle) => {
+                self._handle = handle; // dropping the old session stops it
+                self.current = idx;
+                self.force_keyframe.store(true, Ordering::Relaxed);
+                tracing::info!(display = idx, "switched captured display");
+            }
+            Err(e) => tracing::warn!(error=%e, id, "failed to switch display"),
         }
     }
 }
@@ -226,6 +300,7 @@ fn handle_control(
     injector: &mut Option<Box<dyn input::Injector>>,
     clipboard: &ClipboardSync,
     files: &mut FileTransfers,
+    capture_ctl: &mut CaptureController,
     device_name: &str,
 ) {
     let env = match proto::decode(bytes) {
@@ -247,6 +322,9 @@ fn handle_control(
             Ok(()) => {
                 let ack = proto::hello_ack_ok(device_name, 0);
                 transport.send_data(Bytes::from(proto::encode(&ack)));
+                // Advertise the host's displays so the viewer can switch monitors.
+                let list = proto::display_list(capture_ctl.descriptors());
+                transport.send_data(Bytes::from(proto::encode(&list)));
                 tracing::info!(viewer = %h.device_name, "viewer paired (version ok)");
             }
             Err(e) => {
@@ -267,6 +345,8 @@ fn handle_control(
             transport.send_data(Bytes::from(proto::encode(&pong)));
         }
         Payload::Clipboard(update) => clipboard.apply_remote(update),
+        Payload::RequestKeyframe(_) => capture_ctl.force_keyframe.store(true, Ordering::Relaxed),
+        Payload::SelectDisplay(sel) => capture_ctl.select(sel.id),
         _ => {}
     }
 }

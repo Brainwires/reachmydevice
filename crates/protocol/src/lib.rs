@@ -216,6 +216,11 @@ pub fn view_only(enabled: bool) -> Envelope {
     envelope(pb::envelope::Payload::ViewOnly(ViewOnly { enabled }))
 }
 
+/// Host → viewer: advertise the available displays.
+pub fn display_list(displays: Vec<DisplayDescriptor>) -> Envelope {
+    envelope(pb::envelope::Payload::DisplayList(DisplayList { displays }))
+}
+
 /// Ask the host to switch the captured display.
 pub fn select_display(id: u32) -> Envelope {
     envelope(pb::envelope::Payload::SelectDisplay(SelectDisplay { id }))

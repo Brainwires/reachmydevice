@@ -82,6 +82,23 @@ pub fn hid_to_macos(hid: u32) -> Option<u16> {
         0x43 => 109,
         0x44 => 103,
         0x45 => 111,
+        // Special / system keys. macOS has no PrintScreen/ScrollLock/Pause; map
+        // them to the extended function keys they physically share on Apple
+        // keyboards, and Insert to Help (its Mac equivalent).
+        0x46 => 105, // PrintScreen -> F13
+        0x47 => 107, // ScrollLock  -> F14
+        0x48 => 113, // Pause       -> F15
+        0x49 => 114, // Insert      -> Help
+        0x65 => 110, // Application (Menu)
+        // Extended function row F13..F20 (HID 0x68..0x6F).
+        0x68 => 105, // F13
+        0x69 => 107, // F14
+        0x6A => 113, // F15
+        0x6B => 106, // F16
+        0x6C => 64,  // F17
+        0x6D => 79,  // F18
+        0x6E => 80,  // F19
+        0x6F => 90,  // F20
         // Navigation
         0x4A => 115, // Home
         0x4B => 116, // PageUp
@@ -198,6 +215,25 @@ pub fn hid_to_x_keycode(hid: u32) -> Option<u8> {
         0x43 => 68,
         0x44 => 87,  // F11
         0x45 => 88,  // F12
+        // Special / system keys (Linux evdev codes).
+        0x46 => 99,  // PrintScreen (SYSRQ)
+        0x47 => 70,  // ScrollLock
+        0x48 => 119, // Pause
+        0x49 => 110, // Insert
+        0x65 => 127, // Application/Menu (Compose)
+        // Extended function row F13..F24 (HID 0x68..0x73) -> KEY_F13..KEY_F24.
+        0x68 => 183, // F13
+        0x69 => 184,
+        0x6A => 185,
+        0x6B => 186,
+        0x6C => 187,
+        0x6D => 188,
+        0x6E => 189,
+        0x6F => 190,
+        0x70 => 191,
+        0x71 => 192,
+        0x72 => 193,
+        0x73 => 194, // F24
         0x4A => 102, // Home
         0x4B => 104, // PageUp
         0x4C => 111, // Delete
@@ -250,5 +286,26 @@ mod tests {
         assert_eq!(hid_to_macos(0x2C), Some(49)); // Space
         assert_eq!(hid_to_macos(0x4F), Some(124)); // Right arrow
         assert_eq!(hid_to_macos(0xFFFF), None); // unmapped
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn special_keys_map() {
+        use super::hid_to_macos;
+        assert_eq!(hid_to_macos(0x49), Some(114)); // Insert -> Help
+        assert_eq!(hid_to_macos(0x46), Some(105)); // PrintScreen -> F13
+        assert_eq!(hid_to_macos(0x68), Some(105)); // F13
+        assert_eq!(hid_to_macos(0x6F), Some(90)); // F20
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn special_keys_map() {
+        use super::hid_to_x_keycode;
+        assert_eq!(hid_to_x_keycode(0x49), Some(118)); // Insert (110 + 8)
+        assert_eq!(hid_to_x_keycode(0x46), Some(107)); // PrintScreen (99 + 8)
+        assert_eq!(hid_to_x_keycode(0x68), Some(191)); // F13 (183 + 8)
+        assert_eq!(hid_to_x_keycode(0x73), Some(202)); // F24 (194 + 8)
+        assert_eq!(hid_to_x_keycode(0xFFFF), None); // unmapped
     }
 }

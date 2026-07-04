@@ -34,6 +34,7 @@ use openreach_session::{
     identity::known_peers, AccountClient, DeviceIdentity, DeviceInfo, FileEvent, SignalClient,
     Signaling, ViewerConfig, ViewerSession, ViewerUpdate,
 };
+use openreach_protocol::DisplayDescriptor;
 
 use egui_wgpu::ScreenDescriptor;
 use winit::application::ApplicationHandler;
@@ -169,6 +170,10 @@ struct App {
     hud_visible: bool,
     /// Latest file-transfer status line, shown in the HUD.
     file_status: Option<String>,
+    /// The host's displays (multi-monitor picker); empty until advertised.
+    displays: Vec<DisplayDescriptor>,
+    /// The display id currently selected in the picker.
+    active_display: u32,
 
     // input bookkeeping
     /// Current keyboard modifier bitmask (`openreach_protocol::modifiers`).
@@ -248,6 +253,8 @@ impl App {
             view_only: false,
             hud_visible: true,
             file_status: None,
+            displays: Vec::new(),
+            active_display: 0,
             modifiers: 0,
             last_cursor: (0.0, 0.0),
             job: None,
@@ -310,6 +317,8 @@ impl App {
         self.view_only = false;
         self.hud_visible = true;
         self.file_status = None;
+        self.displays.clear();
+        self.active_display = 0;
         // Drop fullscreen so the user isn't stranded.
         if let Some(win) = &self.window {
             win.set_fullscreen(None);
@@ -369,6 +378,9 @@ impl App {
                     },
                     FileEvent::Failed { reason, .. } => format!("transfer failed: {reason}"),
                 });
+            }
+            ViewerUpdate::Displays(displays) => {
+                self.displays = displays;
             }
             ViewerUpdate::Disconnected => {
                 if self.screen == Screen::InSession {
@@ -954,6 +966,36 @@ impl App {
 
                 ui.checkbox(&mut self.view_only, "View only");
                 ui.separator();
+
+                // Multi-monitor picker (only when the host has more than one).
+                if self.displays.len() > 1 {
+                    let current = self.active_display;
+                    let label = self
+                        .displays
+                        .iter()
+                        .find(|d| d.id == current)
+                        .map(|d| d.name.clone())
+                        .unwrap_or_else(|| "Display".into());
+                    egui::ComboBox::from_id_salt("display-picker")
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            for d in &self.displays {
+                                let text = format!("{} ({}×{})", d.name, d.width, d.height);
+                                if ui
+                                    .selectable_label(d.id == current, text)
+                                    .clicked()
+                                    && d.id != current
+                                {
+                                    self.active_display = d.id;
+                                    if let Some(s) = self.session.as_ref() {
+                                        s.select_display(d.id);
+                                        s.request_keyframe();
+                                    }
+                                }
+                            }
+                        });
+                    ui.separator();
+                }
 
                 // File transfer: status + hint (drop a file on the window to send).
                 match &self.file_status {
