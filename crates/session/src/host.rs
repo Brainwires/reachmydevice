@@ -41,6 +41,13 @@ pub struct HostConfig {
     /// Stream host audio (Opus) to the viewer. Off by default — see `audio.rs`
     /// for the current source (default input device) and transport caveats.
     pub enable_audio: bool,
+    /// Require viewers to prove an authorized device identity before a session
+    /// is accepted (unattended-access gate). When false, any viewer that
+    /// completes the handshake is accepted (LAN/dev convenience).
+    pub require_authorization: bool,
+    /// Authorized viewer `device_id`s (32-hex-char fingerprints). Only consulted
+    /// when `require_authorization` is set.
+    pub authorized_device_ids: Vec<String>,
 }
 
 impl Default for HostConfig {
@@ -55,6 +62,34 @@ impl Default for HostConfig {
             ice_servers: Vec::new(),
             bind_addr: "0.0.0.0:0".to_string(),
             enable_audio: false,
+            require_authorization: false,
+            authorized_device_ids: Vec::new(),
+        }
+    }
+}
+
+/// Host-side access policy for unattended operation.
+struct AccessControl {
+    require: bool,
+    authorized: std::collections::HashSet<String>,
+}
+
+impl AccessControl {
+    /// Decide whether a `Hello` is authorized. Returns `Ok(())` to accept, or an
+    /// error whose message is the rejection reason.
+    fn authorize(&self, hello: &proto::Hello) -> Result<(), String> {
+        if !self.require {
+            return Ok(());
+        }
+        if hello.public_key.is_empty() || hello.signature.is_empty() {
+            return Err("authorization required but viewer sent no identity proof".into());
+        }
+        let device_id = crate::identity::verify_access_proof(&hello.public_key, &hello.signature)
+            .map_err(|e| format!("identity proof rejected: {e}"))?;
+        if self.authorized.contains(&device_id) {
+            Ok(())
+        } else {
+            Err(format!("device {device_id} is not authorized"))
         }
     }
 }
@@ -119,6 +154,20 @@ where
     // Whether a viewer is connected. Video is only encoded/sent while true, so we
     // don't blast RTP before DTLS-SRTP is ready (and we save CPU when idle).
     let connected = Arc::new(AtomicBool::new(false));
+
+    // Unattended-access policy.
+    let access = AccessControl {
+        require: cfg.require_authorization,
+        authorized: cfg.authorized_device_ids.iter().cloned().collect(),
+    };
+    if access.require {
+        tracing::info!(
+            authorized = access.authorized.len(),
+            "unattended access ENFORCED: only authorized devices may connect"
+        );
+    } else {
+        tracing::warn!("unattended access gate OFF: any viewer completing the handshake is accepted");
+    }
 
     // Encode thread: frames -> H.264 -> transport, with GCC-driven bitrate.
     spawn_encode_thread(
@@ -222,6 +271,7 @@ where
                     &clipboard,
                     &mut files,
                     &mut capture_ctl,
+                    &access,
                     &cfg.device_name,
                 );
             }
@@ -360,6 +410,7 @@ fn handle_control(
     clipboard: &ClipboardSync,
     files: &mut FileTransfers,
     capture_ctl: &mut CaptureController,
+    access: &AccessControl,
     device_name: &str,
 ) {
     let env = match proto::decode(bytes) {
@@ -377,21 +428,27 @@ fn handle_control(
         return;
     }
     match payload {
-        Payload::Hello(h) => match proto::check_compatibility(env.protocol_major) {
-            Ok(()) => {
-                let ack = proto::hello_ack_ok(device_name, 0);
-                transport.send_data(Bytes::from(proto::encode(&ack)));
-                // Advertise the host's displays so the viewer can switch monitors.
-                let list = proto::display_list(capture_ctl.descriptors());
-                transport.send_data(Bytes::from(proto::encode(&list)));
-                tracing::info!(viewer = %h.device_name, "viewer paired (version ok)");
+        Payload::Hello(h) => {
+            // 1. Protocol compatibility, then 2. unattended-access authorization.
+            let decision = proto::check_compatibility(env.protocol_major)
+                .map_err(|e| format!("{e}"))
+                .and_then(|()| access.authorize(&h));
+            match decision {
+                Ok(()) => {
+                    let ack = proto::hello_ack_ok(device_name, 0);
+                    transport.send_data(Bytes::from(proto::encode(&ack)));
+                    // Advertise the host's displays so the viewer can switch monitors.
+                    let list = proto::display_list(capture_ctl.descriptors());
+                    transport.send_data(Bytes::from(proto::encode(&list)));
+                    tracing::info!(viewer = %h.device_name, "viewer accepted");
+                }
+                Err(reason) => {
+                    let ack = proto::hello_ack_reject(reason.clone());
+                    transport.send_data(Bytes::from(proto::encode(&ack)));
+                    tracing::warn!(%reason, viewer = %h.device_name, "rejected viewer");
+                }
             }
-            Err(e) => {
-                let ack = proto::hello_ack_reject(format!("{e}"));
-                transport.send_data(Bytes::from(proto::encode(&ack)));
-                tracing::warn!(error=%e, "rejected incompatible viewer");
-            }
-        },
+        }
         Payload::Input(ie) => {
             if let (Some(inj), Some(ev)) = (injector.as_deref_mut(), ie.event) {
                 if let Err(e) = inj.inject(&ev) {

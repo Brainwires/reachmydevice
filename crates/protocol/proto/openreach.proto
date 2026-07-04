@@ -50,6 +50,12 @@ message Hello {
   Role role = 2;
   // Reserved feature bitmask for Phase-4 negotiation (clipboard/files/audio).
   uint64 features = 3;
+  // Unattended-access proof (optional). `public_key` is the 32-byte ed25519 key;
+  // `signature` is over `"openreach-access-proof-v1" || public_key`. A host with
+  // authorization enabled verifies this and checks the derived device_id against
+  // its authorized list. Empty when the viewer has no identity (LAN/dev flows).
+  bytes public_key = 4;
+  bytes signature = 5;
 }
 
 // Response to Hello. `accepted=false` carries a human-readable `reason`

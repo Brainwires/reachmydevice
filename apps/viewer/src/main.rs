@@ -294,6 +294,10 @@ impl App {
             ice_servers: self.ice_servers.clone(),
             bind_addr: self.bind_addr.clone(),
             enable_audio: self.enable_audio,
+            // Present an unattended-access proof so hosts that enforce
+            // authorization can recognize this device by its device_id.
+            identity_public_key: self.identity.public_key_bytes().to_vec(),
+            identity_proof: self.identity.access_proof().to_vec(),
         };
         match ViewerSession::start(cfg, signaling) {
             Ok(session) => {

@@ -30,6 +30,12 @@ pub struct ViewerConfig {
     pub bind_addr: String,
     /// Play host audio if the host streams it. Off by default.
     pub enable_audio: bool,
+    /// This device's 32-byte ed25519 public key, for unattended-access proof.
+    /// Empty for anonymous (LAN/dev) connections.
+    pub identity_public_key: Vec<u8>,
+    /// Signature over the access-proof message (see `identity::access_proof`).
+    /// Empty when `identity_public_key` is empty.
+    pub identity_proof: Vec<u8>,
 }
 
 impl Default for ViewerConfig {
@@ -39,6 +45,8 @@ impl Default for ViewerConfig {
             ice_servers: Vec::new(),
             bind_addr: "0.0.0.0:0".to_string(),
             enable_audio: false,
+            identity_public_key: Vec::new(),
+            identity_proof: Vec::new(),
         }
     }
 }
@@ -136,6 +144,8 @@ impl ViewerSession {
         {
             let device_name = cfg.device_name.clone();
             let enable_audio = cfg.enable_audio;
+            let id_pubkey = cfg.identity_public_key.clone();
+            let id_proof = cfg.identity_proof.clone();
             std::thread::Builder::new()
                 .name("openreach-viewer-pump".into())
                 .spawn(move || {
@@ -174,9 +184,19 @@ impl ViewerSession {
                                 let _ = signal.send(&msg);
                             }
                             TransportEvent::Connected => {
-                                // Introduce ourselves; host validates our version.
-                                let hello =
-                                    proto::hello(&device_name, proto::Role::Viewer, 0);
+                                // Introduce ourselves; host validates our version and
+                                // (if it enforces unattended access) our identity proof.
+                                let hello = if !id_pubkey.is_empty() && !id_proof.is_empty() {
+                                    proto::hello_authenticated(
+                                        &device_name,
+                                        proto::Role::Viewer,
+                                        0,
+                                        id_pubkey.clone(),
+                                        id_proof.clone(),
+                                    )
+                                } else {
+                                    proto::hello(&device_name, proto::Role::Viewer, 0)
+                                };
                                 transport.send_data(Bytes::from(proto::encode(&hello)));
                                 let _ = updates_tx.send(ViewerUpdate::Connected);
                             }

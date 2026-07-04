@@ -61,9 +61,17 @@ trust boundaries, the guarantees the design provides, and residual risks.
   authenticates the signaling channel, and the DTLS handshake + TOFU authenticate the
   peer. Every active session shows a **visible host indicator** (`★ REMOTE SESSION
   ACTIVE ★`; tray state in the UI).
-- **Residual (roadmap):** unattended-access gating (per-host password / pre-authorized
-  viewer keys) is specified and partially plumbed; it must be completed before shipping
-  unattended mode. Until then, protect device tokens accordingly.
+- **Unattended-access gate (implemented):** a host with `require_authorization`
+  accepts a session only from a viewer whose `Hello` carries a valid **access proof**
+  — an ed25519 signature over `"openreach-access-proof-v1" || public_key` — *and* whose
+  derived `device_id` is in the host's `authorized_keys` list. The signature proves the
+  viewer holds the private key for the claimed identity (not merely a spoofable id
+  claim). Enabled by placing device_ids in `~/.config/openreach/authorized_keys` (or
+  `OPENREACH_AUTHORIZED_KEYS`), or with `OPENREACH_REQUIRE_AUTH=1`.
+- **Residual:** the proof is not yet bound to the specific DTLS session, so a fully
+  malicious rendezvous could in principle pair a captured proof with its own DTLS
+  session to the host (hardening item 1). The relay still cannot read or inject into the
+  E2EE media/data, and unauthorized *devices* are already excluded.
 
 ### A5. Stolen device / extracted identity key
 - **Mitigation:** the identity private key is stored `0600` in the user config dir.
@@ -90,7 +98,8 @@ trust boundaries, the guarantees the design provides, and residual risks.
   registration) on a maintained VPS.
 
 ## Open hardening items (tracked)
-1. Bind the DTLS fingerprint to the signed device identity (defeat A2 first-connect MITM).
-2. Complete unattended-access gating (A4) before enabling unattended mode.
-3. Passphrase-wrap the identity key at rest (A5).
+1. Bind the DTLS fingerprint to the signed device identity — defeats A2 first-connect
+   MITM *and* fully closes the A4 residual (proof-replay by a malicious rendezvous).
+2. Passphrase-wrap the identity key at rest (A5).
+3. Optional per-host password as a second factor alongside the authorized-key gate.
 4. Account lockout / optional MFA on the rendezvous (A3).

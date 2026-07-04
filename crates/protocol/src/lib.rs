@@ -92,12 +92,33 @@ pub fn check_compatibility(remote_major: u32) -> Result<(), ProtocolError> {
 
 // --- Convenience constructors ---------------------------------------------
 
-/// A `Hello` envelope announcing our identity/role.
+/// A `Hello` envelope announcing our identity/role (no access proof).
 pub fn hello(device_name: impl Into<String>, role: Role, features: u64) -> Envelope {
     envelope(pb::envelope::Payload::Hello(Hello {
         device_name: device_name.into(),
         role: role as i32,
         features,
+        public_key: Vec::new(),
+        signature: Vec::new(),
+    }))
+}
+
+/// A `Hello` carrying an unattended-access proof (`public_key` + `signature`
+/// over the access-proof message). Used when the viewer has a device identity
+/// and the host may require authorization.
+pub fn hello_authenticated(
+    device_name: impl Into<String>,
+    role: Role,
+    features: u64,
+    public_key: Vec<u8>,
+    signature: Vec<u8>,
+) -> Envelope {
+    envelope(pb::envelope::Payload::Hello(Hello {
+        device_name: device_name.into(),
+        role: role as i32,
+        features,
+        public_key,
+        signature,
     }))
 }
 

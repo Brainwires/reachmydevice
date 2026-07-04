@@ -36,6 +36,14 @@ fn main() -> anyhow::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(12);
 
+    // Optional identity for testing unattended-access enforcement.
+    let identity = std::env::var("OPENREACH_IDENTITY")
+        .ok()
+        .and_then(|p| openreach_session::DeviceIdentity::load_or_create(std::path::Path::new(&p)).ok());
+    if let Some(id) = identity.as_ref() {
+        eprintln!("[headless] device_id={}", id.device_id());
+    }
+
     let cfg = ViewerConfig {
         device_name: "headless-viewer".into(),
         ice_servers: std::env::var("OPENREACH_ICE")
@@ -48,6 +56,10 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_default(),
         bind_addr: std::env::var("OPENREACH_BIND").unwrap_or_else(|_| "0.0.0.0:0".into()),
         enable_audio: std::env::var("OPENREACH_AUDIO").is_ok(),
+        // Present an access proof if an identity file is configured (so this can
+        // test a host with unattended-access enforcement).
+        identity_public_key: identity.as_ref().map(|i| i.public_key_bytes().to_vec()).unwrap_or_default(),
+        identity_proof: identity.as_ref().map(|i| i.access_proof().to_vec()).unwrap_or_default(),
     };
 
     let signaling = build_signaling()?;

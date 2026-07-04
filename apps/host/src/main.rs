@@ -41,6 +41,26 @@ fn ice_servers() -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Load authorized viewer `device_id`s for unattended access. Reads
+/// `OPENREACH_AUTHORIZED_KEYS` (or `~/.config/openreach/authorized_keys`): one
+/// device_id per line, `#` comments and blanks ignored.
+fn authorized_device_ids() -> Vec<String> {
+    let path = std::env::var("OPENREACH_AUTHORIZED_KEYS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            std::path::PathBuf::from(home).join(".config/openreach/authorized_keys")
+        });
+    match std::fs::read_to_string(&path) {
+        Ok(s) => s
+            .lines()
+            .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Build the signaling backend: rendezvous WebSocket if configured, else LAN relay.
 /// `peer` is the device to address (None for the host — it learns the viewer).
 fn build_signaling(peer: Option<String>) -> anyhow::Result<Box<dyn Signaling>> {
@@ -76,6 +96,11 @@ fn main() -> anyhow::Result<()> {
         ice_servers: ice_servers(),
         bind_addr: std::env::var("OPENREACH_BIND").unwrap_or_else(|_| "0.0.0.0:0".to_string()),
         enable_audio: std::env::var("OPENREACH_AUDIO").is_ok(),
+        // Unattended access is enforced when explicitly requested or when an
+        // authorized-keys list is present.
+        require_authorization: std::env::var("OPENREACH_REQUIRE_AUTH").is_ok()
+            || !authorized_device_ids().is_empty(),
+        authorized_device_ids: authorized_device_ids(),
     };
 
     tracing::info!(
