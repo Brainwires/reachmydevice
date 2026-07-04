@@ -5,26 +5,45 @@ All notable changes to OpenReach. Format loosely follows Keep a Changelog.
 ## [Unreleased]
 
 ### Security hardening (branch `security-hardening`)
-- **Supply chain:** the webrtc-rs-rtc fork is now a pinned **git submodule** (was a
-  moving branch dep) → offline/reproducible builds; `cargo-deny`/`cargo-audit` +
-  CycloneDX SBOM + pinned toolchain + signed release artifacts.
-- **Identity key at rest:** encrypted (Argon2id + XChaCha20-Poly1305) when a
-  passphrase is set, zeroized in memory, restrictive perms on Windows too.
-- **First-connect MITM (A2) closed:** the host proves its identity **bound to the
-  DTLS session** in `HelloAck`; the viewer authenticates/TOFU-pins that proven key
-  and refuses on failure. Symmetric to the unattended proof.
-- **Rendezvous:** registration **closed by default**, Argon2id params pinned, and a
-  per-username **login lockout** with backoff.
-- **File integrity:** full 32-byte SHA-256 (was a truncated 64-bit prefix).
-- **Always-on host:** inhibits system idle sleep so it stays reachable.
-- **Memory-safety + fuzzing:** all `unsafe` (capture FFI) reviewed + length-guarded
-  and documented (`docs/unsafe-audit.md`); `cargo-fuzz` targets for the untrusted
-  parsers + stable no-panic regression tests in CI.
-- **Direct QR/PAKE pairing (new):** establish trust device-to-device with no server
-  account — a **QR seed-transfer** (co-located) or a **SPAKE2 short code** (remote),
-  over a **stateless relay mailbox** (`/pair?code=…`). Two devices pair end-to-end
-  with no accounts (proven by `pairing_e2e`); wormhole-style `<channel>-<secret>`
-  codes; terminal QR for headless hosts. Remaining: the viewer's QR/scan screen.
+Seven workstreams (A–G). Every change is build-, clippy-, and test-clean; the
+threat model (`docs/threat-model.md`) records the mitigations and residuals.
+
+- **A — Supply chain & build integrity.** The `webrtc-rs-rtc` fork is now a pinned
+  **git submodule** (was a moving branch dep) → offline/reproducible builds and the
+  code present locally for audit. Added `deny.toml` + `cargo-deny`/`cargo-audit` CI
+  gate (forbids any external git source), a CycloneDX **SBOM**, a pinned toolchain,
+  and **signed** (minisign) reproducible release artifacts.
+- **D — Secrets & key-at-rest.** The ed25519 identity key is **encrypted at rest**
+  (Argon2id → XChaCha20-Poly1305) when a passphrase is set, **zeroized** in memory
+  (seed/key/token buffers), and gets restrictive perms on **Windows** too (was
+  unix-only). The host device token is read from a `0600` file rather than an env var.
+- **C — Account/TOFU hardening + first-connect MITM (A2) closed.** The host proves
+  its identity **bound to the session's DTLS fingerprint** in `HelloAck`; the viewer
+  accepts only a proof that is valid **and** matches the device it selected **and**
+  the key pinned for it — otherwise it refuses the session. Rendezvous registration
+  is **closed by default**, Argon2id params are pinned (64 MiB/t=3/p=1), and a
+  **per-username login lockout** with exponential backoff was added.
+- **F — Correctness.** File-transfer integrity uses the **full 32-byte SHA-256**
+  (was a truncated 64-bit prefix). An always-on host **inhibits system idle sleep**
+  (IOKit / systemd-inhibit / SetThreadExecutionState) so it stays reachable.
+- **E — Memory-safety & fuzzing.** All `unsafe` (the capture FFI) is reviewed,
+  length-guarded against OS-supplied values, and documented (`docs/unsafe-audit.md`).
+  `cargo-fuzz` targets for the untrusted parsers (protobuf decode, file-transfer,
+  signaling frame) + stable no-panic regression tests (~100k inputs) run in CI.
+- **B — Direct QR/PAKE pairing (new subsystem).** Establish trust device-to-device
+  with **no server account**: a **QR seed-transfer** (co-located) or a **SPAKE2 short
+  code** (remote), over a **stateless relay mailbox** (`/pair?code=…`). Wormhole-style
+  `<channel>-<secret>` codes keep the secret off the relay; terminal QR for headless
+  hosts. Two devices pair end-to-end with no accounts (`tests/pairing_e2e.rs`), and
+  it's wired into the **viewer GUI** (generate/enter a code → pair → TOFU-pin). The
+  co-located camera-scan screen remains (needs camera hardware).
+- **G — Independent security review** (`/security-review`) found and we **fixed two
+  HIGH-confidence auth-bypass bugs** in the new crypto: (1) a **reflectable PAKE
+  confirmation** — the symmetric tag could be echoed by an attacker who didn't know
+  the code — replaced with **directional, constant-time** confirmation; (2) the
+  viewer verified the host proof but didn't bind it to the **expected** host, so a
+  DTLS-MITM relay's own key passed — now checked against the selected device + pinned
+  key. A full external audit + pen test remains (third-party).
 
 ### Working end-to-end
 - **Cross-NAT remote-desktop session proven** over the real internet: a host on a
@@ -67,17 +86,17 @@ All notable changes to OpenReach. Format loosely follows Keep a Changelog.
   needs; verified to that permission boundary (`examples/audio_probe`). Transport
   is the reliable data channel for now (a dedicated Opus RTP track is the latency
   optimization). Off by default; enable with `OPENREACH_AUDIO=1` on host + viewer.
-  **Delivery is proven end-to-end** by `tests/audio_delivery.rs` — a synthetic
-  tone survives Opus encode → the real WebRTC/DTLS-SRTP data channel → Opus
-  decode between two live transports, the exact standard `pipeline.rs` sets for
-  video (the capture *device* and speaker are the on-device boundaries).
+  **Verified fully end-to-end on real hardware**: real ScreenCaptureKit desktop
+  capture → Opus → WebRTC/DTLS-SRTP → decode → speaker, with a human confirming the
+  audible round-trip (`docs/validation.md`); also delivered cross-NAT (biscuits→Mac,
+  1300 Opus frames) and covered by `tests/audio_delivery.rs`.
 - **Clipboard sync** (bidirectional, text): each side polls the OS clipboard and
   forwards changes over the control channel; an FNV-1a content hash breaks the
   echo loop. (`session/clipboard.rs`)
 - **File transfer** (resumable, integrity-checked): windowed, ack-paced streaming
   over the reliable data channel; a dropped receiver leaves a `.part` that a fresh
-  offer resumes from; SHA-256 prefix verified on completion; offered names are
-  sanitized against path traversal. Drop a file on the viewer window to send.
+  offer resumes from; the **full SHA-256** is verified on completion; offered names
+  are sanitized against path traversal. Drop a file on the viewer window to send.
   (`session/filexfer.rs`)
 - **Reconnect / ICE-restart on network blips**: on a connection drop the host
   automatically restarts ICE (fresh credentials + re-gathered candidates) and
@@ -102,7 +121,15 @@ All notable changes to OpenReach. Format loosely follows Keep a Changelog.
   permissions, HACKING.
 
 ### Known gaps / roadmap
-- Desktop viewer UI (egui login/device-list/HUD) in progress; host tray pending.
-- Reconnect / ICE-restart on blips; clipboard/file-transfer/audio/multi-monitor
-  wiring; VideoToolbox/hardware encode; Windows (DXGI/SendInput) + Wayland
-  (PipeWire/libei) backends; unattended-access gating; native installers.
+Done since the first cut: full egui viewer + host tray, reconnect/ICE-restart,
+clipboard, resumable file transfer, audio (incl. real desktop capture), multi-monitor,
+unattended-access gating, install helper. Still open:
+- **External security audit + pen test** (third-party) — the `/security-review` pass
+  is done and its findings fixed, but an independent audit of the vendored WebRTC
+  fork's crypto is the trust-establishing step.
+- **Pairing:** the co-located **camera QR-scan** screen in the viewer (needs camera
+  hardware); the code-based PAKE path is fully wired.
+- **Platform backends:** Windows (DXGI/SendInput) + Wayland (PipeWire/libei);
+  VideoToolbox/hardware encode; native installers (deb/dmg/msi).
+- **High-assurance (deferred):** hardware-backed keys (TPM/Secure Enclave), a
+  dedicated Opus RTP audio track, and any FIPS/CSfC/Common-Criteria certification.
