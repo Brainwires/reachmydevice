@@ -76,6 +76,9 @@ fn main() {
                 .collect()
         })
         .unwrap_or_default();
+    if let Ok(bind) = std::env::var("OPENREACH_BIND") {
+        cfg.bind_addr = bind;
+    }
     tracing::info!(name = %cfg.device_name, "starting openreach-viewer");
 
     // Build the signaling backend (rendezvous if configured, else LAN relay).

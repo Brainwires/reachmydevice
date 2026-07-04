@@ -22,6 +22,8 @@ pub struct ViewerConfig {
     pub device_name: String,
     /// ICE server URLs (STUN/TURN); empty for LAN/loopback.
     pub ice_servers: Vec<String>,
+    /// Local UDP bind address (`0.0.0.0:0`, or `127.0.0.1:0` for loopback).
+    pub bind_addr: String,
 }
 
 impl Default for ViewerConfig {
@@ -29,6 +31,7 @@ impl Default for ViewerConfig {
         Self {
             device_name: "openreach-viewer".to_string(),
             ice_servers: Vec::new(),
+            bind_addr: "0.0.0.0:0".to_string(),
         }
     }
 }
@@ -52,10 +55,14 @@ pub struct ViewerSession {
 impl ViewerSession {
     /// Spawn the transport + pump + decode threads with the given signaling backend.
     pub fn start(cfg: ViewerConfig, signal: Box<dyn Signaling>) -> anyhow::Result<Self> {
+        let bind_addr = cfg
+            .bind_addr
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid bind_addr {:?}: {e}", cfg.bind_addr))?;
         let transport = Transport::spawn(TransportConfig {
             role: TransportRole::Viewer,
             ice_servers: cfg.ice_servers.clone(),
-            bind_addr: "0.0.0.0:0".parse().unwrap(),
+            bind_addr,
             video_bitrate_bps: 8_000_000, // viewer doesn't encode; nominal
         })?;
         let sender = transport.sender();

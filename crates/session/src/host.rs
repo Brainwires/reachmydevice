@@ -31,6 +31,9 @@ pub struct HostConfig {
     pub device_name: String,
     /// ICE server URLs (STUN/TURN); empty for LAN/loopback.
     pub ice_servers: Vec<String>,
+    /// Local UDP bind address for the transport (e.g. `0.0.0.0:0`, or
+    /// `127.0.0.1:0` for a same-host loopback session).
+    pub bind_addr: String,
 }
 
 impl Default for HostConfig {
@@ -43,16 +46,21 @@ impl Default for HostConfig {
             bitrate_bps: 8_000_000,
             device_name: "openreach-host".to_string(),
             ice_servers: Vec::new(),
+            bind_addr: "0.0.0.0:0".to_string(),
         }
     }
 }
 
 /// Run the host session with the given signaling backend. Blocks until stopped.
 pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<()> {
+    let bind_addr = cfg
+        .bind_addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid bind_addr {:?}: {e}", cfg.bind_addr))?;
     let transport = Transport::spawn(TransportConfig {
         role: TransportRole::Host,
         ice_servers: cfg.ice_servers.clone(),
-        bind_addr: "0.0.0.0:0".parse().unwrap(),
+        bind_addr,
         video_bitrate_bps: cfg.bitrate_bps,
     })?;
 

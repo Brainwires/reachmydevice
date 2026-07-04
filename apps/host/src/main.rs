@@ -71,6 +71,7 @@ fn main() -> anyhow::Result<()> {
             std::env::var("HOSTNAME").unwrap_or_else(|_| "openreach-host".to_string())
         }),
         ice_servers: ice_servers(),
+        bind_addr: std::env::var("OPENREACH_BIND").unwrap_or_else(|_| "0.0.0.0:0".to_string()),
     };
 
     tracing::info!(
