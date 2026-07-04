@@ -55,12 +55,26 @@ Mac viewer:    connected=true  frames=786  audio_frames=1300  1280×720
 
 **1300 Opus audio frames were encoded on one machine, carried over the real
 internet through NAT-traversed DTLS-SRTP, and decoded on another** — audio
-delivery proven end-to-end on real hardware, alongside video, the same standard
-as the video result above. The two remaining audio boundaries are the same class
-as video's: the OS *capture device* (macOS system-audio capture is verified to
-the Screen-Recording permission boundary; `examples/audio_probe`) and physical
-*speaker* output — both on-device steps, exactly as screen capture and on-glass
-render are for video.
+delivery proven end-to-end on real hardware, alongside video.
+
+### Real system-audio capture → transport → decode (2026-07-04, macOS)
+With Screen Recording granted, real **ScreenCaptureKit system-audio capture** was
+confirmed and then run through the whole stack:
+
+```
+audio_probe (capture only):  chunks=179 samples=171840 rms=553.4 peak=9716
+audio_e2e (full chain):      connected=true audio_frames_delivered=100 decoded_rms=524.8
+```
+
+`audio_e2e` captures the **actual audio playing on the host** via ScreenCaptureKit,
+Opus-encodes it, sends it over the real WebRTC/DTLS-SRTP transport, and decodes it
+on the peer — the decoded stream carries real, **non-silent** energy (rms 524.8).
+So the audio path is verified end-to-end from **real OS capture → encode →
+encrypted transport → decode**. The only link not machine-verifiable is the final
+physical *speaker* transducer (a human-ear step) — the decoded non-silent PCM is
+handed to the cpal output device, which plays what it is given. Reproduce:
+`cargo run -p openreach-capture --example audio_probe` and
+`cargo run -p openreach-session --example audio_e2e` (with audio playing).
 
 ### Rendezvous deployment
 `openreach-rendezvous` runs in Docker on `biscuits` behind the existing Cloudflare
