@@ -33,6 +33,8 @@ message Envelope {
     SelectDisplay select_display = 23;
     RequestKeyframe request_keyframe = 24;
     ViewOnly view_only = 25;
+    // Audio (added in MINOR 2; host -> viewer Opus).
+    AudioFrame audio = 26;
   }
 }
 
@@ -196,4 +198,11 @@ message RequestKeyframe {}
 // Viewer -> host: toggle view-only (host ignores input while true).
 message ViewOnly {
   bool enabled = 1;
+}
+
+// Host -> viewer: one Opus audio packet (48 kHz mono, 20 ms). `seq` lets the
+// viewer detect gaps for packet-loss concealment.
+message AudioFrame {
+  bytes opus = 1;
+  uint64 seq = 2;
 }

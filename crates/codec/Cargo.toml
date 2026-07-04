@@ -16,3 +16,6 @@ bytes.workspace = true
 openh264 = "0.9"
 # Fast BGRA -> I420 (encoder input) and I420 -> BGRA (decoder output).
 yuvutils-rs = "0.8"
+# Opus audio (host -> viewer). audiopus_sys bundles + builds libopus from source,
+# so no system codec library is required (matches the openh264 approach).
+audiopus = "0.3.0-rc.0"

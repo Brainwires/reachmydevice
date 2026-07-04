@@ -5,10 +5,12 @@
 //! the WebRTC offerer and the video sender; it validates the viewer's protocol
 //! version, injects the viewer's input, and answers Ping with Pong.
 
+use crate::audio::AudioCapture;
 use crate::clipboard::ClipboardSync;
 use crate::filexfer::{FileEvent, FileTransferConfig, FileTransfers};
 use crate::signal::Signaling;
 use bytes::Bytes;
+use std::sync::atomic::AtomicU64;
 use openreach_capture as capture;
 use openreach_codec as codec;
 use openreach_input as input;
@@ -36,6 +38,9 @@ pub struct HostConfig {
     /// Local UDP bind address for the transport (e.g. `0.0.0.0:0`, or
     /// `127.0.0.1:0` for a same-host loopback session).
     pub bind_addr: String,
+    /// Stream host audio (Opus) to the viewer. Off by default — see `audio.rs`
+    /// for the current source (default input device) and transport caveats.
+    pub enable_audio: bool,
 }
 
 impl Default for HostConfig {
@@ -49,6 +54,7 @@ impl Default for HostConfig {
             device_name: "openreach-host".to_string(),
             ice_servers: Vec::new(),
             bind_addr: "0.0.0.0:0".to_string(),
+            enable_audio: false,
         }
     }
 }
@@ -123,6 +129,31 @@ pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<(
             sender.send_data(Bytes::from(proto::encode(&env)))
         });
         FileTransfers::new(out, file_ev_tx, FileTransferConfig::default())
+    };
+
+    // Optional audio capture (default off). Held alive for the session; the
+    // callback sends Opus frames only while a viewer is connected.
+    let _audio = if cfg.enable_audio {
+        let sender = transport.sender();
+        let connected = connected.clone();
+        let seq = Arc::new(AtomicU64::new(0));
+        match AudioCapture::start(48_000, move |pkt| {
+            if connected.load(Ordering::Relaxed) {
+                let s = seq.fetch_add(1, Ordering::Relaxed);
+                sender.send_data(Bytes::from(proto::encode(&proto::audio_frame(pkt, s))));
+            }
+        }) {
+            Ok(c) => {
+                tracing::info!("audio capture enabled (host -> viewer)");
+                Some(c)
+            }
+            Err(e) => {
+                tracing::warn!(error=%e, "audio capture unavailable; continuing without audio");
+                None
+            }
+        }
+    } else {
+        None
     };
 
     tracing::info!(device = %cfg.device_name, "host ready; waiting for a viewer to connect");

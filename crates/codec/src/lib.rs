@@ -16,7 +16,12 @@
 
 use bytes::Bytes;
 
+pub mod audio;
 pub mod software;
+
+pub use audio::{
+    AudioDecoder, AudioEncoder, AUDIO_CHANNELS, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE,
+};
 
 /// Video codecs OpenReach can negotiate. v1 wires H.264 only; VP8/VP9/H.265 are
 /// extension points behind the same traits.

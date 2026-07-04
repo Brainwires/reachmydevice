@@ -174,6 +174,8 @@ struct App {
     displays: Vec<DisplayDescriptor>,
     /// The display id currently selected in the picker.
     active_display: u32,
+    /// Whether to play host audio (opt-in; set via `OPENREACH_AUDIO`).
+    enable_audio: bool,
 
     // input bookkeeping
     /// Current keyboard modifier bitmask (`openreach_protocol::modifiers`).
@@ -255,6 +257,7 @@ impl App {
             file_status: None,
             displays: Vec::new(),
             active_display: 0,
+            enable_audio: std::env::var("OPENREACH_AUDIO").is_ok(),
             modifiers: 0,
             last_cursor: (0.0, 0.0),
             job: None,
@@ -290,6 +293,7 @@ impl App {
             device_name: self.device_name.clone(),
             ice_servers: self.ice_servers.clone(),
             bind_addr: self.bind_addr.clone(),
+            enable_audio: self.enable_audio,
         };
         match ViewerSession::start(cfg, signaling) {
             Ok(session) => {

@@ -18,18 +18,19 @@ pub mod pb {
 }
 
 pub use pb::{
-    envelope, input_event, Bye, ClipboardKind, ClipboardUpdate, DisplayDescriptor, DisplayList,
-    Envelope, FileAck, FileCancel, FileChunk, FileComplete, FileOffer, Hello, HelloAck, InputEvent,
-    KeyEvent, MouseButton, MouseMove, MouseScroll, Ping, Pong, RequestKeyframe, Role,
-    SelectDisplay, ViewOnly,
+    envelope, input_event, AudioFrame, Bye, ClipboardKind, ClipboardUpdate, DisplayDescriptor,
+    DisplayList, Envelope, FileAck, FileCancel, FileChunk, FileComplete, FileOffer, Hello,
+    HelloAck, InputEvent, KeyEvent, MouseButton, MouseMove, MouseScroll, Ping, Pong,
+    RequestKeyframe, Role, SelectDisplay, ViewOnly,
 };
 
 /// Protocol major version. **Incompatible across mismatches** — bump only on a
 /// breaking wire change.
 pub const PROTOCOL_MAJOR: u32 = 1;
 /// Protocol minor version. Backward-compatible additions bump this.
-/// MINOR 1 added clipboard/file-transfer/multi-monitor/session-control messages.
-pub const PROTOCOL_MINOR: u32 = 1;
+/// MINOR 1 added clipboard/file-transfer/multi-monitor/session-control messages;
+/// MINOR 2 added the Opus `AudioFrame`.
+pub const PROTOCOL_MINOR: u32 = 2;
 
 /// Errors from encoding/decoding or handshake validation.
 #[derive(Debug, thiserror::Error)]
@@ -214,6 +215,11 @@ pub fn request_keyframe() -> Envelope {
 /// Toggle view-only on the host (input suppressed while enabled).
 pub fn view_only(enabled: bool) -> Envelope {
     envelope(pb::envelope::Payload::ViewOnly(ViewOnly { enabled }))
+}
+
+/// Host → viewer: one Opus audio packet (48 kHz mono, 20 ms).
+pub fn audio_frame(opus: Vec<u8>, seq: u64) -> Envelope {
+    envelope(pb::envelope::Payload::Audio(AudioFrame { opus, seq }))
 }
 
 /// Host → viewer: advertise the available displays.

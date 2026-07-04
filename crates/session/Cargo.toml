@@ -27,6 +27,10 @@ hex = "0.4"
 # Cross-platform clipboard (macOS NSPasteboard, Linux X11) for clipboard sync.
 arboard = "3"
 
+# Cross-platform audio capture + playback (CoreAudio / ALSA) for the optional
+# host -> viewer Opus stream. Opt-in (default off); see audio.rs.
+cpal = "0.15"
+
 # Rendezvous WebSocket signaling client (runs on its own current-thread runtime).
 tokio = { workspace = true }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }

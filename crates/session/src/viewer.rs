@@ -28,6 +28,8 @@ pub struct ViewerConfig {
     pub ice_servers: Vec<String>,
     /// Local UDP bind address (`0.0.0.0:0`, or `127.0.0.1:0` for loopback).
     pub bind_addr: String,
+    /// Play host audio if the host streams it. Off by default.
+    pub enable_audio: bool,
 }
 
 impl Default for ViewerConfig {
@@ -36,6 +38,7 @@ impl Default for ViewerConfig {
             device_name: "openreach-viewer".to_string(),
             ice_servers: Vec::new(),
             bind_addr: "0.0.0.0:0".to_string(),
+            enable_audio: false,
         }
     }
 }
@@ -132,9 +135,25 @@ impl ViewerSession {
         // Pump thread: owns the transport, bridges signaling, routes media to decode.
         {
             let device_name = cfg.device_name.clone();
+            let enable_audio = cfg.enable_audio;
             std::thread::Builder::new()
                 .name("openreach-viewer-pump".into())
                 .spawn(move || {
+                    // Audio playback lives on this thread (cpal stream is !Send).
+                    let mut audio = if enable_audio {
+                        match crate::audio::AudioPlayback::start() {
+                            Ok(p) => {
+                                tracing::info!("audio playback enabled");
+                                Some(p)
+                            }
+                            Err(e) => {
+                                tracing::warn!(error=%e, "audio playback unavailable");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     loop {
                         while let Some(msg) = signal.try_recv() {
                             transport.feed_signal(msg);
@@ -190,6 +209,11 @@ impl ViewerSession {
                                         Some(Payload::DisplayList(list)) => {
                                             let _ = updates_tx
                                                 .send(ViewerUpdate::Displays(list.displays));
+                                        }
+                                        Some(Payload::Audio(frame)) => {
+                                            if let Some(a) = audio.as_mut() {
+                                                a.push_packet(&frame.opus, frame.seq);
+                                            }
                                         }
                                         Some(p) => {
                                             // File-transfer payloads route to the manager.

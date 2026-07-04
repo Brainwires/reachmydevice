@@ -47,6 +47,7 @@ fn main() -> anyhow::Result<()> {
             })
             .unwrap_or_default(),
         bind_addr: std::env::var("OPENREACH_BIND").unwrap_or_else(|_| "0.0.0.0:0".into()),
+        enable_audio: std::env::var("OPENREACH_AUDIO").is_ok(),
     };
 
     let signaling = build_signaling()?;

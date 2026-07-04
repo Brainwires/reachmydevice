@@ -72,6 +72,7 @@ fn main() -> anyhow::Result<()> {
         }),
         ice_servers: ice_servers(),
         bind_addr: std::env::var("OPENREACH_BIND").unwrap_or_else(|_| "0.0.0.0:0".to_string()),
+        enable_audio: std::env::var("OPENREACH_AUDIO").is_ok(),
     };
 
     tracing::info!(
