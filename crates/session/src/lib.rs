@@ -15,6 +15,7 @@ pub mod filexfer;
 pub mod host;
 pub mod identity;
 pub mod pairing;
+pub mod pairing_client;
 pub mod power;
 pub mod rendezvous;
 pub mod signal;

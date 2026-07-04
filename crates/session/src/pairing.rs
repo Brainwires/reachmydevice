@@ -142,6 +142,42 @@ pub fn confirmation(key: &[u8; 32]) -> [u8; 16] {
     tag
 }
 
+/// Alphabet for the pairing-code secret: lowercase minus ambiguous letters
+/// (i, l, o, u) plus digits 2–9 — easy to read aloud / type. 31 symbols.
+const CODE_ALPHABET: &[u8] = b"abcdefghjkmnpqrstvwxyz23456789";
+
+/// Generate a human-transferable pairing code: `"<channel>-<secret>"`.
+///
+/// The **channel** (a short number) is a *public* rendezvous id — it routes the
+/// relay mailbox and the relay sees it. The **secret** (~40 bits) is the SPAKE2
+/// password and is **never** sent to the relay. Splitting them this way (à la
+/// Magic Wormhole) is what keeps a low-entropy code safe over an untrusted relay:
+/// the relay can't brute-force the PAKE because it never learns the secret.
+pub fn generate_pairing_code() -> anyhow::Result<String> {
+    let mut raw = [0u8; 10];
+    getrandom::getrandom(&mut raw).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
+    let channel = (u16::from(raw[0]) << 8 | u16::from(raw[1])) % 1000; // 0..999
+    let secret: String = raw[2..]
+        .iter()
+        .map(|&b| CODE_ALPHABET[b as usize % CODE_ALPHABET.len()] as char)
+        .collect();
+    Ok(format!("{channel}-{secret}"))
+}
+
+/// Split a pairing code into `(channel, secret)` on the first `-`. The channel is
+/// the relay-mailbox room; the secret is the PAKE password.
+pub fn split_code(code: &str) -> anyhow::Result<(String, String)> {
+    let (channel, secret) = code
+        .trim()
+        .split_once('-')
+        .ok_or_else(|| anyhow::anyhow!("pairing code must be <channel>-<secret>"))?;
+    anyhow::ensure!(
+        !channel.is_empty() && !secret.is_empty(),
+        "empty channel or secret in pairing code"
+    );
+    Ok((channel.to_string(), secret.to_string()))
+}
+
 /// In-progress SPAKE2 exchange (holds the secret state until finished).
 pub struct PakeExchange(Spake2<Ed25519Group>);
 
@@ -199,6 +235,20 @@ mod tests {
         // A different seed yields a different key.
         let kc = derive_key_from_seed(&[43u8; 32], &pa, &pb);
         assert_ne!(*ka, *kc);
+    }
+
+    #[test]
+    fn pairing_code_generates_and_splits() {
+        let code = generate_pairing_code().unwrap();
+        let (channel, secret) = split_code(&code).unwrap();
+        assert!(channel.chars().all(|c| c.is_ascii_digit()));
+        assert!(secret.len() >= 6);
+        // Two codes differ.
+        assert_ne!(generate_pairing_code().unwrap(), generate_pairing_code().unwrap());
+        // Malformed input rejected.
+        assert!(split_code("nodash").is_err());
+        assert!(split_code("-secret").is_err());
+        assert!(split_code("42-").is_err());
     }
 
     #[test]

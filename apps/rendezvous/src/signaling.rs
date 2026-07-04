@@ -55,9 +55,15 @@ impl Hub {
         let id = self
             .next_member
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // Tell the party already waiting that their peer has arrived.
+        // Notify *both* sides that the room now has a peer, so each knows to send
+        // its first pairing message (the newcomer learns an existing peer is here;
+        // the waiter learns the newcomer arrived).
+        let already_present = !members.is_empty();
         for (_, other) in members.iter() {
             let _ = other.send(r#"{"peer":"joined"}"#.to_string());
+        }
+        if already_present {
+            let _ = tx.send(r#"{"peer":"joined"}"#.to_string());
         }
         members.push((id, tx));
         Some(id)
@@ -290,8 +296,9 @@ mod tests {
 
         let a = hub.join_room("code1", txa).await.unwrap();
         let b = hub.join_room("code1", txb).await.unwrap();
-        // B joining notifies A.
+        // Both sides are told a peer is present.
         assert_eq!(rxa.recv().await.unwrap(), r#"{"peer":"joined"}"#);
+        assert_eq!(rxb.recv().await.unwrap(), r#"{"peer":"joined"}"#);
 
         // A → B and B → A relay to the *other* member only.
         hub.relay_room("code1", a, "hello".into()).await;
