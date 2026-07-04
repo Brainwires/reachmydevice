@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent for the OpenReach host on macOS (unattended access).
+  Install:
+    cp com.brainwires.openreach-host.plist ~/Library/LaunchAgents/
+    # edit the EnvironmentVariables below (token/URL), then:
+    launchctl load ~/Library/LaunchAgents/com.brainwires.openreach-host.plist
+  Grant Screen Recording + Accessibility to the openreach-host binary in
+  System Settings > Privacy & Security (see docs/macos-permissions.md).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.brainwires.openreach-host</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/local/bin/openreach-host</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OPENREACH_RENDEZVOUS_URL</key><string>wss://openreach.brainwires.dev/ws</string>
+    <key>OPENREACH_TOKEN</key><string>replace-with-device-token</string>
+    <key>OPENREACH_ICE</key><string>stun:stun.l.google.com:19302</string>
+    <key>OPENREACH_NAME</key><string>my-mac</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/tmp/openreach-host.log</string>
+  <key>StandardOutPath</key><string>/tmp/openreach-host.log</string>
+</dict>
+</plist>

@@ -1,0 +1,37 @@
+# systemd unit for the OpenReach host agent (Linux, unattended access).
+#
+# Install (per-user, recommended — runs in the user's graphical session so it can
+# capture X11 and inject input):
+#   mkdir -p ~/.config/systemd/user
+#   cp openreach-host.service ~/.config/systemd/user/
+#   cp openreach-host.env ~/.config/openreach/host.env   # edit tokens/URL first
+#   loginctl enable-linger "$USER"                        # start at boot, survive logout
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now openreach-host
+#
+# Wayland/headless notes: X11 capture/input need a running X server the unit can
+# reach (DISPLAY). On a headless box use Xvfb; Wayland needs the PipeWire/libei
+# backend (roadmap).
+[Unit]
+Description=OpenReach host agent (remote desktop)
+After=graphical-session.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Config (rendezvous URL, device token, ICE servers, resolution) lives here:
+EnvironmentFile=%h/.config/openreach/host.env
+# DISPLAY must point at the user's X server for capture + input injection.
+Environment=DISPLAY=:0
+ExecStart=%h/.local/bin/openreach-host
+Restart=on-failure
+RestartSec=3
+# Hardening (relaxed enough to allow X access):
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/openreach %h/.local/state/openreach
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
