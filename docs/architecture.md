@@ -35,18 +35,19 @@ This document tracks the intended end-state architecture and marks what exists t
 
 ## Crate map (Rust workspace)
 
-| Crate / app            | Responsibility                                                              | Status (Phase 1) |
-|------------------------|-----------------------------------------------------------------------------|------------------|
-| `crates/protocol`      | Versioned wire schema (prost). Version handshake, input/control messages.    | building         |
-| `crates/transport`     | WebRTC over the sans-IO `rtc` fork: driver loop, video track, data channel, GCC, signaling trait. | building |
-| `crates/capture`       | `Capturer` trait + platform backends (macOS ScreenCaptureKit first).         | building         |
-| `crates/codec`         | `Encoder`/`Decoder` traits + platform backends (macOS VideoToolbox H.264).   | building         |
-| `crates/input`         | `Injector` trait + platform backends (macOS CGEvent).                        | building         |
-| `crates/session`       | Wires capture→codec→transport (host) and transport→decode→render (viewer).   | building         |
-| `apps/host`            | Headless host agent binary (spike).                                          | scaffold         |
-| `apps/viewer`          | winit + wgpu viewer binary (spike).                                          | scaffold         |
-| `apps/signal-dev`      | LAN signaling helper for the spike (replaced by rendezvous in Phase 2).      | scaffold         |
-| `rendezvous` (Phase 2) | axum + SQLite + coturn deployable. Not built yet.                            | planned          |
+| Crate / app            | Responsibility                                                              | Status |
+|------------------------|-----------------------------------------------------------------------------|--------|
+| `crates/protocol`      | Versioned wire schema (prost): handshake, input, clipboard/file/multimon/control. | ✅ |
+| `crates/transport`     | WebRTC over the sans-IO `rtc` fork: driver loop, video track, data channel, GCC, **host+srflx ICE gathering**, signaling trait. | ✅ |
+| `crates/capture`       | `Capturer` trait + backends: **macOS ScreenCaptureKit**, **Linux X11**. (Windows/Wayland TODO) | ✅ |
+| `crates/codec`         | `Encoder`/`Decoder` traits + **software H.264 (openh264)**. (VideoToolbox/HW TODO) | ✅ |
+| `crates/input`         | `Injector` trait + backends: **macOS CGEvent**, **Linux XTest**. (Windows/Wayland TODO) | ✅ |
+| `crates/session`       | Host + viewer wiring; signaling (LAN + rendezvous WS); device identity + TOFU; account client. | ✅ |
+| `apps/host`            | Headless host agent (rendezvous or LAN signaling, STUN/TURN, session indicator). | ✅ |
+| `apps/viewer`          | winit + wgpu viewer; egui UI (login/device-list/connect/HUD) landing.        | 🔄 |
+| `apps/rendezvous`      | axum + SQLite: accounts/tokens (Argon2), WS relay, rate limiting, **web console**. Deployed. | ✅ |
+| `apps/signal-dev`      | LAN signaling helper (rendezvous stand-in for local dev).                    | ✅ |
+| coturn (in compose)    | STUN + TURN for NAT traversal.                                              | ✅ |
 
 ## Data flow (host → viewer video)
 
