@@ -342,6 +342,67 @@ fn downmix_i16(data: &[i16], channels: usize) -> Vec<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openreach_protocol as proto;
+
+    /// End-to-end audio pipeline in software: PCM → Opus encode → `AudioFrame`
+    /// wire envelope → decode envelope → Opus decode → PCM. This exercises every
+    /// stage under our control (everything except the OS capture syscall and the
+    /// physical speaker) and asserts a real signal survives the round trip.
+    #[test]
+    fn audio_pipeline_pcm_through_wire_to_pcm() {
+        let mut enc = AudioEncoder::new(24_000).unwrap();
+        let mut dec = AudioDecoder::new().unwrap();
+
+        // A continuous 440 Hz tone, sent as a stream of 20 ms frames so we can
+        // measure steady-state fidelity past Opus's initial encoder delay.
+        let freq = 440.0_f32;
+        let mut phase = 0.0_f32;
+        let step = 2.0 * std::f32::consts::PI * freq / AUDIO_SAMPLE_RATE as f32;
+
+        let mut in_energy = 0.0_f64;
+        let mut out_energy = 0.0_f64;
+        for frame_idx in 0..10 {
+            let pcm: Vec<i16> = (0..AUDIO_FRAME_SAMPLES)
+                .map(|_| {
+                    let s = (phase.sin() * 12000.0) as i16;
+                    phase += step;
+                    s
+                })
+                .collect();
+
+            // Encode → wrap in the protocol AudioFrame → serialize (the wire).
+            let packet = enc.encode(&pcm).unwrap();
+            let env = proto::audio_frame(packet.clone(), frame_idx);
+            let wire = proto::encode(&env);
+
+            // Decode the envelope → the Opus packet must survive byte-for-byte.
+            let back = proto::decode(&wire).unwrap();
+            let audio = match back.payload.unwrap() {
+                proto::pb::envelope::Payload::Audio(a) => a,
+                other => panic!("expected AudioFrame, got {other:?}"),
+            };
+            assert_eq!(audio.opus, packet, "opus packet corrupted on the wire");
+            assert_eq!(audio.seq, frame_idx);
+
+            // Opus decode → PCM of the right length.
+            let out = dec.decode(Some(&audio.opus), false).unwrap();
+            assert_eq!(out.len(), AUDIO_FRAME_SAMPLES);
+
+            // Accumulate energy past the first two frames (encoder priming/delay).
+            if frame_idx >= 2 {
+                in_energy += pcm.iter().map(|&s| (s as f64).powi(2)).sum::<f64>();
+                out_energy += out.iter().map(|&s| (s as f64).powi(2)).sum::<f64>();
+            }
+        }
+
+        // In steady state a lossy-but-faithful codec preserves most of the tone's
+        // energy — the recovered stream is real audio, not silence or garbage.
+        let ratio = out_energy / in_energy;
+        assert!(
+            (0.5..=1.5).contains(&ratio),
+            "recovered audio energy ratio out of range: {ratio:.3}"
+        );
+    }
 
     #[test]
     fn resampler_passthrough_when_equal() {
