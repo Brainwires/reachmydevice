@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenReach</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --border:#2a2f3a;
+    --text:#e6e8ec; --muted:#9aa3b2; --accent:#4f8cff; --accent2:#3a6fd8;
+    --ok:#39d98a; --warn:#ffb020; --err:#ff5c5c; --radius:12px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f6f8; --panel:#fff; --panel2:#f0f2f5; --border:#e2e5ea;
+      --text:#1a1d23; --muted:#5b6472; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    background:var(--bg); color:var(--text); }
+  a { color:var(--accent); }
+  .wrap { max-width:900px; margin:0 auto; padding:24px 16px; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:24px; }
+  .logo { width:34px;height:34px;border-radius:9px;
+    background:linear-gradient(135deg,var(--accent),#8a5cff); display:grid;place-items:center;
+    color:#fff;font-weight:700; }
+  header h1 { font-size:20px; margin:0; }
+  header .sp { flex:1; }
+  .muted { color:var(--muted); }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+    padding:20px; margin-bottom:18px; }
+  .card h2 { margin:0 0 14px; font-size:16px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input, select { width:100%; padding:10px 12px; border-radius:9px; border:1px solid var(--border);
+    background:var(--panel2); color:var(--text); font-size:14px; }
+  button { padding:10px 16px; border-radius:9px; border:0; background:var(--accent); color:#fff;
+    font-weight:600; cursor:pointer; font-size:14px; }
+  button:hover { background:var(--accent2); }
+  button.ghost { background:transparent; color:var(--text); border:1px solid var(--border); }
+  button.danger { background:transparent; color:var(--err); border:1px solid var(--border); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:10px 8px; border-bottom:1px solid var(--border); font-size:14px; }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.03em; }
+  code, .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:20px; font-size:12px;
+    background:var(--panel2); border:1px solid var(--border); }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+    background:var(--panel2); border:1px solid var(--border); padding:10px 16px; border-radius:10px;
+    box-shadow:0 8px 30px rgba(0,0,0,.3); opacity:0; transition:.2s; pointer-events:none; }
+  .toast.show { opacity:1; }
+  .hidden { display:none; }
+  .err { color:var(--err); font-size:13px; min-height:18px; }
+  .foot { color:var(--muted); font-size:12px; text-align:center; margin-top:28px; }
+  pre { background:var(--panel2); border:1px solid var(--border); border-radius:9px; padding:12px;
+    overflow:auto; font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">OR</div>
+    <h1>OpenReach <span class="muted" style="font-weight:400">rendezvous</span></h1>
+    <div class="sp"></div>
+    <span id="whoami" class="muted"></span>
+    <button id="logoutBtn" class="ghost hidden" onclick="logout()">Sign out</button>
+  </header>
+
+  <!-- Auth view -->
+  <div id="authView">
+    <div class="card" style="max-width:420px;margin:40px auto;">
+      <h2 id="authTitle">Sign in</h2>
+      <label>Username</label>
+      <input id="username" autocomplete="username">
+      <label>Password</label>
+      <input id="password" type="password" autocomplete="current-password">
+      <div class="err" id="authErr"></div>
+      <div class="row" style="margin-top:14px;">
+        <button id="authBtn" onclick="doAuth()">Sign in</button>
+        <button class="ghost" onclick="toggleMode()"><span id="toggleTxt">Create account</span></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="dashView" class="hidden">
+    <div class="card">
+      <h2>Your devices</h2>
+      <div id="deviceEmpty" class="muted hidden">No devices yet. Register one below, then run the host/viewer with its token.</div>
+      <div style="overflow:auto"><table id="deviceTable" class="hidden">
+        <thead><tr><th>Name</th><th>Role</th><th>Device ID</th><th>Last seen</th><th>Key</th><th></th></tr></thead>
+        <tbody id="deviceRows"></tbody>
+      </table></div>
+    </div>
+
+    <div class="card">
+      <h2>Register a device</h2>
+      <div class="grid2">
+        <div><label>Name</label><input id="devName" placeholder="e.g. Office Mac"></div>
+        <div><label>Role</label><select id="devRole"><option value="both">Host + Viewer</option><option value="host">Host</option><option value="viewer">Viewer</option></select></div>
+      </div>
+      <div class="row" style="margin-top:14px;"><button onclick="registerDevice()">Register &amp; get token</button></div>
+      <div id="tokenBox" class="hidden" style="margin-top:16px;">
+        <label>Bearer token (shown once — copy it now)</label>
+        <div class="row"><input id="tokenVal" readonly class="mono"><button class="ghost" onclick="copyToken()">Copy</button></div>
+        <label style="margin-top:14px;">Run the host on that machine:</label>
+        <pre id="onboardCmd"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">Self-hostable remote desktop · signaling + device registry · media is end-to-end encrypted (DTLS-SRTP)</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const API = location.origin;
+let auth = null; // "Basic ..."
+let mode = "login";
+
+function toast(msg) { const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200); }
+function basic(u,p){ return "Basic "+btoa(u+":"+p); }
+
+function toggleMode(){
+  mode = mode==="login" ? "register" : "login";
+  document.getElementById('authTitle').textContent = mode==="login"?"Sign in":"Create account";
+  document.getElementById('authBtn').textContent = mode==="login"?"Sign in":"Create account";
+  document.getElementById('toggleTxt').textContent = mode==="login"?"Create account":"Have an account? Sign in";
+  document.getElementById('authErr').textContent = "";
+}
+
+async function doAuth(){
+  const u=document.getElementById('username').value.trim();
+  const p=document.getElementById('password').value;
+  const err=document.getElementById('authErr'); err.textContent="";
+  if(!u||p.length<8){ err.textContent="Username required; password must be at least 8 characters."; return; }
+  if(mode==="register"){
+    const r=await fetch(API+"/api/register",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({username:u,password:p})});
+    if(!r.ok){ err.textContent=(await r.json().catch(()=>({}))).error||("Registration failed ("+r.status+")"); return; }
+    toast("Account created");
+  }
+  // Verify creds by listing devices.
+  const a=basic(u,p);
+  const r=await fetch(API+"/api/devices",{headers:{authorization:a}});
+  if(r.status===401){ err.textContent="Invalid username or password."; return; }
+  if(!r.ok){ err.textContent="Sign-in failed ("+r.status+")"; return; }
+  auth=a; sessionStorage.setItem("or_auth",a); sessionStorage.setItem("or_user",u);
+  showDash(u, await r.json());
+}
+
+function logout(){ auth=null; sessionStorage.clear(); location.reload(); }
+
+function showDash(user, devices){
+  document.getElementById('authView').classList.add('hidden');
+  document.getElementById('dashView').classList.remove('hidden');
+  document.getElementById('logoutBtn').classList.remove('hidden');
+  document.getElementById('whoami').textContent = user;
+  renderDevices(devices);
+}
+
+function fmtTime(t){ if(!t) return "—"; const d=new Date(t*1000); return d.toLocaleString(); }
+
+function renderDevices(devices){
+  const table=document.getElementById('deviceTable'), rows=document.getElementById('deviceRows'), empty=document.getElementById('deviceEmpty');
+  rows.innerHTML="";
+  if(!devices.length){ table.classList.add('hidden'); empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden'); table.classList.remove('hidden');
+  for(const d of devices){
+    const tr=document.createElement('tr');
+    tr.innerHTML = `<td>${esc(d.name)}</td><td><span class="pill">${esc(d.role)}</span></td>
+      <td class="mono">${esc(d.device_id.slice(0,16))}…</td><td class="muted">${fmtTime(d.last_seen)}</td>
+      <td class="mono muted" title="${esc(d.public_key)}">${esc((d.public_key||'').slice(0,10))}…</td>
+      <td style="text-align:right"><button class="danger" onclick="delDevice('${esc(d.device_id)}')">Remove</button></td>`;
+    rows.appendChild(tr);
+  }
+}
+function esc(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function refresh(){
+  const r=await fetch(API+"/api/devices",{headers:{authorization:auth}});
+  if(r.ok) renderDevices(await r.json());
+}
+
+async function registerDevice(){
+  const name=document.getElementById('devName').value.trim()||"device";
+  const role=document.getElementById('devRole').value;
+  const user=sessionStorage.getItem("or_user");
+  const pass=atob(auth.slice(6)).split(":").slice(1).join(":");
+  const device_id = crypto.randomUUID().replace(/-/g,'');
+  const r=await fetch(API+"/api/devices",{method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({username:user,password:pass,device_id,name,public_key:"browser-registered",role})});
+  if(!r.ok){ toast("Register failed ("+r.status+")"); return; }
+  const {token}=await r.json();
+  document.getElementById('tokenBox').classList.remove('hidden');
+  document.getElementById('tokenVal').value=token;
+  const host = location.host;
+  document.getElementById('onboardCmd').textContent =
+    `OPENREACH_RENDEZVOUS_URL=wss://${host}/ws \\\n  OPENREACH_TOKEN=${token} \\\n  cargo run --release -p openreach-host`;
+  toast("Device registered");
+  refresh();
+}
+
+async function delDevice(id){
+  if(!confirm("Remove this device?")) return;
+  const r=await fetch(API+"/api/devices/"+encodeURIComponent(id),{method:"DELETE",headers:{authorization:auth}});
+  if(r.ok){ toast("Removed"); refresh(); } else toast("Remove failed ("+r.status+")");
+}
+function copyToken(){ const v=document.getElementById('tokenVal'); navigator.clipboard.writeText(v.value); toast("Token copied"); }
+
+// Restore session
+(function(){
+  const a=sessionStorage.getItem("or_auth"), u=sessionStorage.getItem("or_user");
+  if(a&&u){ auth=a; fetch(API+"/api/devices",{headers:{authorization:a}}).then(r=>r.ok?r.json():Promise.reject()).then(d=>showDash(u,d)).catch(()=>sessionStorage.clear()); }
+})();
+document.getElementById('password').addEventListener('keydown',e=>{ if(e.key==='Enter') doAuth(); });
+</script>
+</body>
+</html>

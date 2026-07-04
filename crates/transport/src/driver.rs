@@ -25,7 +25,7 @@
 use crate::{DriverCmd, SignalMsg, TransportConfig, TransportEvent, TransportRole};
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::sync::Arc;
@@ -48,8 +48,8 @@ use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::{
-    CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit,
-    RTCIceServer,
+    CandidateConfig, CandidateHostConfig, CandidateServerReflexiveConfig, RTCDtlsRole,
+    RTCIceCandidate, RTCIceCandidateInit, RTCIceServer,
 };
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::rtp::codec::h264::H264Packet;
@@ -63,6 +63,9 @@ use rtc::rtp_transceiver::{
 };
 use rtc::sansio::Protocol;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtc::stun::addr::MappedAddress;
+use rtc::stun::message::{Getter, Message, TransactionId, BINDING_REQUEST};
+use rtc::stun::xoraddr::XorMappedAddress;
 
 /// H.264 clock rate (Hz) — RTP timestamps advance at 90 kHz.
 const VIDEO_CLOCK_RATE: u32 = 90_000;
@@ -77,6 +80,12 @@ const SAMPLE_BUILDER_MAX_LATE: u16 = 128;
 const MAX_SOCKET_READ_WAIT: Duration = Duration::from_millis(5);
 /// `sdp_fmtp_line` announcing constrained-baseline, packetization-mode 1.
 const H264_FMTP: &str = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
+/// Default STUN port (RFC 5389) when a `stun:` URL omits one.
+const STUN_DEFAULT_PORT: u16 = 3478;
+/// How long to wait for a single STUN Binding response before retrying.
+const STUN_READ_TIMEOUT: Duration = Duration::from_millis(800);
+/// How many times to (re)send a STUN Binding request before giving up.
+const STUN_MAX_ATTEMPTS: usize = 3;
 
 /// Run the driver loop until [`DriverCmd::Shutdown`] or the command channel closes.
 pub(crate) fn run(
@@ -116,21 +125,89 @@ fn ice_servers(urls: &[String]) -> Vec<RTCIceServer> {
     }]
 }
 
-/// Build the local UDP socket and the matching host ICE candidate.
-///
-/// Returns the socket, its bound local address, and the candidate serialized as
-/// a signaling string (the `candidate:` a-line value) to hand to the peer.
-fn bind_socket_and_candidate(
-    bind_addr: SocketAddr,
-) -> anyhow::Result<(UdpSocket, SocketAddr, RTCIceCandidateInit)> {
+/// Bind the local UDP socket for the session and report its bound address.
+fn bind_socket(bind_addr: SocketAddr) -> anyhow::Result<(UdpSocket, SocketAddr)> {
     let socket = UdpSocket::bind(bind_addr).context("bind transport UDP socket")?;
     let local_addr = socket.local_addr().context("read local addr")?;
+    Ok((socket, local_addr))
+}
 
+/// Gather every local ICE candidate for the bound socket: a host candidate per
+/// local interface plus a server-reflexive candidate per reachable STUN server.
+///
+/// Because the `rtc` engine is sans-IO it never gathers candidates itself — it
+/// owns no socket. We do it here, once, on the *already-bound* UDP socket and
+/// *before* the driver loop takes it over, so no STUN response can race with
+/// live ICE traffic. Returned candidates are serialized `RTCIceCandidateInit`s
+/// ready to `add_local_candidate` + trickle to the peer.
+///
+/// Gathering never fails the session: a down interface or an unanswered STUN
+/// server is logged and skipped, so we always return at least the host
+/// candidate(s) we can build.
+fn gather_local_candidates(
+    socket: &UdpSocket,
+    local_addr: SocketAddr,
+    ice_servers: &[String],
+) -> Vec<RTCIceCandidateInit> {
+    let mut candidates = Vec::new();
+
+    // Host candidates. A concrete bind (e.g. `127.0.0.1` or a LAN IP) is its
+    // own single host candidate; a wildcard bind (`0.0.0.0`) expands to every
+    // local IPv4 interface (loopback included, so same-host tests still
+    // connect) since `0.0.0.0` itself is useless on the wire.
+    for ip in host_candidate_ips(local_addr.ip()) {
+        match build_host_candidate(ip, local_addr.port()) {
+            Ok(init) => candidates.push(init),
+            Err(e) => tracing::debug!("transport: skip host candidate {ip}: {e}"),
+        }
+    }
+
+    // Server-reflexive candidates: one STUN Binding exchange per `stun:` URL.
+    for url in ice_servers {
+        let Some(host_port) = parse_stun_url(url) else {
+            continue; // not a stun: URL (e.g. turn:) — handled by ICE, not here
+        };
+        match gather_srflx_candidate(socket, local_addr, &host_port, url) {
+            Ok(Some(init)) => candidates.push(init),
+            Ok(None) => tracing::debug!("transport: STUN {url} yielded no srflx candidate"),
+            Err(e) => tracing::debug!("transport: STUN {url} gather failed: {e}"),
+        }
+    }
+
+    candidates
+}
+
+/// The local IPv4 addresses to advertise as host candidates for a given bound
+/// IP. A concrete, non-wildcard bind yields exactly that address; a wildcard
+/// bind expands to every local IPv4 interface address (loopback included).
+fn host_candidate_ips(bound_ip: IpAddr) -> Vec<IpAddr> {
+    match bound_ip {
+        IpAddr::V4(v4) if !v4.is_unspecified() => vec![IpAddr::V4(v4)],
+        IpAddr::V6(v6) if !v6.is_unspecified() => vec![IpAddr::V6(v6)],
+        // Wildcard bind: enumerate interfaces. We advertise IPv4 host
+        // candidates (the transport binds IPv4); loopback is kept so that
+        // loopback/same-host sessions still find a working pair.
+        _ => match if_addrs::get_if_addrs() {
+            Ok(ifaces) => ifaces
+                .into_iter()
+                .map(|iface| iface.ip())
+                .filter(IpAddr::is_ipv4)
+                .collect(),
+            Err(e) => {
+                tracing::debug!("transport: interface enumeration failed: {e}");
+                Vec::new()
+            }
+        },
+    }
+}
+
+/// Build a host ICE candidate at `ip:port`, serialized for signaling.
+fn build_host_candidate(ip: IpAddr, port: u16) -> anyhow::Result<RTCIceCandidateInit> {
     let candidate = CandidateHostConfig {
         base_config: CandidateConfig {
             network: "udp".to_owned(),
-            address: local_addr.ip().to_string(),
-            port: local_addr.port(),
+            address: ip.to_string(),
+            port,
             component: 1,
             ..Default::default()
         },
@@ -138,11 +215,146 @@ fn bind_socket_and_candidate(
     }
     .new_candidate_host()
     .context("build host candidate")?;
-    let candidate_init = RTCIceCandidate::from(&candidate)
+    RTCIceCandidate::from(&candidate)
         .to_json()
-        .context("serialize host candidate")?;
+        .context("serialize host candidate")
+}
 
-    Ok((socket, local_addr, candidate_init))
+/// Extract `host:port` from a `stun:`/`stuns:` URL, applying the default STUN
+/// port when none is present. Returns `None` for non-STUN URLs (e.g. `turn:`).
+fn parse_stun_url(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("stun:")
+        .or_else(|| url.strip_prefix("stuns:"))?;
+    // Drop any `?transport=...` query suffix.
+    let rest = rest.split('?').next().unwrap_or(rest);
+    if rest.contains(':') {
+        Some(rest.to_owned()) // already host:port
+    } else {
+        Some(format!("{rest}:{STUN_DEFAULT_PORT}"))
+    }
+}
+
+/// Discover our public (server-reflexive) mapping via one STUN Binding exchange
+/// on the bound socket, and build the matching srflx candidate. Returns
+/// `Ok(None)` when the server can't be resolved or never answers.
+fn gather_srflx_candidate(
+    socket: &UdpSocket,
+    local_addr: SocketAddr,
+    host_port: &str,
+    url: &str,
+) -> anyhow::Result<Option<RTCIceCandidateInit>> {
+    // Resolve the STUN server to an address of the same family as our socket.
+    let want_ipv4 = local_addr.is_ipv4();
+    let server_addr = host_port
+        .to_socket_addrs()
+        .context("resolve STUN server")?
+        .find(|a| a.is_ipv4() == want_ipv4);
+    let Some(server_addr) = server_addr else {
+        return Ok(None);
+    };
+
+    let Some(public_addr) = stun_binding_request(socket, server_addr)? else {
+        return Ok(None);
+    };
+
+    // The srflx candidate's advertised address/port is our public mapping; its
+    // related (base) address/port is the local bound socket it was gathered on.
+    let candidate = CandidateServerReflexiveConfig {
+        base_config: CandidateConfig {
+            network: "udp".to_owned(),
+            address: public_addr.ip().to_string(),
+            port: public_addr.port(),
+            component: 1,
+            ..Default::default()
+        },
+        rel_addr: local_addr.ip().to_string(),
+        rel_port: local_addr.port(),
+        url: Some(url.to_owned()),
+    }
+    .new_candidate_server_reflexive()
+    .context("build srflx candidate")?;
+    let init = RTCIceCandidate::from(&candidate)
+        .to_json()
+        .context("serialize srflx candidate")?;
+    Ok(Some(init))
+}
+
+/// Send a STUN Binding request on `socket` to `server_addr` and return the
+/// reflexive (public) address the server observed, or `Ok(None)` if it never
+/// answered.
+///
+/// The exchange is a plain RFC 5389 Binding transaction: build a 20-byte
+/// request (message type + magic cookie + a fresh 96-bit transaction id, no
+/// attributes), send it, and read back a Binding success response carrying our
+/// public `ip:port` in XOR-MAPPED-ADDRESS (or the legacy MAPPED-ADDRESS). We
+/// retry a few times with a short read timeout to ride out packet loss.
+fn stun_binding_request(
+    socket: &UdpSocket,
+    server_addr: SocketAddr,
+) -> anyhow::Result<Option<SocketAddr>> {
+    // Build the Binding request. `build` writes the serialized bytes into
+    // `request.raw`; `TransactionId` is `Copy`, so we keep `txn` to match it
+    // against the response below.
+    let mut request = Message::new();
+    let txn = TransactionId::new();
+    request
+        .build(&[Box::new(BINDING_REQUEST), Box::new(txn)])
+        .context("build STUN binding request")?;
+
+    socket
+        .set_read_timeout(Some(STUN_READ_TIMEOUT))
+        .context("set STUN read timeout")?;
+
+    let mut buf = vec![0u8; 1500];
+    for _ in 0..STUN_MAX_ATTEMPTS {
+        if let Err(e) = socket.send_to(&request.raw, server_addr) {
+            tracing::debug!("transport: STUN send_to error: {e}");
+            continue;
+        }
+
+        // Await the response (bounded by the read timeout set above).
+        let (n, from) = match socket.recv_from(&mut buf) {
+            Ok(v) => v,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue; // no answer within the timeout — retry
+            }
+            Err(e) => return Err(anyhow::anyhow!("STUN recv_from: {e}")),
+        };
+        if from != server_addr {
+            continue; // stray datagram from elsewhere — ignore
+        }
+
+        // Decode and confirm it answers *our* request, then read the mapping.
+        let mut response = Message::new();
+        if response.write(&buf[..n]).is_err() {
+            continue; // not a well-formed STUN message
+        }
+        if response.transaction_id != txn {
+            continue; // response to a different transaction
+        }
+        if let Some(addr) = mapped_address(&response) {
+            return Ok(Some(addr));
+        }
+    }
+    Ok(None)
+}
+
+/// Read the reflexive address out of a STUN Binding response, preferring
+/// XOR-MAPPED-ADDRESS and falling back to the legacy MAPPED-ADDRESS.
+fn mapped_address(response: &Message) -> Option<SocketAddr> {
+    let mut xor = XorMappedAddress::default();
+    if xor.get_from(response).is_ok() {
+        return Some(SocketAddr::new(xor.ip, xor.port));
+    }
+    let mut plain = MappedAddress::default();
+    if plain.get_from(response).is_ok() {
+        return Some(SocketAddr::new(plain.ip, plain.port));
+    }
+    None
 }
 
 /// Host: offerer + video sender, with sender-side GCC + TWCC.
@@ -152,7 +364,7 @@ fn run_host(
     event_tx: Sender<TransportEvent>,
     bitrate_bps: Arc<AtomicU32>,
 ) -> anyhow::Result<()> {
-    let (socket, local_addr, local_candidate) = bind_socket_and_candidate(config.bind_addr)?;
+    let (socket, local_addr) = bind_socket(config.bind_addr)?;
 
     // Media engine: register the H.264 send codec.
     let mut media_engine = MediaEngine::default();
@@ -218,17 +430,23 @@ fn run_host(
         )
         .context("create control data channel")?;
 
-    // Kick off signaling: create + apply the offer, then surface it and our host
-    // candidate for the app to relay to the peer.
+    // Kick off signaling: create + apply the offer and surface it immediately,
+    // so the peer can start negotiating while we gather candidates.
     let offer = pc.create_offer(None).context("create offer")?;
     pc.set_local_description(offer.clone())
         .context("set local offer")?;
-    pc.add_local_candidate(local_candidate.clone())
-        .context("add local candidate")?;
     emit_session(&event_tx, &offer)?;
-    let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
-        local_candidate.candidate.clone(),
-    )));
+
+    // Gather host + server-reflexive candidates on the bound socket now (before
+    // the driver loop owns it) and trickle each. A local description exists, so
+    // they can be added to the agent eagerly.
+    for init in gather_local_candidates(&socket, local_addr, &config.ice_servers) {
+        pc.add_local_candidate(init.clone())
+            .context("add local candidate")?;
+        let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
+            init.candidate,
+        )));
+    }
 
     // Packetizer for outbound Annex-B access units.
     let packetizer: Box<dyn Packetizer> = Box::new(new_packetizer(
@@ -250,7 +468,7 @@ fn run_host(
         }),
         sample_builder: None,
         data_channel_id: None,
-        local_candidate: None, // already added above
+        pending_local_candidates: Vec::new(), // host adds its own eagerly above
         remote_description_set: false,
         pending_remote_candidates: Vec::new(),
         bitrate_bps,
@@ -266,7 +484,7 @@ fn run_viewer(
     event_tx: Sender<TransportEvent>,
     bitrate_bps: Arc<AtomicU32>,
 ) -> anyhow::Result<()> {
-    let (socket, local_addr, local_candidate) = bind_socket_and_candidate(config.bind_addr)?;
+    let (socket, local_addr) = bind_socket(config.bind_addr)?;
 
     let mut media_engine = MediaEngine::default();
     media_engine
@@ -307,9 +525,12 @@ fn run_viewer(
     )
     .context("add recvonly video transceiver")?;
 
-    // The viewer's own host candidate is added and surfaced only after it
-    // answers the offer (a local description must exist first), so it is stashed
-    // in RoleState and handled in `apply_signal`.
+    // Gather the viewer's own candidates now, on the bound socket, before the
+    // driver loop owns it. They can only be added and surfaced once the viewer
+    // answers the offer (a local description must exist first), so they are
+    // stashed in RoleState and handled in `apply_signal`.
+    let pending_local_candidates =
+        gather_local_candidates(&socket, local_addr, &config.ice_servers);
 
     // H.264 depacketizer + sample builder reassemble RTP into Annex-B access
     // units. `H264Packet` defaults to `is_avc = false`, so it emits NAL units
@@ -326,7 +547,7 @@ fn run_viewer(
         video: None,
         sample_builder: Some(sample_builder),
         data_channel_id: None,
-        local_candidate: Some(local_candidate),
+        pending_local_candidates,
         remote_description_set: false,
         pending_remote_candidates: Vec::new(),
         bitrate_bps,
@@ -379,10 +600,11 @@ struct RoleState {
     sample_builder: Option<SampleBuilder<H264Packet>>,
     /// Id of the open `control` data channel, once its `OnOpen` fires.
     data_channel_id: Option<RTCDataChannelId>,
-    /// Our own host candidate, added to the local agent once a local
-    /// description exists. The host adds it eagerly at startup and clears this;
-    /// the viewer adds it when it answers the offer.
-    local_candidate: Option<RTCIceCandidateInit>,
+    /// Our own gathered local candidates (host + srflx), added to the local
+    /// agent once a local description exists. The host adds them eagerly at
+    /// startup and leaves this empty; the viewer adds them when it answers the
+    /// offer.
+    pending_local_candidates: Vec<RTCIceCandidateInit>,
     /// Whether a remote description has been applied yet. `add_remote_candidate`
     /// is only valid afterwards, so candidates that arrive early are buffered.
     remote_description_set: bool,
@@ -609,30 +831,26 @@ fn apply_signal<I: Interceptor>(
 ) -> anyhow::Result<()> {
     match msg {
         SignalMsg::Offer(json) => {
-            // Viewer path: apply the remote offer, then add our own host
-            // candidate (a local description must exist first), answer, and
-            // surface the answer + candidate.
+            // Viewer path: apply the remote offer, answer it (which establishes
+            // our local description), then add + trickle our gathered
+            // candidates (add_local_candidate requires a local description).
             let offer: RTCSessionDescription =
                 serde_json::from_str(&json).context("parse remote offer")?;
             pc.set_remote_description(offer)
                 .context("set remote offer")?;
             state.remote_description_set = true;
 
-            if let Some(local) = state.local_candidate.take() {
-                pc.add_local_candidate(local.clone())
+            let answer = pc.create_answer(None).context("create answer")?;
+            pc.set_local_description(answer.clone())
+                .context("set local answer")?;
+            emit_session(event_tx, &answer)?;
+
+            for init in state.pending_local_candidates.drain(..) {
+                pc.add_local_candidate(init.clone())
                     .context("add local candidate")?;
-                let answer = pc.create_answer(None).context("create answer")?;
-                pc.set_local_description(answer.clone())
-                    .context("set local answer")?;
-                emit_session(event_tx, &answer)?;
                 let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
-                    local.candidate,
+                    init.candidate,
                 )));
-            } else {
-                let answer = pc.create_answer(None).context("create answer")?;
-                pc.set_local_description(answer.clone())
-                    .context("set local answer")?;
-                emit_session(event_tx, &answer)?;
             }
             flush_remote_candidates(pc, state);
         }
@@ -747,5 +965,105 @@ fn drain_reads<I: Interceptor>(
                 // Processed by interceptors already; nothing app-visible here.
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn parse_stun_url_applies_default_port() {
+        assert_eq!(
+            parse_stun_url("stun:stun.l.google.com:19302").as_deref(),
+            Some("stun.l.google.com:19302")
+        );
+        assert_eq!(
+            parse_stun_url("stun:stun.example.com").as_deref(),
+            Some("stun.example.com:3478")
+        );
+        assert_eq!(
+            parse_stun_url("stuns:stun.example.com").as_deref(),
+            Some("stun.example.com:3478")
+        );
+        // Query suffix is dropped.
+        assert_eq!(
+            parse_stun_url("stun:stun.example.com?transport=udp").as_deref(),
+            Some("stun.example.com:3478")
+        );
+        // Non-STUN URLs are ignored here (ICE handles turn:).
+        assert_eq!(parse_stun_url("turn:turn.example.com:3478"), None);
+    }
+
+    #[test]
+    fn host_candidate_ips_concrete_bind_is_itself() {
+        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5));
+        assert_eq!(host_candidate_ips(ip), vec![ip]);
+        // Loopback is a concrete address too, so it maps to itself — this is
+        // what lets the loopback test connect without STUN.
+        let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        assert_eq!(host_candidate_ips(lo), vec![lo]);
+    }
+
+    #[test]
+    fn host_candidate_ips_wildcard_enumerates_interfaces() {
+        // A wildcard bind expands to real interface addresses; there is always
+        // at least loopback, and none of them is the wildcard itself.
+        let ips = host_candidate_ips(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert!(!ips.is_empty(), "expected at least one interface address");
+        assert!(ips.iter().all(|ip| ip.is_ipv4()));
+        assert!(ips.iter().all(|ip| !ip.is_unspecified()));
+    }
+
+    #[test]
+    fn build_host_candidate_serializes_srflx_free_line() {
+        let init = build_host_candidate(IpAddr::V4(Ipv4Addr::LOCALHOST), 5000).unwrap();
+        assert!(init.candidate.contains("127.0.0.1"));
+        assert!(init.candidate.contains("typ host"));
+    }
+
+    /// Network-gated: runs the real srflx gathering against Google's public
+    /// STUN server and asserts we learn a *public* (non-private, non-loopback)
+    /// IPv4 address. Ignored by default so CI doesn't flake on network access;
+    /// run with `cargo test -p openreach-transport -- --ignored`.
+    #[test]
+    #[ignore = "requires outbound UDP to a public STUN server"]
+    fn srflx_gathering_finds_public_address() {
+        // Bind the wildcard so the OS routes STUN out our default interface.
+        let socket = UdpSocket::bind("0.0.0.0:0").expect("bind udp");
+        let local_addr = socket.local_addr().expect("local addr");
+
+        let host_port = parse_stun_url("stun:stun.l.google.com:19302").expect("stun url");
+        let init = gather_srflx_candidate(
+            &socket,
+            local_addr,
+            &host_port,
+            "stun:stun.l.google.com:19302",
+        )
+        .expect("gather did not error")
+        .expect("STUN server produced a srflx candidate");
+
+        // The a-line must announce a server-reflexive candidate.
+        assert!(
+            init.candidate.contains("typ srflx"),
+            "expected srflx candidate, got: {}",
+            init.candidate
+        );
+
+        // Extract the connection address (token index 4 in the candidate line):
+        //   candidate:<foundation> <component> udp <priority> <address> <port> typ srflx ...
+        let addr = init
+            .candidate
+            .split_whitespace()
+            .nth(4)
+            .expect("candidate has a connection address");
+        let ip: Ipv4Addr = addr.parse().expect("srflx address is IPv4");
+
+        assert!(
+            !ip.is_private() && !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified(),
+            "expected a public IPv4 srflx address, got {ip}"
+        );
+        eprintln!("discovered public srflx address: {ip}");
     }
 }

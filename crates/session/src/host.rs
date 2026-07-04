@@ -79,9 +79,18 @@ pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<(
 
     // Force a keyframe on start and whenever a viewer (re)connects.
     let force_keyframe = Arc::new(AtomicBool::new(true));
+    // Whether a viewer is connected. Video is only encoded/sent while true, so we
+    // don't blast RTP before DTLS-SRTP is ready (and we save CPU when idle).
+    let connected = Arc::new(AtomicBool::new(false));
 
     // Encode thread: frames -> H.264 -> transport, with GCC-driven bitrate.
-    spawn_encode_thread(&cfg, transport.sender(), force_keyframe.clone(), frame_rx)?;
+    spawn_encode_thread(
+        &cfg,
+        transport.sender(),
+        force_keyframe.clone(),
+        connected.clone(),
+        frame_rx,
+    )?;
 
     // Input injector (best effort; needs Accessibility permission).
     let mut injector = match input::new_injector() {
@@ -112,9 +121,13 @@ pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<(
             TransportEvent::Connected => {
                 // Visible session indicator (tray comes later).
                 tracing::warn!("★ REMOTE SESSION ACTIVE ★");
+                connected.store(true, Ordering::Relaxed);
                 force_keyframe.store(true, Ordering::Relaxed);
             }
-            TransportEvent::Disconnected => tracing::warn!("remote session ended"),
+            TransportEvent::Disconnected => {
+                tracing::warn!("remote session ended");
+                connected.store(false, Ordering::Relaxed);
+            }
             TransportEvent::Data(bytes) => {
                 handle_control(&bytes, &transport, &mut injector, &cfg.device_name);
             }
@@ -127,6 +140,7 @@ fn spawn_encode_thread(
     cfg: &HostConfig,
     sender: TransportSender,
     force_keyframe: Arc<AtomicBool>,
+    connected: Arc<AtomicBool>,
     frame_rx: mpsc::Receiver<capture::Frame>,
 ) -> anyhow::Result<()> {
     let enc_cfg = codec::EncoderConfig {
@@ -146,6 +160,11 @@ fn spawn_encode_thread(
                 }
             };
             while let Ok(frame) = frame_rx.recv() {
+                // Only encode/send while a viewer is connected (avoids sending RTP
+                // before DTLS-SRTP is up, and saves CPU when idle).
+                if !connected.load(Ordering::Relaxed) {
+                    continue;
+                }
                 // Track the GCC target so the stream adapts to the link.
                 encoder.set_target_bitrate(sender.target_bitrate_bps());
                 let force = force_keyframe.swap(false, Ordering::Relaxed);
