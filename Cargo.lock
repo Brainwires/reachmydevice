@@ -2632,6 +2632,7 @@ dependencies = [
  "openreach-protocol",
  "thiserror 2.0.18",
  "tracing",
+ "x11rb",
 ]
 
 [[package]]
@@ -2672,6 +2673,7 @@ dependencies = [
  "openreach-protocol",
  "thiserror 2.0.18",
  "tracing",
+ "x11rb",
 ]
 
 [[package]]

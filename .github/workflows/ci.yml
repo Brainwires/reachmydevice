@@ -43,7 +43,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            protobuf-compiler nasm pkg-config \
+            protobuf-compiler nasm pkg-config xvfb \
             libx11-dev libxext-dev libxtst-dev libxdamage-dev libxcb1-dev \
             libxkbcommon-dev libwayland-dev
       - uses: dtolnay/rust-toolchain@stable
@@ -62,6 +62,14 @@ jobs:
           cargo test
           -p openreach-protocol -p openreach-transport -p openreach-codec
           -p openreach-session -p openreach-rendezvous
+      # Validate the X11 capture + input backends against a headless Xvfb server.
+      - name: X11 backends smoke (Xvfb)
+        run: |
+          cargo build -p openreach-capture --example capture_smoke -p openreach-input --example input_smoke
+          Xvfb :99 -screen 0 1280x720x24 >/tmp/xvfb.log 2>&1 &
+          sleep 2
+          DISPLAY=:99 cargo run -q -p openreach-capture --example capture_smoke
+          DISPLAY=:99 cargo run -q -p openreach-input --example input_smoke
 
   # Windows: Phase 3 target. Build the portable, non-GUI crates only for now.
   build-windows:

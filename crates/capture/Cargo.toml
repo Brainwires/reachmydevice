@@ -60,6 +60,10 @@ objc2-core-video = { version = "0.3", default-features = false, features = [
 dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
 block2 = "0.6"
 
+# Linux X11 screen capture via XGetImage (x11rb). XShm is a future optimization.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = "0.13"
+
 [[example]]
 name = "capture_smoke"
 path = "examples/capture_smoke.rs"

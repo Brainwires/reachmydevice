@@ -2,9 +2,9 @@
 //!
 //! The wire carries **USB HID usage codes** (Keyboard/Keypad page 0x07) so the
 //! representation is layout- and OS-neutral. Each host backend maps them to its
-//! native keycodes. This module holds the macOS mapping (Carbon virtual
-//! keycodes). v1 covers the common keys; unmapped usages return `None` and the
-//! backend drops them (documented limitation).
+//! native keycodes: [`hid_to_macos`] (Carbon virtual keycodes) and
+//! [`hid_to_x_keycode`] (X11, evdev+8). v1 covers the common keys; unmapped
+//! usages return `None` and the backend drops them (documented limitation).
 
 /// Map a USB HID keyboard usage code to a macOS virtual keycode (`CGKeyCode`).
 ///
@@ -104,6 +104,101 @@ pub fn hid_to_macos(hid: u32) -> Option<u16> {
         _ => return None,
     };
     Some(code)
+}
+
+/// Map a USB HID keyboard usage code to an X11 keycode.
+///
+/// On Xorg with the evdev driver, an X keycode is the Linux evdev key code + 8.
+/// Returns `None` for usages outside the v1 common set.
+#[cfg(target_os = "linux")]
+pub fn hid_to_x_keycode(hid: u32) -> Option<u8> {
+    // HID usage -> Linux evdev key code (input-event-codes.h).
+    let evdev: u16 = match hid {
+        0x04 => 30,
+        0x05 => 48,
+        0x06 => 46,
+        0x07 => 32,
+        0x08 => 18,
+        0x09 => 33,
+        0x0A => 34,
+        0x0B => 35,
+        0x0C => 23,
+        0x0D => 36,
+        0x0E => 37,
+        0x0F => 38,
+        0x10 => 50,
+        0x11 => 49,
+        0x12 => 24,
+        0x13 => 25,
+        0x14 => 16,
+        0x15 => 19,
+        0x16 => 31,
+        0x17 => 20,
+        0x18 => 22,
+        0x19 => 47,
+        0x1A => 17,
+        0x1B => 45,
+        0x1C => 21,
+        0x1D => 44,
+        0x1E => 2,
+        0x1F => 3,
+        0x20 => 4,
+        0x21 => 5,
+        0x22 => 6,
+        0x23 => 7,
+        0x24 => 8,
+        0x25 => 9,
+        0x26 => 10,
+        0x27 => 11,
+        0x28 => 28, // Enter
+        0x29 => 1,  // Esc
+        0x2A => 14, // Backspace
+        0x2B => 15, // Tab
+        0x2C => 57, // Space
+        0x2D => 12,
+        0x2E => 13,
+        0x2F => 26,
+        0x30 => 27,
+        0x31 => 43,
+        0x33 => 39,
+        0x34 => 40,
+        0x35 => 41,
+        0x36 => 51,
+        0x37 => 52,
+        0x38 => 53,
+        0x39 => 58, // CapsLock
+        0x3A => 59, // F1
+        0x3B => 60,
+        0x3C => 61,
+        0x3D => 62,
+        0x3E => 63,
+        0x3F => 64,
+        0x40 => 65,
+        0x41 => 66,
+        0x42 => 67,
+        0x43 => 68,
+        0x44 => 87,  // F11
+        0x45 => 88,  // F12
+        0x4A => 102, // Home
+        0x4B => 104, // PageUp
+        0x4C => 111, // Delete
+        0x4D => 107, // End
+        0x4E => 109, // PageDown
+        0x4F => 106, // Right
+        0x50 => 105, // Left
+        0x51 => 108, // Down
+        0x52 => 103, // Up
+        0xE0 => 29,  // LeftCtrl
+        0xE1 => 42,  // LeftShift
+        0xE2 => 56,  // LeftAlt
+        0xE3 => 125, // LeftMeta
+        0xE4 => 97,  // RightCtrl
+        0xE5 => 54,  // RightShift
+        0xE6 => 100, // RightAlt
+        0xE7 => 126, // RightMeta
+        _ => return None,
+    };
+    Some((evdev + 8) as u8)
 }
 
 #[cfg(test)]

@@ -15,3 +15,11 @@ tracing.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.25", features = ["highsierra"] }
 core-foundation = "0.10"
+
+# Linux input injection via the XTEST extension (x11rb).
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["xtest"] }
+
+[[example]]
+name = "input_smoke"
+path = "examples/input_smoke.rs"

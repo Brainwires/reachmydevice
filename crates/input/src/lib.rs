@@ -13,6 +13,8 @@
 use openreach_protocol::input_event::Event as InputEvent;
 
 pub mod keymap;
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod mac;
 
@@ -41,7 +43,11 @@ pub fn new_injector() -> anyhow::Result<Box<dyn Injector>> {
     {
         Ok(Box::new(mac::MacInjector::new()?))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Box::new(linux::X11Injector::new()?))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Err(InputError::Unsupported.into())
     }

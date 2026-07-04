@@ -12,6 +12,8 @@
 use bytes::Bytes;
 use std::sync::mpsc::Sender;
 
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod mac;
 
@@ -113,7 +115,11 @@ pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
     {
         mac::list_displays()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::list_displays()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Err(CaptureError::Unsupported.into())
     }
@@ -129,7 +135,11 @@ pub fn start_capture(
     {
         mac::start_capture(config, display_index, sink)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::start_capture(config, display_index, sink)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (config, display_index, sink);
         Err(CaptureError::Unsupported.into())
