@@ -4,6 +4,28 @@ All notable changes to OpenReach. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+### Security hardening (branch `security-hardening`)
+- **Supply chain:** the webrtc-rs-rtc fork is now a pinned **git submodule** (was a
+  moving branch dep) → offline/reproducible builds; `cargo-deny`/`cargo-audit` +
+  CycloneDX SBOM + pinned toolchain + signed release artifacts.
+- **Identity key at rest:** encrypted (Argon2id + XChaCha20-Poly1305) when a
+  passphrase is set, zeroized in memory, restrictive perms on Windows too.
+- **First-connect MITM (A2) closed:** the host proves its identity **bound to the
+  DTLS session** in `HelloAck`; the viewer authenticates/TOFU-pins that proven key
+  and refuses on failure. Symmetric to the unattended proof.
+- **Rendezvous:** registration **closed by default**, Argon2id params pinned, and a
+  per-username **login lockout** with backoff.
+- **File integrity:** full 32-byte SHA-256 (was a truncated 64-bit prefix).
+- **Always-on host:** inhibits system idle sleep so it stays reachable.
+- **Memory-safety + fuzzing:** all `unsafe` (capture FFI) reviewed + length-guarded
+  and documented (`docs/unsafe-audit.md`); `cargo-fuzz` targets for the untrusted
+  parsers + stable no-panic regression tests in CI.
+- **Direct QR/PAKE pairing (new):** establish trust device-to-device with no server
+  account — a **QR seed-transfer** (co-located) or a **SPAKE2 short code** (remote),
+  over a **stateless relay mailbox** (`/pair?code=…`). Two devices pair end-to-end
+  with no accounts (proven by `pairing_e2e`); wormhole-style `<channel>-<secret>`
+  codes; terminal QR for headless hosts. Remaining: the viewer's QR/scan screen.
+
 ### Working end-to-end
 - **Cross-NAT remote-desktop session proven** over the real internet: a host on a
   cloud box and a viewer behind home NAT connect via a self-hosted rendezvous,
