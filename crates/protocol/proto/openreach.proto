@@ -22,6 +22,17 @@ message Envelope {
     Ping ping = 13;
     Pong pong = 14;
     Bye bye = 15;
+    // v1 features (added in MINOR 1; older peers ignore unknown fields).
+    ClipboardUpdate clipboard = 16;
+    FileOffer file_offer = 17;
+    FileChunk file_chunk = 18;
+    FileAck file_ack = 19;
+    FileComplete file_complete = 20;
+    FileCancel file_cancel = 21;
+    DisplayList display_list = 22;
+    SelectDisplay select_display = 23;
+    RequestKeyframe request_keyframe = 24;
+    ViewOnly view_only = 25;
   }
 }
 
@@ -106,4 +117,83 @@ message Pong {
 
 message Bye {
   string reason = 1;
+}
+
+// --- Clipboard sync (bidirectional) ---------------------------------------
+
+enum ClipboardKind {
+  CLIPBOARD_KIND_UNSPECIFIED = 0;
+  CLIPBOARD_KIND_TEXT = 1;
+  CLIPBOARD_KIND_IMAGE_PNG = 2;
+}
+
+// A clipboard change to apply on the peer. `seq` is a monotonic counter and
+// `origin_hash` a hash of the content; receivers drop an update whose content
+// they just set, breaking sync loops.
+message ClipboardUpdate {
+  ClipboardKind kind = 1;
+  bytes data = 2;
+  uint64 seq = 3;
+  fixed64 origin_hash = 4;
+}
+
+// --- File transfer (both directions, resumable) ---------------------------
+
+// Announce a file. The receiver replies with a FileAck at the offset to start
+// from (0 for new, >0 to resume a partial transfer).
+message FileOffer {
+  string transfer_id = 1; // unique per transfer
+  string name = 2;
+  uint64 size = 3;
+  string mime = 4;
+}
+
+message FileChunk {
+  string transfer_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+}
+
+// Flow control + resume: "I have up to `offset` bytes; send from there."
+message FileAck {
+  string transfer_id = 1;
+  uint64 offset = 2;
+}
+
+message FileComplete {
+  string transfer_id = 1;
+  fixed64 sha256_prefix = 2; // first 8 bytes of the SHA-256, for a quick integrity check
+}
+
+message FileCancel {
+  string transfer_id = 1;
+  string reason = 2;
+}
+
+// --- Multi-monitor + session control --------------------------------------
+
+message DisplayDescriptor {
+  uint32 id = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  string name = 4;
+  bool primary = 5;
+}
+
+// Host -> viewer: the host's available displays (viewer enumerates + switches).
+message DisplayList {
+  repeated DisplayDescriptor displays = 1;
+}
+
+// Viewer -> host: capture this display id (per-monitor streams switched on demand).
+message SelectDisplay {
+  uint32 id = 1;
+}
+
+// Viewer -> host: request an IDR (e.g. on join or after loss).
+message RequestKeyframe {}
+
+// Viewer -> host: toggle view-only (host ignores input while true).
+message ViewOnly {
+  bool enabled = 1;
 }

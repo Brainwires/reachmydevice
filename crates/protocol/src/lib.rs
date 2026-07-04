@@ -18,15 +18,18 @@ pub mod pb {
 }
 
 pub use pb::{
-    envelope, input_event, Bye, Envelope, Hello, HelloAck, InputEvent, KeyEvent, MouseButton,
-    MouseMove, MouseScroll, Ping, Pong, Role,
+    envelope, input_event, Bye, ClipboardKind, ClipboardUpdate, DisplayDescriptor, DisplayList,
+    Envelope, FileAck, FileCancel, FileChunk, FileComplete, FileOffer, Hello, HelloAck, InputEvent,
+    KeyEvent, MouseButton, MouseMove, MouseScroll, Ping, Pong, RequestKeyframe, Role, SelectDisplay,
+    ViewOnly,
 };
 
 /// Protocol major version. **Incompatible across mismatches** — bump only on a
 /// breaking wire change.
 pub const PROTOCOL_MAJOR: u32 = 1;
 /// Protocol minor version. Backward-compatible additions bump this.
-pub const PROTOCOL_MINOR: u32 = 0;
+/// MINOR 1 added clipboard/file-transfer/multi-monitor/session-control messages.
+pub const PROTOCOL_MINOR: u32 = 1;
 
 /// Errors from encoding/decoding or handshake validation.
 #[derive(Debug, thiserror::Error)]
@@ -134,6 +137,43 @@ pub fn pong(t_micros: u64) -> Envelope {
     envelope(pb::envelope::Payload::Pong(Pong { t_micros }))
 }
 
+/// A text clipboard update (loop-guarded by `seq`/`origin_hash`).
+pub fn clipboard_text(text: impl Into<String>, seq: u64) -> Envelope {
+    let data = text.into().into_bytes();
+    let origin_hash = fnv1a(&data);
+    envelope(pb::envelope::Payload::Clipboard(ClipboardUpdate {
+        kind: ClipboardKind::Text as i32,
+        data,
+        seq,
+        origin_hash,
+    }))
+}
+
+/// Request an IDR/keyframe from the host.
+pub fn request_keyframe() -> Envelope {
+    envelope(pb::envelope::Payload::RequestKeyframe(RequestKeyframe {}))
+}
+
+/// Toggle view-only on the host (input suppressed while enabled).
+pub fn view_only(enabled: bool) -> Envelope {
+    envelope(pb::envelope::Payload::ViewOnly(ViewOnly { enabled }))
+}
+
+/// Ask the host to switch the captured display.
+pub fn select_display(id: u32) -> Envelope {
+    envelope(pb::envelope::Payload::SelectDisplay(SelectDisplay { id }))
+}
+
+/// 64-bit FNV-1a hash — a cheap content fingerprint for the clipboard loop guard.
+pub fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// Microseconds since a process-global monotonic epoch.
 ///
 /// All OpenReach crates call this one function so that timestamps produced in
@@ -200,6 +240,38 @@ mod tests {
         // A malformed byte string should surface a decode error, never panic.
         let res = decode(&[0xff, 0xff, 0xff, 0xff, 0x7f]);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn clipboard_roundtrip_and_loop_guard() {
+        let env = clipboard_text("hello world", 7);
+        let decoded = decode(&encode(&env)).unwrap();
+        match decoded.payload.unwrap() {
+            pb::envelope::Payload::Clipboard(c) => {
+                assert_eq!(c.kind, ClipboardKind::Text as i32);
+                assert_eq!(c.data, b"hello world");
+                assert_eq!(c.seq, 7);
+                // origin_hash is the content fingerprint used to break sync loops.
+                assert_eq!(c.origin_hash, fnv1a(b"hello world"));
+            }
+            other => panic!("wrong payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v1_control_messages_roundtrip() {
+        assert!(matches!(
+            decode(&encode(&request_keyframe())).unwrap().payload.unwrap(),
+            pb::envelope::Payload::RequestKeyframe(_)
+        ));
+        assert!(matches!(
+            decode(&encode(&select_display(2))).unwrap().payload.unwrap(),
+            pb::envelope::Payload::SelectDisplay(d) if d.id == 2
+        ));
+        assert!(matches!(
+            decode(&encode(&view_only(true))).unwrap().payload.unwrap(),
+            pb::envelope::Payload::ViewOnly(v) if v.enabled
+        ));
     }
 
     #[test]
