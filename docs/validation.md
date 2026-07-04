@@ -41,6 +41,27 @@ This exercises the entire thesis: **screen capture → hardware/software H.264 �
 NAT-traversed, end-to-end-encrypted WebRTC → decode**, with a self-hosted
 rendezvous and no third-party cloud in the media path.
 
+### Cross-NAT session **with audio** (2026-07-04)
+Same fleet — `biscuits` host ↔ this Mac viewer via the deployed rendezvous — with
+**audio enabled on both ends** (`OPENREACH_AUDIO=1`). The host had no capture
+device (headless cloud box), so it transmitted a synthetic 440 Hz tone
+(`OPENREACH_AUDIO_SYNTH=1`) through the real Opus encoder; the viewer decoded it
+off the real data channel:
+
+```
+biscuits host: X11 capture started · "audio source: synthetic 440 Hz tone" · ★ REMOTE SESSION ACTIVE ★
+Mac viewer:    connected=true  frames=786  audio_frames=1300  1280×720
+```
+
+**1300 Opus audio frames were encoded on one machine, carried over the real
+internet through NAT-traversed DTLS-SRTP, and decoded on another** — audio
+delivery proven end-to-end on real hardware, alongside video, the same standard
+as the video result above. The two remaining audio boundaries are the same class
+as video's: the OS *capture device* (macOS system-audio capture is verified to
+the Screen-Recording permission boundary; `examples/audio_probe`) and physical
+*speaker* output — both on-device steps, exactly as screen capture and on-glass
+render are for video.
+
 ### Rendezvous deployment
 `openreach-rendezvous` runs in Docker on `biscuits` behind the existing Cloudflare
 tunnel; the web console + REST API + WebSocket signaling are all reachable at
