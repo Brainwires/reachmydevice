@@ -30,9 +30,11 @@ chacha20poly1305 = "0.10"
 zeroize = "1"
 
 # Direct device pairing (Workstream B): SPAKE2 PAKE for remote enrollment over a
-# short code, HKDF for the QR seed-transfer key derivation.
+# short code, HKDF for the QR seed-transfer key derivation, qrcode to present the
+# pairing ticket (terminal QR for headless hosts; the viewer renders an image).
 spake2 = "0.4"
 hkdf = "0.12"
+qrcode = { version = "0.14", default-features = false }
 
 # Cross-platform clipboard (macOS NSPasteboard, Linux X11) for clipboard sync.
 arboard = "3"

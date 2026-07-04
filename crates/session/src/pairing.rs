@@ -142,6 +142,19 @@ pub fn confirmation(key: &[u8; 32]) -> [u8; 16] {
     tag
 }
 
+/// Render a pairing ticket as a compact Unicode QR code for a terminal, so a
+/// headless host can display its pairing QR (the GUI viewer renders an image).
+/// The QR encodes the ticket's hex code — scanning it recovers the ticket.
+pub fn render_qr_terminal(ticket: &PairingTicket) -> anyhow::Result<String> {
+    use qrcode::render::unicode;
+    let qr = qrcode::QrCode::new(ticket.to_code().as_bytes())
+        .map_err(|e| anyhow::anyhow!("qr encode: {e}"))?;
+    Ok(qr
+        .render::<unicode::Dense1x2>()
+        .quiet_zone(true)
+        .build())
+}
+
 /// Alphabet for the pairing-code secret: lowercase minus ambiguous letters
 /// (i, l, o, u) plus digits 2–9 — easy to read aloud / type. 31 symbols.
 const CODE_ALPHABET: &[u8] = b"abcdefghjkmnpqrstvwxyz23456789";
@@ -221,6 +234,15 @@ mod tests {
         assert!(!t.is_expired(999));
         assert!(t.is_expired(1_001));
         assert!(PairingTicket::decode(b"nope").is_err());
+    }
+
+    #[test]
+    fn ticket_renders_a_terminal_qr() {
+        let t = PairingTicket::new([3u8; 32], "42-abc", 9_999).unwrap();
+        let qr = render_qr_terminal(&t).unwrap();
+        // A real QR: multi-line block art containing the module glyphs.
+        assert!(qr.lines().count() > 10);
+        assert!(qr.contains('█') || qr.contains('▀') || qr.contains('▄'));
     }
 
     #[test]
