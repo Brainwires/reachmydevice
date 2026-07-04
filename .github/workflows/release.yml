@@ -1,0 +1,100 @@
+name: Release
+
+# Builds host + viewer binaries per platform on a version tag and attaches them
+# to a GitHub Release. Packaging into native installers (deb/rpm/AppImage/DMG/MSI)
+# and code signing are left as clearly-marked hooks (signing is out of scope for
+# v1 but the steps exist so they can be enabled with secrets later).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+          - name: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc + deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install protoc + deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler nasm pkg-config \
+            libx11-dev libxext-dev libxtst-dev libxdamage-dev libxcb1-dev \
+            libxkbcommon-dev libwayland-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build host + viewer (release)
+        run: cargo build --release --target ${{ matrix.target }} -p openreach-host -p openreach-viewer
+
+      # --- Code signing hooks (no-ops without secrets) -----------------------
+      # macOS: codesign + notarize when APPLE_* secrets are present.
+      - name: Sign (macOS)
+        if: runner.os == 'macOS' && env.APPLE_SIGN_ID != ''
+        env:
+          APPLE_SIGN_ID: ${{ secrets.APPLE_SIGN_ID }}
+        run: |
+          for b in openreach-host openreach-viewer; do
+            codesign --force --options runtime --sign "$APPLE_SIGN_ID" \
+              "target/${{ matrix.target }}/release/$b" || true
+          done
+      # Linux/Windows signing hooks would go here (GPG / signtool).
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          for b in openreach-host openreach-viewer; do
+            cp "target/${{ matrix.target }}/release/$b" "dist/$b-${{ matrix.name }}" 2>/dev/null || true
+          done
+          # Package the rendezvous deploy bundle once (on Linux).
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            tar czf dist/openreach-rendezvous-deploy.tar.gz deploy/ docs/vps-deployment.md
+          fi
+          (cd dist && ls -la && shasum -a 256 * > SHA256SUMS || sha256sum * > SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openreach-${{ matrix.name }}
+          path: dist/*
+
+  # TODO(packaging): native installers as follow-on jobs —
+  #   Linux: cargo-deb / cargo-generate-rpm / linuxdeploy AppImage
+  #   macOS: cargo-bundle -> .app -> create-dmg (+ notarize)
+  #   Windows: cargo-wix / WiX -> .msi (+ signtool)
+  # These need the platform backends and icons finalized; artifacts above unblock
+  # manual install in the meantime.
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist }
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true
