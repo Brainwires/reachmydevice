@@ -20,6 +20,9 @@ bytes.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+hex = "0.4"
+# Runtime for the async direct-pairing client (pair_pake), run on a job thread.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 
 # GPU-accelerated frame rendering + windowing/input (spec requires wgpu).
 # wgpu is pinned to 29 to match egui-wgpu 0.35 (the newest egui release, which

@@ -31,8 +31,9 @@ use openreach_protocol::input_event::Event as InputEvent;
 use openreach_protocol::{KeyEvent, MouseButton, MouseMove, MouseScroll};
 use openreach_session::rendezvous::RendezvousClient;
 use openreach_session::{
-    identity::known_peers, AccountClient, DeviceIdentity, DeviceInfo, FileEvent, SignalClient,
-    Signaling, ViewerConfig, ViewerSession, ViewerUpdate,
+    identity::known_peers, pairing::generate_pairing_code, pairing_client::pair_pake, AccountClient,
+    DeviceIdentity, DeviceInfo, FileEvent, SignalClient, Signaling, ViewerConfig, ViewerSession,
+    ViewerUpdate,
 };
 use openreach_protocol::DisplayDescriptor;
 
@@ -91,6 +92,8 @@ enum Screen {
     Connecting,
     /// Live video with a HUD overlay.
     InSession,
+    /// Direct device pairing (QR/PAKE): show or enter a one-time code.
+    Pair,
 }
 
 /// Sub-state of [`Screen::Connecting`].
@@ -124,6 +127,8 @@ enum Job {
     ThisDevice(Result<String, String>),
     /// A device was deleted — carries the removed device_id.
     Deleted(Result<String, String>),
+    /// Direct pairing finished — `(device_id, public_key_hex, name)` or an error.
+    Paired(Result<(String, String, String), String>),
 }
 
 /// The winit application: window/GPU (created on `resumed`), egui state, the app
@@ -155,6 +160,12 @@ struct App {
     viewer_token: Option<String>,
     known_peers_path: PathBuf,
     ice_servers: Vec<String>,
+
+    // direct pairing (QR/PAKE)
+    pair_code: String,
+    /// True when we generated the code (and are showing it); false when entering one.
+    pair_generated: bool,
+    pair_status: Option<String>,
     bind_addr: String,
 
     // connecting / session
@@ -247,6 +258,9 @@ impl App {
             viewer_token: None,
             known_peers_path,
             ice_servers,
+            pair_code: String::new(),
+            pair_generated: false,
+            pair_status: None,
             bind_addr,
             selected_host: None,
             conn: ConnState::Establishing,
@@ -479,10 +493,127 @@ impl App {
                 self.info = Some("device removed".into());
             }
             Job::Deleted(Err(e)) => self.error = Some(e),
+            Job::Paired(Ok((device_id, public_key_hex, name))) => {
+                // Pin the newly-paired peer (TOFU); a later key change is refused.
+                match known_peers::trust_on_first_use(
+                    &self.known_peers_path,
+                    &device_id,
+                    &public_key_hex,
+                ) {
+                    Ok(_) => {
+                        self.pair_status =
+                            Some(format!("✓ paired with {name} ({})", short(&device_id)));
+                        self.info = Some(format!("paired with {name}"));
+                    }
+                    Err(e) => self.pair_status = Some(format!("paired, but pinning failed: {e}")),
+                }
+            }
+            Job::Paired(Err(e)) => self.pair_status = Some(format!("pairing failed: {e}")),
         }
         if let Some(win) = &self.window {
             win.request_redraw();
         }
+    }
+
+    // --- direct pairing (QR/PAKE) ------------------------------------------
+
+    /// Open the pairing screen fresh.
+    fn open_pairing(&mut self) {
+        self.pair_code.clear();
+        self.pair_generated = false;
+        self.pair_status = None;
+        self.screen = Screen::Pair;
+    }
+
+    /// Start pairing with `self.pair_code` over the configured relay. Both devices
+    /// run this with the same code; on success the peer is pinned (TOFU).
+    fn start_pairing(&mut self) {
+        let code = self.pair_code.trim().to_string();
+        if code.is_empty() {
+            self.pair_status = Some("enter or generate a code first".into());
+            return;
+        }
+        let base = ws_base(&self.server_url);
+        let identity = self.identity.clone();
+        let name = self.device_name.clone();
+        self.pair_status = Some("waiting for the other device…".into());
+        self.spawn("pairing", move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => return Job::Paired(Err(format!("runtime: {e}"))),
+            };
+            let res = rt.block_on(pair_pake(&base, &code, &identity, &name));
+            Job::Paired(
+                res.map(|p| (p.device_id, hex::encode(p.public_key), p.name))
+                    .map_err(|e| e.to_string()),
+            )
+        });
+    }
+
+    /// The "Pair a device" screen: generate or enter a one-time code, then pair.
+    fn ui_pair(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(20.0);
+            ui.heading("Pair a device");
+            ui.label(
+                "Establish trust directly — no account needed. Both devices use the same \
+                 one-time code (say it over the phone, or scan the QR when together).",
+            );
+            ui.add_space(12.0);
+
+            ui.horizontal(|ui| {
+                if ui.button("Generate a code").clicked() {
+                    match generate_pairing_code() {
+                        Ok(c) => {
+                            self.pair_code = c;
+                            self.pair_generated = true;
+                            self.pair_status = None;
+                        }
+                        Err(e) => self.pair_status = Some(format!("could not generate: {e}")),
+                    }
+                }
+                ui.label("— or enter the other device's code:");
+            });
+            ui.add(
+                egui::TextEdit::singleline(&mut self.pair_code)
+                    .hint_text("e.g. 417-k7mq3xry")
+                    .desired_width(260.0),
+            );
+
+            if self.pair_generated {
+                ui.add_space(8.0);
+                ui.label("Share this code with the other device:");
+                ui.heading(&self.pair_code);
+            }
+
+            ui.add_space(12.0);
+            let busy = self.busy.is_some();
+            if ui
+                .add_enabled(!busy, egui::Button::new("Pair"))
+                .clicked()
+            {
+                self.start_pairing();
+            }
+            if busy {
+                ui.spinner();
+            }
+            if let Some(s) = &self.pair_status {
+                ui.add_space(8.0);
+                ui.label(s);
+            }
+
+            ui.add_space(16.0);
+            if ui.button("Back").clicked() {
+                self.screen = if self.account.is_some() {
+                    Screen::Devices
+                } else {
+                    Screen::Login
+                };
+            }
+        });
     }
 
     // --- user actions ------------------------------------------------------
@@ -667,6 +798,7 @@ impl App {
             Screen::Devices => self.ui_devices(ui),
             Screen::Connecting => self.ui_connecting(ui),
             Screen::InSession => self.ui_session(ui),
+            Screen::Pair => self.ui_pair(ui),
         }
     }
 
@@ -745,6 +877,11 @@ impl App {
                 }
             });
 
+            ui.add_space(8.0);
+            if ui.button("Pair a device directly (no account)").clicked() {
+                self.open_pairing();
+            }
+
             ui.add_space(16.0);
             ui.separator();
             ui.label(format!("This device id: {}", short(&self.this_device_id)));
@@ -768,6 +905,9 @@ impl App {
                     let can = self.busy.is_none();
                     if ui.add_enabled(can, egui::Button::new("Refresh")).clicked() {
                         self.refresh_devices();
+                    }
+                    if ui.button("Pair a device").clicked() {
+                        self.open_pairing();
                     }
                 });
             });
@@ -1317,6 +1457,22 @@ fn human_bytes(n: u64) -> String {
         format!("{n} B")
     } else {
         format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+/// Derive the pairing WebSocket base (`ws(s)://host`) from the configured server
+/// URL, stripping any trailing `/ws` — `pair_pake` appends `/pair`.
+fn ws_base(server_url: &str) -> String {
+    let s = server_url.trim().trim_end_matches('/');
+    let s = s.strip_suffix("/ws").unwrap_or(s);
+    if let Some(rest) = s.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = s.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else if s.starts_with("ws://") || s.starts_with("wss://") {
+        s.to_string()
+    } else {
+        format!("wss://{s}")
     }
 }
 
