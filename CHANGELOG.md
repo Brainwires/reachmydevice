@@ -14,6 +14,19 @@ All notable changes to OpenReach. Format loosely follows Keep a Changelog.
   Docker container behind a Cloudflare tunnel (or Caddy/ACME).
 
 ### Added
+- **Clipboard sync** (bidirectional, text): each side polls the OS clipboard and
+  forwards changes over the control channel; an FNV-1a content hash breaks the
+  echo loop. (`session/clipboard.rs`)
+- **File transfer** (resumable, integrity-checked): windowed, ack-paced streaming
+  over the reliable data channel; a dropped receiver leaves a `.part` that a fresh
+  offer resumes from; SHA-256 prefix verified on completion; offered names are
+  sanitized against path traversal. Drop a file on the viewer window to send.
+  (`session/filexfer.rs`)
+- **Reconnect / ICE-restart on network blips**: on a connection drop the host
+  automatically restarts ICE (fresh credentials + re-gathered candidates) and
+  renegotiates; the viewer rides out a grace window for the host to recover. Only
+  a terminal close, or exhausted restarts, ends the session. A manual
+  `request_ice_restart()` is also exposed. (`transport/driver.rs`)
 - `protocol`: versioned prost wire format + handshake; input events; v1 messages
   (clipboard, file transfer, multi-monitor, request-keyframe, view-only).
 - `transport`: WebRTC over the sans-IO `rtc` fork — driver loop, H.264 video, data

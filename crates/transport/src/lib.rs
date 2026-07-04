@@ -83,6 +83,9 @@ pub(crate) enum DriverCmd {
     Data(Bytes),
     /// Signaling received from the peer.
     Signal(SignalMsg),
+    /// Request an ICE restart (host initiates renegotiation to recover the
+    /// connection after a network change).
+    IceRestart,
     /// Tear down and exit the driver loop.
     Shutdown,
 }
@@ -116,6 +119,12 @@ impl TransportSender {
     /// Feed a signaling message received from the peer.
     pub fn feed_signal(&self, msg: SignalMsg) {
         let _ = self.cmd_tx.send(DriverCmd::Signal(msg));
+    }
+
+    /// Request an ICE restart (host only) to recover the connection after a
+    /// network change. No-op on the viewer, which recovers via the host's offer.
+    pub fn request_ice_restart(&self) {
+        let _ = self.cmd_tx.send(DriverCmd::IceRestart);
     }
 
     /// Latest GCC target bitrate (bits/sec) — feed this to the encoder.
@@ -192,6 +201,11 @@ impl Transport {
     /// Feed a signaling message received from the peer.
     pub fn feed_signal(&self, msg: SignalMsg) {
         self.sender.feed_signal(msg);
+    }
+
+    /// Request an ICE restart (host only) to recover after a network change.
+    pub fn request_ice_restart(&self) {
+        self.sender.request_ice_restart();
     }
 
     /// Latest GCC target bitrate (bits/sec).

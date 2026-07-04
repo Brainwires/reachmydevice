@@ -86,6 +86,14 @@ const STUN_DEFAULT_PORT: u16 = 3478;
 const STUN_READ_TIMEOUT: Duration = Duration::from_millis(800);
 /// How many times to (re)send a STUN Binding request before giving up.
 const STUN_MAX_ATTEMPTS: usize = 3;
+/// Max automatic ICE restarts the host attempts before declaring the session
+/// dead after a connection blip.
+const MAX_ICE_RESTARTS: u32 = 4;
+/// Delay between successive ICE-restart attempts (host side).
+const RESTART_INTERVAL: Duration = Duration::from_secs(2);
+/// How long the viewer waits for the host to re-establish the connection (via
+/// an ICE restart) before giving up and reporting a disconnect.
+const VIEWER_RECOVERY_GRACE: Duration = Duration::from_secs(12);
 
 /// Run the driver loop until [`DriverCmd::Shutdown`] or the command channel closes.
 pub(crate) fn run(
@@ -472,6 +480,13 @@ fn run_host(
         remote_description_set: false,
         pending_remote_candidates: Vec::new(),
         bitrate_bps,
+        is_host: true,
+        ice_servers: config.ice_servers.clone(),
+        negotiated_once: false,
+        recovering: false,
+        restart_attempts: 0,
+        recovery_next: None,
+        regather_pending: false,
     };
 
     event_loop(&mut pc, &socket, local_addr, &cmd_rx, &event_tx, &mut state)
@@ -551,6 +566,13 @@ fn run_viewer(
         remote_description_set: false,
         pending_remote_candidates: Vec::new(),
         bitrate_bps,
+        is_host: false,
+        ice_servers: config.ice_servers.clone(),
+        negotiated_once: false,
+        recovering: false,
+        restart_attempts: 0,
+        recovery_next: None,
+        regather_pending: false,
     };
 
     event_loop(&mut pc, &socket, local_addr, &cmd_rx, &event_tx, &mut state)
@@ -612,6 +634,24 @@ struct RoleState {
     pending_remote_candidates: Vec<String>,
     /// Shared cell the encoder reads for its bitrate target.
     bitrate_bps: Arc<AtomicU32>,
+
+    // --- reconnect / ICE-restart bookkeeping ------------------------------
+    /// True on the host (offerer), the side that initiates ICE restart.
+    is_host: bool,
+    /// ICE server URLs — needed to re-gather srflx candidates on a restart.
+    ice_servers: Vec<String>,
+    /// Whether the viewer has already answered an offer (so a subsequent offer
+    /// is a renegotiation/ICE-restart and it must re-gather local candidates).
+    negotiated_once: bool,
+    /// Active recovery window after a connection blip.
+    recovering: bool,
+    /// ICE-restart attempts made in the current recovery window (host).
+    restart_attempts: u32,
+    /// When to next act on recovery (restart, or give up). `None` when idle.
+    recovery_next: Option<Instant>,
+    /// Viewer: set when a restart offer requires re-gathering local candidates;
+    /// serviced in the event loop, which owns the socket.
+    regather_pending: bool,
 }
 
 /// Emit a local offer/answer as a JSON-encoded signaling message.
@@ -660,6 +700,11 @@ fn event_loop<I: Interceptor>(
 
         // 3. Surface connection-state and ICE-candidate events.
         drain_events(pc, event_tx, state, &mut connected);
+
+        // 3b. Drive reconnect/ICE-restart recovery, and service any pending
+        //     candidate re-gather (viewer, after a restart offer).
+        service_recovery(pc, socket, local_addr, state, event_tx, &mut connected)?;
+        service_regather(pc, socket, local_addr, state, event_tx);
 
         // 4. Drain inbound media / data.
         drain_reads(pc, event_tx, state);
@@ -754,6 +799,15 @@ fn drain_commands<I: Interceptor>(
                     tracing::warn!("transport: applying peer signal failed: {e:?}");
                 }
             }
+            Ok(DriverCmd::IceRestart) => {
+                // Host-initiated recovery: schedule an immediate restart.
+                if state.is_host && !state.recovering {
+                    state.recovering = true;
+                    state.restart_attempts = 0;
+                    state.recovery_next = Some(Instant::now());
+                    tracing::info!("transport: ICE restart requested");
+                }
+            }
             Ok(DriverCmd::Shutdown) => return CommandOutcome::Shutdown,
             Err(TryRecvError::Empty) => return CommandOutcome::Continue,
             // The Transport handle was dropped — tear down cleanly.
@@ -845,12 +899,20 @@ fn apply_signal<I: Interceptor>(
                 .context("set local answer")?;
             emit_session(event_tx, &answer)?;
 
-            for init in state.pending_local_candidates.drain(..) {
-                pc.add_local_candidate(init.clone())
-                    .context("add local candidate")?;
-                let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
-                    init.candidate,
-                )));
+            if state.negotiated_once {
+                // Renegotiation (ICE restart): our candidates from the first
+                // negotiation are stale. Re-gather fresh ones in the event loop,
+                // which owns the socket.
+                state.regather_pending = true;
+            } else {
+                state.negotiated_once = true;
+                for init in state.pending_local_candidates.drain(..) {
+                    pc.add_local_candidate(init.clone())
+                        .context("add local candidate")?;
+                    let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
+                        init.candidate,
+                    )));
+                }
             }
             flush_remote_candidates(pc, state);
         }
@@ -896,6 +958,100 @@ fn flush_remote_candidates<I: Interceptor>(
     }
 }
 
+/// Perform a host-side ICE restart: mark ICE for restart, create + apply a fresh
+/// offer, re-gather local candidates on the bound socket, and trickle everything
+/// to the peer. The viewer answers this like any offer (`apply_signal`).
+fn perform_ice_restart<I: Interceptor>(
+    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+    socket: &UdpSocket,
+    local_addr: SocketAddr,
+    state: &RoleState,
+    event_tx: &Sender<TransportEvent>,
+) -> anyhow::Result<()> {
+    pc.restart_ice();
+    let offer = pc.create_offer(None).context("create restart offer")?;
+    pc.set_local_description(offer.clone())
+        .context("set restart local description")?;
+    emit_session(event_tx, &offer)?;
+    for init in gather_local_candidates(socket, local_addr, &state.ice_servers) {
+        pc.add_local_candidate(init.clone())
+            .context("add local candidate (restart)")?;
+        let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
+            init.candidate,
+        )));
+    }
+    Ok(())
+}
+
+/// Drive the recovery state machine: on the host, retry ICE restart on an
+/// interval up to a cap; on the viewer, wait out a grace window for the host to
+/// re-establish. When the host exhausts attempts (or the viewer's grace
+/// elapses), give up and report a disconnect.
+fn service_recovery<I: Interceptor>(
+    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+    socket: &UdpSocket,
+    local_addr: SocketAddr,
+    state: &mut RoleState,
+    event_tx: &Sender<TransportEvent>,
+    connected: &mut bool,
+) -> anyhow::Result<()> {
+    if !state.recovering {
+        return Ok(());
+    }
+    let Some(at) = state.recovery_next else {
+        return Ok(());
+    };
+    let now = Instant::now();
+    if now < at {
+        return Ok(());
+    }
+
+    if state.is_host && state.restart_attempts < MAX_ICE_RESTARTS {
+        state.restart_attempts += 1;
+        tracing::info!(
+            attempt = state.restart_attempts,
+            "transport: initiating ICE restart"
+        );
+        if let Err(e) = perform_ice_restart(pc, socket, local_addr, state, event_tx) {
+            tracing::warn!("transport: ICE restart failed: {e:?}");
+        }
+        state.recovery_next = Some(now + RESTART_INTERVAL);
+    } else {
+        // Host out of attempts, or viewer grace elapsed: the session is dead.
+        state.recovering = false;
+        state.recovery_next = None;
+        if *connected {
+            *connected = false;
+            let _ = event_tx.send(TransportEvent::Disconnected);
+        }
+    }
+    Ok(())
+}
+
+/// Viewer: after answering a restart offer, gather fresh local candidates on the
+/// bound socket and trickle them (the first-negotiation candidates are stale).
+fn service_regather<I: Interceptor>(
+    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+    socket: &UdpSocket,
+    local_addr: SocketAddr,
+    state: &mut RoleState,
+    event_tx: &Sender<TransportEvent>,
+) {
+    if !state.regather_pending {
+        return;
+    }
+    state.regather_pending = false;
+    for init in gather_local_candidates(socket, local_addr, &state.ice_servers) {
+        if let Err(e) = pc.add_local_candidate(init.clone()) {
+            tracing::debug!("transport: add local candidate (regather) failed: {e}");
+            continue;
+        }
+        let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
+            init.candidate,
+        )));
+    }
+}
+
 /// Drain connection-state changes and ICE candidates into events.
 fn drain_events<I: Interceptor>(
     pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
@@ -906,17 +1062,42 @@ fn drain_events<I: Interceptor>(
     while let Some(event) = pc.poll_event() {
         match event {
             RTCPeerConnectionEvent::OnConnectionStateChangeEvent(s) => match s {
-                RTCPeerConnectionState::Connected if !*connected => {
-                    *connected = true;
-                    let _ = event_tx.send(TransportEvent::Connected);
+                RTCPeerConnectionState::Connected => {
+                    let recovered = state.recovering;
+                    if recovered {
+                        state.recovering = false;
+                        state.recovery_next = None;
+                        state.restart_attempts = 0;
+                        tracing::info!("transport: reconnected after ICE restart");
+                    }
+                    // Emit Connected on first connect, and again on recovery so
+                    // the host forces a fresh keyframe and the UI refreshes.
+                    if !*connected {
+                        *connected = true;
+                        let _ = event_tx.send(TransportEvent::Connected);
+                    } else if recovered {
+                        let _ = event_tx.send(TransportEvent::Connected);
+                    }
                 }
-                RTCPeerConnectionState::Failed
-                | RTCPeerConnectionState::Closed
-                | RTCPeerConnectionState::Disconnected
-                    if *connected =>
-                {
+                // Terminal close: no recovery.
+                RTCPeerConnectionState::Closed if *connected => {
                     *connected = false;
                     let _ = event_tx.send(TransportEvent::Disconnected);
+                }
+                // Transient blip / failure: enter recovery rather than tearing
+                // the session down. The host restarts ICE; the viewer waits for
+                // the host's new offer. Give-up is handled in `service_recovery`.
+                RTCPeerConnectionState::Failed | RTCPeerConnectionState::Disconnected
+                    if *connected && !state.recovering =>
+                {
+                    state.recovering = true;
+                    state.restart_attempts = 0;
+                    state.recovery_next = Some(if state.is_host {
+                        Instant::now() // host acts immediately
+                    } else {
+                        Instant::now() + VIEWER_RECOVERY_GRACE // viewer waits
+                    });
+                    tracing::warn!(state = ?s, "transport: connection lost; attempting recovery");
                 }
                 _ => {}
             },
