@@ -29,6 +29,11 @@ argon2 = { version = "0.5", features = ["std"] }
 chacha20poly1305 = "0.10"
 zeroize = "1"
 
+# Direct device pairing (Workstream B): SPAKE2 PAKE for remote enrollment over a
+# short code, HKDF for the QR seed-transfer key derivation.
+spake2 = "0.4"
+hkdf = "0.12"
+
 # Cross-platform clipboard (macOS NSPasteboard, Linux X11) for clipboard sync.
 arboard = "3"
 
