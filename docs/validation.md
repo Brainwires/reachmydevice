@@ -80,6 +80,12 @@ software observation is the physical speaker cone / human ear. Reproduce:
 `cargo run -p openreach-capture --example audio_probe` and
 `PLAY=1 cargo run -p openreach-session --example audio_e2e` (with audio playing).
 
+**Human confirmation (2026-07-04):** with `PLAY=1`, the operator heard the host's
+own ambient audio (cooling fans) round-tripped through capture → Opus → encrypted
+transport → decode → speaker. The final physical transduction — the only element
+beyond software observation — is confirmed audible. The audio subsystem is now
+verified **fully end-to-end, real source through real speaker, on real hardware.**
+
 ### Rendezvous deployment
 `openreach-rendezvous` runs in Docker on `biscuits` behind the existing Cloudflare
 tunnel; the web console + REST API + WebSocket signaling are all reachable at
