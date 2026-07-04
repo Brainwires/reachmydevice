@@ -9,11 +9,28 @@
 //! `OPENREACH_BIND` (default `0.0.0.0:0`), `OPENREACH_ICE` (comma-separated),
 //! `OPENREACH_TEST_SECS` (default `12`). Exits non-zero if no frames decode.
 
+use openreach_session::rendezvous::RendezvousClient;
 use openreach_session::{SignalClient, Signaling, ViewerConfig, ViewerSession, ViewerUpdate};
 use std::time::{Duration, Instant};
 
+/// Rendezvous WebSocket if `OPENREACH_RENDEZVOUS_URL` is set, else the LAN relay.
+fn build_signaling() -> anyhow::Result<Box<dyn Signaling>> {
+    if let Ok(url) = std::env::var("OPENREACH_RENDEZVOUS_URL") {
+        let token = std::env::var("OPENREACH_TOKEN")?;
+        let peer = std::env::var("OPENREACH_PEER_DEVICE_ID")?;
+        Ok(Box::new(RendezvousClient::connect(
+            &url,
+            &token,
+            Some(peer),
+        )?))
+    } else {
+        let addr =
+            std::env::var("OPENREACH_SIGNAL_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".into());
+        Ok(Box::new(SignalClient::connect(&addr)?))
+    }
+}
+
 fn main() -> anyhow::Result<()> {
-    let addr = std::env::var("OPENREACH_SIGNAL_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".into());
     let secs: u64 = std::env::var("OPENREACH_TEST_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -32,7 +49,7 @@ fn main() -> anyhow::Result<()> {
         bind_addr: std::env::var("OPENREACH_BIND").unwrap_or_else(|_| "0.0.0.0:0".into()),
     };
 
-    let signaling: Box<dyn Signaling> = Box::new(SignalClient::connect(&addr)?);
+    let signaling = build_signaling()?;
     let session = ViewerSession::start(cfg, signaling)?;
 
     let start = Instant::now();
@@ -53,6 +70,7 @@ fn main() -> anyhow::Result<()> {
                     dims = Some((f.width, f.height));
                 }
                 ViewerUpdate::Disconnected => eprintln!("[headless] disconnected"),
+                ViewerUpdate::Latency(rtt) => eprintln!("[headless] rtt={rtt:?}"),
             }
         }
         std::thread::sleep(Duration::from_millis(5));

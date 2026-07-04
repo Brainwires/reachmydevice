@@ -1,60 +1,58 @@
 //! OpenReach viewer app.
 //!
-//! A winit 0.30 + wgpu 30 window that renders decoded remote-desktop frames and
-//! forwards local input back to the host. The heavy lifting (transport, decode,
-//! signaling) lives behind [`openreach_session::ViewerSession`]; this binary is
-//! the UI shell:
+//! A winit 0.30 + wgpu 29 window that renders decoded remote-desktop frames and
+//! forwards local input back to the host, with an [`egui`] UI layered over the
+//! same wgpu surface. The heavy lifting (transport, decode, signaling, account
+//! REST) lives in [`openreach_session`]; this binary is the UI shell.
 //!
-//! - [`Gpu`] owns the wgpu surface/device/pipeline and blits the latest RGBA
-//!   frame onto a fullscreen quad (aspect-preserving letterbox — see `shader.wgsl`).
-//! - [`App`] implements winit's [`ApplicationHandler`]: it creates the window on
-//!   `resumed`, drains [`ViewerSession::poll_update`] in `about_to_wait`, and
-//!   translates winit `WindowEvent`s into protocol input events.
+//! - [`Gpu`] owns the wgpu surface/device/pipeline. Each frame it blits the
+//!   latest RGBA frame onto a fullscreen quad (aspect-preserving letterbox — see
+//!   `shader.wgsl`) and then paints the egui overlay on top.
+//! - [`App`] implements winit's [`ApplicationHandler`] and drives a small state
+//!   machine — [`Screen::Login`] → [`Screen::Devices`] → [`Screen::Connecting`]
+//!   (with SAS/TOFU confirmation) → [`Screen::InSession`] (video + HUD).
 //!
-//! Config comes from the environment: `OPENREACH_SIGNAL_ADDR` (default
-//! `127.0.0.1:9000`) and `OPENREACH_NAME` (default from [`ViewerConfig`]).
+//! Network calls (sign-in, device list, device registration) run on background
+//! threads so the GUI never blocks; results arrive over a channel ([`Job`]).
+//!
+//! ## Quick-connect (headless/scripted) fallback
+//! If `OPENREACH_TOKEN` and `OPENREACH_PEER_DEVICE_ID` are set the login/device
+//! screens are skipped and the app connects straight through, matching the old
+//! env-driven behaviour (`OPENREACH_RENDEZVOUS_URL` as the ws URL, or
+//! `OPENREACH_SIGNAL_ADDR` for the LAN relay).
 
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::Context;
 use openreach_protocol as proto;
 use openreach_protocol::input_event::Event as InputEvent;
 use openreach_protocol::{KeyEvent, MouseButton, MouseMove, MouseScroll};
 use openreach_session::rendezvous::RendezvousClient;
-use openreach_session::{SignalClient, Signaling, ViewerConfig, ViewerSession, ViewerUpdate};
+use openreach_session::{
+    identity::known_peers, AccountClient, DeviceIdentity, DeviceInfo, SignalClient, Signaling,
+    ViewerConfig, ViewerSession, ViewerUpdate,
+};
 
-/// Build the signaling backend: rendezvous WebSocket if configured, else LAN relay.
-fn build_signaling() -> anyhow::Result<Box<dyn Signaling>> {
-    if let Ok(url) = std::env::var("OPENREACH_RENDEZVOUS_URL") {
-        let token = std::env::var("OPENREACH_TOKEN")
-            .context("OPENREACH_TOKEN is required in rendezvous mode")?;
-        let peer = std::env::var("OPENREACH_PEER_DEVICE_ID")
-            .context("OPENREACH_PEER_DEVICE_ID (the host's id) is required in rendezvous mode")?;
-        tracing::info!(%url, %peer, "signaling via rendezvous");
-        Ok(Box::new(RendezvousClient::connect(
-            &url,
-            &token,
-            Some(peer),
-        )?))
-    } else {
-        let addr =
-            std::env::var("OPENREACH_SIGNAL_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".to_string());
-        tracing::info!(%addr, "signaling via LAN relay");
-        Ok(Box::new(SignalClient::connect(&addr)?))
-    }
-}
-
+use egui_wgpu::ScreenDescriptor;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton as WinitMouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 /// How often, when idle, we wake to poll the session for new frames. Small
 /// enough to keep latency low, large enough to not spin the CPU.
 const POLL_INTERVAL: Duration = Duration::from_millis(4);
+
+/// How often the viewer probes the host for round-trip latency.
+const PING_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Default rendezvous server shown in the login form (overridable in the field
+/// or via `OPENREACH_RENDEZVOUS_URL`).
+const DEFAULT_SERVER: &str = "https://openreach.brainwires.dev";
 
 fn main() {
     tracing_subscriber::fmt()
@@ -62,43 +60,6 @@ fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-
-    // Build the viewer config from the environment.
-    let mut cfg = ViewerConfig::default();
-    if let Ok(name) = std::env::var("OPENREACH_NAME") {
-        cfg.device_name = name;
-    }
-    cfg.ice_servers = std::env::var("OPENREACH_ICE")
-        .map(|s| {
-            s.split(',')
-                .map(|x| x.trim().to_string())
-                .filter(|x| !x.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    if let Ok(bind) = std::env::var("OPENREACH_BIND") {
-        cfg.bind_addr = bind;
-    }
-    tracing::info!(name = %cfg.device_name, "starting openreach-viewer");
-
-    // Build the signaling backend (rendezvous if configured, else LAN relay).
-    let signaling = match build_signaling() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, "signaling setup failed; exiting");
-            std::process::exit(1);
-        }
-    };
-
-    // Start the session up front. If signaling can't be reached we log and exit
-    // cleanly rather than opening a dead window.
-    let session = match ViewerSession::start(cfg, signaling) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error = %e, "failed to start viewer session; exiting");
-            std::process::exit(1);
-        }
-    };
 
     let event_loop = match EventLoop::new() {
         Ok(el) => el,
@@ -109,49 +70,922 @@ fn main() {
     };
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(session);
+    let mut app = App::new();
     if let Err(e) = event_loop.run_app(&mut app) {
         tracing::error!(error = %e, "event loop terminated with error");
         std::process::exit(1);
     }
 }
 
-// --- Application -----------------------------------------------------------
+// --- Application state machine ---------------------------------------------
 
-/// The winit application state. Holds the (frozen-API) session for the whole
-/// process lifetime, the window/GPU (created lazily on `resumed`), and the input
-/// bookkeeping needed to build protocol events.
+/// Which screen the UI is showing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen {
+    /// Server URL + credentials; sign in or create an account.
+    Login,
+    /// The user's device list + this-device identity.
+    Devices,
+    /// SAS/TOFU confirmation and the "establishing" spinner.
+    Connecting,
+    /// Live video with a HUD overlay.
+    InSession,
+}
+
+/// Sub-state of [`Screen::Connecting`].
+enum ConnState {
+    /// Awaiting the user's out-of-band SAS confirmation before dialing.
+    Confirm(Tofu),
+    /// Session started; waiting for the data channel / pairing.
+    Establishing,
+}
+
+/// TOFU verdict for the host we're about to connect to.
+#[derive(Clone, Copy)]
+enum Tofu {
+    /// Never seen this device before — show the SAS for first-use verification.
+    FirstUse,
+    /// Known and the key matches what we remembered.
+    Trusted,
+    /// Known but the key CHANGED — refuse (possible MITM).
+    Changed,
+}
+
+/// Result of a background network job, delivered to the UI thread.
+enum Job {
+    /// Sign-in: on success we already fetched the device list.
+    SignedIn(Result<Vec<DeviceInfo>, String>),
+    /// Account creation.
+    Registered(Result<(), String>),
+    /// Device-list refresh.
+    Devices(Result<Vec<DeviceInfo>, String>),
+    /// This viewer device registered — carries the freshly issued token.
+    ThisDevice(Result<String, String>),
+    /// A device was deleted — carries the removed device_id.
+    Deleted(Result<String, String>),
+}
+
+/// The winit application: window/GPU (created on `resumed`), egui state, the app
+/// flow state machine, the active session, and input bookkeeping.
 struct App {
-    session: ViewerSession,
+    // rendering / windowing
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
+    egui_ctx: egui::Context,
+    egui_state: Option<egui_winit::State>,
+
+    // flow
+    screen: Screen,
+
+    // login form
+    server_url: String,
+    username: String,
+    password: String,
+
+    // authenticated account (in memory only)
+    account: Option<AccountClient>,
+    creds: Option<(String, String)>,
+    devices: Vec<DeviceInfo>,
+
+    // this device
+    identity: DeviceIdentity,
+    this_device_id: String,
+    device_name: String,
+    viewer_token: Option<String>,
+    known_peers_path: PathBuf,
+    ice_servers: Vec<String>,
+    bind_addr: String,
+
+    // connecting / session
+    selected_host: Option<DeviceInfo>,
+    conn: ConnState,
+    session: Option<ViewerSession>,
+    paired: Option<bool>,
+    latency: Option<Duration>,
+    last_ping: Instant,
+
+    // in-session UI
+    view_only: bool,
+    hud_visible: bool,
+
+    // input bookkeeping
     /// Current keyboard modifier bitmask (`openreach_protocol::modifiers`).
     modifiers: u32,
-    /// Last cursor position, normalized to [0, 1] over the window — carried into
-    /// button events so click position stays consistent with the last move.
+    /// Last cursor position, normalized to [0, 1] over the window.
     last_cursor: (f64, f64),
+
+    // async jobs + banners
+    job: Option<Receiver<Job>>,
+    busy: Option<String>,
+    error: Option<String>,
+    info: Option<String>,
 }
 
 impl App {
-    fn new(session: ViewerSession) -> Self {
-        Self {
-            session,
+    fn new() -> Self {
+        let config_dir = config_dir();
+        let known_peers_path = config_dir.join("known_peers");
+
+        // Load (or first-run generate) this device's long-lived identity.
+        let identity_path = config_dir.join("identity.key");
+        let (identity, id_err) = match DeviceIdentity::load_or_create(&identity_path) {
+            Ok(id) => (id, None),
+            Err(e) => {
+                // Fall back to an ephemeral in-memory identity so the app still
+                // runs; surface the failure in the UI.
+                let id = DeviceIdentity::generate().expect("CSPRNG identity generation");
+                (
+                    id,
+                    Some(format!("could not load identity: {e} (using ephemeral)")),
+                )
+            }
+        };
+        let this_device_id = identity.device_id();
+
+        let device_name =
+            std::env::var("OPENREACH_NAME").unwrap_or_else(|_| "openreach-viewer".into());
+        let ice_servers = std::env::var("OPENREACH_ICE")
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let bind_addr = std::env::var("OPENREACH_BIND").unwrap_or_else(|_| "0.0.0.0:0".into());
+        let server_url = std::env::var("OPENREACH_RENDEZVOUS_URL")
+            .ok()
+            .filter(|u| u.starts_with("http"))
+            .unwrap_or_else(|| DEFAULT_SERVER.into());
+
+        let mut app = Self {
             window: None,
             gpu: None,
+            egui_ctx: egui::Context::default(),
+            egui_state: None,
+            screen: Screen::Login,
+            server_url,
+            username: String::new(),
+            password: String::new(),
+            account: None,
+            creds: None,
+            devices: Vec::new(),
+            identity,
+            this_device_id,
+            device_name,
+            viewer_token: None,
+            known_peers_path,
+            ice_servers,
+            bind_addr,
+            selected_host: None,
+            conn: ConnState::Establishing,
+            session: None,
+            paired: None,
+            latency: None,
+            last_ping: Instant::now(),
+            view_only: false,
+            hud_visible: true,
             modifiers: 0,
             last_cursor: (0.0, 0.0),
+            job: None,
+            busy: None,
+            error: id_err,
+            info: None,
+        };
+
+        // Headless/scripted fallback: if the env carries a token + peer (or a LAN
+        // relay addr), skip the login UI and connect straight through.
+        if let Some(result) = quick_connect_signaling() {
+            match result {
+                Ok(signaling) => {
+                    app.screen = Screen::Connecting;
+                    app.conn = ConnState::Establishing;
+                    app.start_session(signaling);
+                }
+                Err(e) => {
+                    app.error = Some(format!("quick-connect failed: {e}"));
+                }
+            }
         }
+
+        app
+    }
+
+    // --- session lifecycle -------------------------------------------------
+
+    /// Start a [`ViewerSession`] over the given signaling backend and move to the
+    /// "establishing" state. Errors surface in the UI banner.
+    fn start_session(&mut self, signaling: Box<dyn Signaling>) {
+        let cfg = ViewerConfig {
+            device_name: self.device_name.clone(),
+            ice_servers: self.ice_servers.clone(),
+            bind_addr: self.bind_addr.clone(),
+        };
+        match ViewerSession::start(cfg, signaling) {
+            Ok(session) => {
+                self.session = Some(session);
+                self.paired = None;
+                self.latency = None;
+                self.last_ping = Instant::now();
+                self.conn = ConnState::Establishing;
+                self.screen = Screen::Connecting;
+                self.error = None;
+            }
+            Err(e) => {
+                self.error = Some(format!("failed to start session: {e}"));
+                self.leave_session();
+            }
+        }
+    }
+
+    /// Tear down any active session and return to a sensible screen.
+    fn leave_session(&mut self) {
+        self.session = None;
+        self.selected_host = None;
+        self.paired = None;
+        self.latency = None;
+        self.view_only = false;
+        self.hud_visible = true;
+        // Drop fullscreen so the user isn't stranded.
+        if let Some(win) = &self.window {
+            win.set_fullscreen(None);
+        }
+        self.screen = if self.account.is_some() {
+            Screen::Devices
+        } else {
+            Screen::Login
+        };
+    }
+
+    /// Handle one update drained from the active session.
+    fn handle_session_update(&mut self, update: ViewerUpdate) {
+        match update {
+            ViewerUpdate::Frame(frame) => {
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.upload_frame(&frame);
+                }
+                if let Some(win) = self.window.as_ref() {
+                    win.request_redraw();
+                }
+            }
+            ViewerUpdate::Connected => {
+                tracing::info!("connected to host");
+                // Data channel is up: reveal the video + HUD.
+                self.screen = Screen::InSession;
+            }
+            ViewerUpdate::Paired(accepted) => {
+                self.paired = Some(accepted);
+                if accepted {
+                    self.screen = Screen::InSession;
+                } else {
+                    self.error = Some("host rejected pairing (protocol version mismatch)".into());
+                    self.leave_session();
+                }
+            }
+            ViewerUpdate::Latency(rtt) => {
+                self.latency = Some(rtt);
+            }
+            ViewerUpdate::Disconnected => {
+                if self.screen == Screen::InSession {
+                    self.info = Some("session ended (host disconnected)".into());
+                } else {
+                    self.error = Some("disconnected before the session was established".into());
+                }
+                self.leave_session();
+            }
+        }
+    }
+
+    // --- background jobs ---------------------------------------------------
+
+    /// Spawn a background job (no-op if one is already in flight).
+    fn spawn<F>(&mut self, label: &str, f: F)
+    where
+        F: FnOnce() -> Job + Send + 'static,
+    {
+        if self.busy.is_some() {
+            return;
+        }
+        self.error = None;
+        self.info = None;
+        self.busy = Some(label.to_string());
+        let (tx, rx) = mpsc::channel();
+        self.job = Some(rx);
+        std::thread::Builder::new()
+            .name("openreach-viewer-job".into())
+            .spawn(move || {
+                let _ = tx.send(f());
+            })
+            .ok();
+    }
+
+    /// Poll the in-flight job (if any) and apply its result.
+    fn poll_job(&mut self) {
+        let Some(result) = self.job.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+            return;
+        };
+        self.job = None;
+        self.busy = None;
+        match result {
+            Job::SignedIn(Ok(devices)) => {
+                self.devices = devices;
+                self.screen = Screen::Devices;
+                self.info = Some("signed in".into());
+                self.password.clear();
+            }
+            Job::SignedIn(Err(e)) => {
+                self.account = None;
+                self.creds = None;
+                self.error = Some(e);
+            }
+            Job::Registered(Ok(())) => {
+                self.info = Some("account created — you can sign in now".into());
+            }
+            Job::Registered(Err(e)) => self.error = Some(e),
+            Job::Devices(Ok(devices)) => self.devices = devices,
+            Job::Devices(Err(e)) => self.error = Some(e),
+            Job::ThisDevice(Ok(token)) => {
+                self.viewer_token = Some(token);
+                self.info = Some("this device is registered — you can connect".into());
+                self.refresh_devices();
+            }
+            Job::ThisDevice(Err(e)) => self.error = Some(e),
+            Job::Deleted(Ok(id)) => {
+                self.devices.retain(|d| d.device_id != id);
+                self.info = Some("device removed".into());
+            }
+            Job::Deleted(Err(e)) => self.error = Some(e),
+        }
+        if let Some(win) = &self.window {
+            win.request_redraw();
+        }
+    }
+
+    // --- user actions ------------------------------------------------------
+
+    fn action_sign_in(&mut self) {
+        let (user, pass) = (self.username.trim().to_string(), self.password.clone());
+        if user.is_empty() || pass.is_empty() {
+            self.error = Some("enter a username and password".into());
+            return;
+        }
+        let client = AccountClient::new(self.server_url.trim());
+        // Optimistically remember the account; SignedIn(Err) clears it.
+        self.account = Some(client.clone());
+        self.creds = Some((user.clone(), pass.clone()));
+        self.spawn("Signing in…", move || {
+            Job::SignedIn(client.list_devices(&user, &pass).map_err(|e| e.to_string()))
+        });
+    }
+
+    fn action_create_account(&mut self) {
+        let (user, pass) = (self.username.trim().to_string(), self.password.clone());
+        if user.is_empty() || pass.len() < 8 {
+            self.error = Some("username required; password must be at least 8 characters".into());
+            return;
+        }
+        let client = AccountClient::new(self.server_url.trim());
+        self.spawn("Creating account…", move || {
+            Job::Registered(client.register(&user, &pass).map_err(|e| e.to_string()))
+        });
+    }
+
+    fn refresh_devices(&mut self) {
+        let (Some(client), Some((user, pass))) = (self.account.clone(), self.creds.clone()) else {
+            return;
+        };
+        self.spawn("Loading devices…", move || {
+            Job::Devices(client.list_devices(&user, &pass).map_err(|e| e.to_string()))
+        });
+    }
+
+    /// Register THIS viewer device to obtain a signaling bearer token.
+    fn action_register_this_device(&mut self) {
+        let (Some(client), Some((user, pass))) = (self.account.clone(), self.creds.clone()) else {
+            return;
+        };
+        let device_id = self.this_device_id.clone();
+        let name = self.device_name.clone();
+        let public_key = self.identity.public_key_hex();
+        self.spawn("Registering this device…", move || {
+            Job::ThisDevice(
+                client
+                    .register_device(&user, &pass, &device_id, &name, &public_key, "viewer")
+                    .map_err(|e| e.to_string()),
+            )
+        });
+    }
+
+    fn action_delete_device(&mut self, device_id: String) {
+        let (Some(client), Some((user, pass))) = (self.account.clone(), self.creds.clone()) else {
+            return;
+        };
+        self.spawn("Removing device…", move || {
+            Job::Deleted(
+                client
+                    .delete_device(&user, &pass, &device_id)
+                    .map(|()| device_id)
+                    .map_err(|e| e.to_string()),
+            )
+        });
+    }
+
+    fn action_sign_out(&mut self) {
+        self.account = None;
+        self.creds = None;
+        self.devices.clear();
+        self.viewer_token = None;
+        self.password.clear();
+        self.screen = Screen::Login;
+    }
+
+    /// Begin connecting to `host`: compute the SAS and the TOFU verdict, then move
+    /// to the confirmation screen.
+    fn action_begin_connect(&mut self, host: DeviceInfo) {
+        let sas_peer_key = host.public_key.clone();
+        let tofu = match known_peers::get(&self.known_peers_path, &host.device_id) {
+            None => Tofu::FirstUse,
+            Some(k) if k == sas_peer_key => Tofu::Trusted,
+            Some(_) => Tofu::Changed,
+        };
+        self.selected_host = Some(host);
+        self.conn = ConnState::Confirm(tofu);
+        self.screen = Screen::Connecting;
+        self.error = None;
+        self.info = None;
+    }
+
+    /// The user confirmed the SAS (or it was already trusted): remember the peer
+    /// (TOFU) and dial.
+    fn action_confirm_connect(&mut self) {
+        let (Some(host), Some(account), Some(token)) = (
+            self.selected_host.clone(),
+            self.account.clone(),
+            self.viewer_token.clone(),
+        ) else {
+            self.error = Some("register this device to get a token before connecting".into());
+            self.leave_session();
+            return;
+        };
+
+        // TOFU: record (first use) / verify (known); refuse on a changed key.
+        match known_peers::trust_on_first_use(
+            &self.known_peers_path,
+            &host.device_id,
+            &host.public_key,
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                self.error = Some(e.to_string());
+                self.leave_session();
+                return;
+            }
+        }
+
+        match RendezvousClient::connect(&account.ws_url(), &token, Some(host.device_id.clone())) {
+            Ok(client) => self.start_session(Box::new(client)),
+            Err(e) => {
+                self.error = Some(format!("could not open signaling: {e}"));
+                self.leave_session();
+            }
+        }
+    }
+
+    // --- rendering ---------------------------------------------------------
+
+    /// Run egui for this frame and paint video + overlay to the surface.
+    fn render(&mut self) {
+        let (Some(window), Some(state)) = (self.window.clone(), self.egui_state.as_mut()) else {
+            return;
+        };
+        let raw_input = state.take_egui_input(&window);
+
+        // Clone the context so the UI closure can borrow `self` mutably. egui 0.35
+        // hands the closure a root `&mut Ui`; panels are shown into it.
+        let ctx = self.egui_ctx.clone();
+        let full_output = ctx.run_ui(raw_input, |ui| self.build_ui(ui));
+
+        // `state` was re-borrowed above; fetch it again for platform output.
+        if let Some(state) = self.egui_state.as_mut() {
+            state.handle_platform_output(&window, full_output.platform_output);
+        }
+
+        let paint_jobs = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        let screen = ScreenDescriptor {
+            size_in_pixels: {
+                let s = window.inner_size();
+                [s.width.max(1), s.height.max(1)]
+            },
+            pixels_per_point: full_output.pixels_per_point,
+        };
+
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.render(&paint_jobs, &full_output.textures_delta, &screen);
+        }
+
+        // Keep animating while egui wants to (spinners), else the poll loop wakes us.
+        if let Some(delay) = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|v| v.repaint_delay)
+        {
+            if delay.is_zero() {
+                window.request_redraw();
+            }
+        }
+    }
+
+    // --- egui UI -----------------------------------------------------------
+
+    fn build_ui(&mut self, ui: &mut egui::Ui) {
+        match self.screen {
+            Screen::Login => self.ui_login(ui),
+            Screen::Devices => self.ui_devices(ui),
+            Screen::Connecting => self.ui_connecting(ui),
+            Screen::InSession => self.ui_session(ui),
+        }
+    }
+
+    /// Shared error/info banner drawn at the top of a panel.
+    fn banners(&mut self, ui: &mut egui::Ui) {
+        if let Some(err) = self.error.clone() {
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::from_rgb(220, 80, 80), format!("⚠ {err}"));
+                if ui.small_button("dismiss").clicked() {
+                    self.error = None;
+                }
+            });
+        }
+        if let Some(info) = self.info.clone() {
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::from_rgb(120, 200, 120), info);
+                if ui.small_button("dismiss").clicked() {
+                    self.info = None;
+                }
+            });
+        }
+    }
+
+    fn ui_login(&mut self, root: &mut egui::Ui) {
+        egui::CentralPanel::default().show(root, |ui| {
+            ui.add_space(24.0);
+            ui.vertical_centered(|ui| {
+                ui.heading("OpenReach");
+                ui.label("Sign in to your rendezvous server");
+            });
+            ui.add_space(16.0);
+            self.banners(ui);
+            ui.add_space(8.0);
+
+            let busy = self.busy.is_some();
+            egui::Grid::new("login_grid")
+                .num_columns(2)
+                .spacing([12.0, 10.0])
+                .show(ui, |ui| {
+                    ui.label("Server");
+                    ui.add_enabled(
+                        !busy,
+                        egui::TextEdit::singleline(&mut self.server_url).desired_width(320.0),
+                    );
+                    ui.end_row();
+
+                    ui.label("Username");
+                    ui.add_enabled(
+                        !busy,
+                        egui::TextEdit::singleline(&mut self.username).desired_width(320.0),
+                    );
+                    ui.end_row();
+
+                    ui.label("Password");
+                    ui.add_enabled(
+                        !busy,
+                        egui::TextEdit::singleline(&mut self.password)
+                            .password(true)
+                            .desired_width(320.0),
+                    );
+                    ui.end_row();
+                });
+
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if let Some(label) = self.busy.clone() {
+                    ui.spinner();
+                    ui.label(label);
+                } else {
+                    if ui.button("Sign in").clicked() {
+                        self.action_sign_in();
+                    }
+                    if ui.button("Create account").clicked() {
+                        self.action_create_account();
+                    }
+                }
+            });
+
+            ui.add_space(16.0);
+            ui.separator();
+            ui.label(format!("This device id: {}", short(&self.this_device_id)));
+            ui.label(format!(
+                "Fingerprint: {}",
+                short(&self.identity.fingerprint())
+            ));
+        });
+    }
+
+    fn ui_devices(&mut self, root: &mut egui::Ui) {
+        // Header: this-device identity + account actions.
+        egui::Panel::top("devices_top").show(root, |ui| {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.heading("Devices");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Sign out").clicked() {
+                        self.action_sign_out();
+                    }
+                    let can = self.busy.is_none();
+                    if ui.add_enabled(can, egui::Button::new("Refresh")).clicked() {
+                        self.refresh_devices();
+                    }
+                });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("This device:");
+                ui.monospace(short(&self.this_device_id));
+                ui.separator();
+                match &self.viewer_token {
+                    Some(_) => {
+                        ui.colored_label(egui::Color32::from_rgb(120, 200, 120), "registered ✓");
+                    }
+                    None => {
+                        let can = self.busy.is_none();
+                        if ui
+                            .add_enabled(can, egui::Button::new("Register this device"))
+                            .on_hover_text("Obtain a signaling token so this viewer can connect")
+                            .clicked()
+                        {
+                            self.action_register_this_device();
+                        }
+                    }
+                }
+            });
+            ui.add_space(6.0);
+        });
+
+        egui::CentralPanel::default().show(root, |ui| {
+            self.banners(ui);
+            if let Some(label) = self.busy.clone() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(label);
+                });
+            }
+            ui.add_space(6.0);
+
+            if self.devices.is_empty() {
+                ui.label("No devices yet. Register a host (or this device) to get started.");
+                return;
+            }
+
+            let has_token = self.viewer_token.is_some();
+            let busy = self.busy.is_some();
+            // Collect actions to run after the immutable borrow of `self.devices`.
+            let mut connect: Option<DeviceInfo> = None;
+            let mut delete: Option<String> = None;
+            let devices = self.devices.clone();
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for d in &devices {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.strong(&d.name);
+                            ui.weak(format!("[{}]", d.role));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("Delete").clicked() {
+                                        delete = Some(d.device_id.clone());
+                                    }
+                                    let is_self = d.device_id == self.this_device_id;
+                                    let connectable = d.is_connectable() && !is_self;
+                                    let enabled = connectable && has_token && !busy;
+                                    let btn = ui.add_enabled(enabled, egui::Button::new("Connect"));
+                                    let btn = if is_self {
+                                        btn.on_hover_text("This is the viewer device")
+                                    } else if !d.is_connectable() {
+                                        btn.on_hover_text("Not a host (role is viewer-only)")
+                                    } else if !has_token {
+                                        btn.on_hover_text("Register this device first")
+                                    } else {
+                                        btn
+                                    };
+                                    if btn.clicked() {
+                                        connect = Some(d.clone());
+                                    }
+                                },
+                            );
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            ui.weak("id");
+                            ui.monospace(short(&d.device_id));
+                            ui.weak("key");
+                            ui.monospace(short(&d.public_key));
+                            ui.weak("last seen");
+                            ui.label(fmt_last_seen(d.last_seen));
+                        });
+                    });
+                }
+            });
+
+            if let Some(host) = connect {
+                self.action_begin_connect(host);
+            }
+            if let Some(id) = delete {
+                self.action_delete_device(id);
+            }
+        });
+    }
+
+    fn ui_connecting(&mut self, root: &mut egui::Ui) {
+        egui::CentralPanel::default().show(root, |ui| {
+            ui.add_space(24.0);
+            self.banners(ui);
+            let host_name = self
+                .selected_host
+                .as_ref()
+                .map(|h| h.name.clone())
+                .unwrap_or_else(|| "host".into());
+
+            // Read the connection state into owned values so the UI closures can
+            // still call `&mut self` action methods below.
+            let confirm_tofu = match &self.conn {
+                ConnState::Confirm(tofu) => Some(*tofu),
+                ConnState::Establishing => None,
+            };
+
+            match confirm_tofu {
+                Some(tofu) => {
+                    ui.vertical_centered(|ui| {
+                        ui.heading(format!("Connect to {host_name}"));
+                    });
+                    ui.add_space(12.0);
+
+                    // Compute the SAS over our key and the host's key.
+                    let sas = self
+                        .selected_host
+                        .as_ref()
+                        .map(|h| self.identity.sas(&h.public_key));
+
+                    match tofu {
+                        Tofu::Changed => {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(230, 60, 60),
+                                "⚠ THIS DEVICE PRESENTED A DIFFERENT KEY THAN REMEMBERED.",
+                            );
+                            ui.label(
+                                "The host's identity key does not match the one you previously \
+                                 trusted. This can happen after a reinstall — or it can indicate a \
+                                 machine-in-the-middle. Connection refused.",
+                            );
+                            ui.add_space(8.0);
+                            if ui.button("Back").clicked() {
+                                self.leave_session();
+                            }
+                        }
+                        Tofu::Trusted | Tofu::FirstUse => {
+                            if matches!(tofu, Tofu::Trusted) {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(120, 200, 120),
+                                    "Previously verified (trusted on first use).",
+                                );
+                            } else {
+                                ui.label(
+                                    "First connection to this host. Verify the code below matches \
+                                     the one shown on the host, out-of-band, before connecting.",
+                                );
+                            }
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                ui.label("Security code (SAS):");
+                                ui.heading(sas.as_deref().unwrap_or("------"));
+                            });
+                            if let Some(h) = &self.selected_host {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.weak("host key");
+                                    ui.monospace(short(&h.public_key));
+                                });
+                            }
+                            ui.add_space(12.0);
+                            ui.horizontal(|ui| {
+                                let confirm = if matches!(tofu, Tofu::Trusted) {
+                                    "Connect"
+                                } else {
+                                    "The code matches — Trust & Connect"
+                                };
+                                if ui.button(confirm).clicked() {
+                                    self.action_confirm_connect();
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    self.leave_session();
+                                }
+                            });
+                        }
+                    }
+                }
+                None => {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(24.0);
+                        ui.spinner();
+                        ui.label(format!("Connecting to {host_name}…"));
+                        ui.add_space(8.0);
+                        if ui.button("Cancel").clicked() {
+                            self.leave_session();
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    fn ui_session(&mut self, root: &mut egui::Ui) {
+        if !self.hud_visible {
+            return; // immersive: video only (F1 restores the HUD)
+        }
+        egui::Panel::top("hud").show(root, |ui| {
+            ui.horizontal(|ui| {
+                // Connection / pairing state.
+                let state = match self.paired {
+                    Some(true) => ("paired", egui::Color32::from_rgb(120, 200, 120)),
+                    Some(false) => ("rejected", egui::Color32::from_rgb(230, 60, 60)),
+                    None => ("connected", egui::Color32::from_rgb(200, 200, 120)),
+                };
+                ui.colored_label(state.1, format!("● {}", state.0));
+                ui.separator();
+
+                // Latency (RTT from data-channel Ping/Pong).
+                match self.latency {
+                    Some(rtt) => ui.label(format!("latency {} ms", rtt.as_millis())),
+                    None => ui.label("latency —"),
+                };
+                ui.separator();
+
+                ui.checkbox(&mut self.view_only, "View only");
+                ui.separator();
+
+                let is_fs = self.window.as_ref().and_then(|w| w.fullscreen()).is_some();
+                if ui
+                    .button(if is_fs { "Windowed" } else { "Fullscreen" })
+                    .clicked()
+                {
+                    if let Some(win) = &self.window {
+                        win.set_fullscreen(if is_fs {
+                            None
+                        } else {
+                            Some(Fullscreen::Borderless(None))
+                        });
+                    }
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Disconnect").clicked() {
+                        self.leave_session();
+                    }
+                    ui.weak("F1: toggle HUD");
+                });
+            });
+        });
+    }
+
+    // --- input translation -------------------------------------------------
+
+    /// Whether local input should be forwarded to the host right now.
+    fn forwarding_input(&self, egui_consumed: bool) -> bool {
+        self.screen == Screen::InSession
+            && self.session.is_some()
+            && !self.view_only
+            && !egui_consumed
+    }
+
+    /// Normalize a cursor position to [0, 1] over the current window inner size.
+    fn normalize_cursor(
+        &self,
+        position: PhysicalPosition<f64>,
+        last: &mut (f64, f64),
+    ) -> (f64, f64) {
+        let (w, h) = self.window.as_ref().map_or((1.0, 1.0), |win| {
+            let s = win.inner_size();
+            (f64::from(s.width.max(1)), f64::from(s.height.max(1)))
+        });
+        let x = (position.x / w).clamp(0.0, 1.0);
+        let y = (position.y / h).clamp(0.0, 1.0);
+        *last = (x, y);
+        (x, y)
     }
 }
 
 impl ApplicationHandler for App {
-    /// Create the window and GPU state once the platform is ready. `resumed` can
-    /// fire more than once on some platforms, so we guard against re-init.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
-
         let attrs = Window::default_attributes().with_title("OpenReach Viewer");
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -162,10 +996,19 @@ impl ApplicationHandler for App {
             }
         };
 
-        // wgpu setup is async (adapter/device requests are futures); block on it.
         match pollster::block_on(Gpu::new(window.clone())) {
             Ok(gpu) => {
+                let egui_state = egui_winit::State::new(
+                    self.egui_ctx.clone(),
+                    egui::ViewportId::ROOT,
+                    window.as_ref(),
+                    Some(window.scale_factor() as f32),
+                    None,
+                    None,
+                );
+                self.egui_ctx.set_visuals(egui::Visuals::dark());
                 self.gpu = Some(gpu);
+                self.egui_state = Some(egui_state);
                 self.window = Some(window);
             }
             Err(e) => {
@@ -175,121 +1018,205 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+
+        // Feed the event to egui first; it tells us whether it consumed it.
+        let egui_consumed = if let Some(state) = self.egui_state.as_mut() {
+            let resp = state.on_window_event(&window, &event);
+            if resp.repaint {
+                window.request_redraw();
+            }
+            resp.consumed
+        } else {
+            false
+        };
+
         match event {
             WindowEvent::CloseRequested => {
                 tracing::info!("close requested; exiting");
                 event_loop.exit();
             }
-
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
                 }
-                if let Some(win) = self.window.as_ref() {
-                    win.request_redraw();
-                }
+                window.request_redraw();
             }
+            WindowEvent::RedrawRequested => self.render(),
 
-            WindowEvent::RedrawRequested => {
-                if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.render();
-                }
-            }
-
-            // --- Input translation (viewer -> host) ------------------------
+            // --- input translation (viewer -> host) ------------------------
             WindowEvent::CursorMoved { position, .. } => {
-                let (x, y) = self.normalize_cursor(position);
-                self.last_cursor = (x, y);
-                self.session
-                    .send_input(InputEvent::MouseMove(MouseMove { x, y }));
+                let mut last = self.last_cursor;
+                let (x, y) = self.normalize_cursor(position, &mut last);
+                self.last_cursor = last;
+                if self.forwarding_input(egui_consumed) {
+                    if let Some(s) = &self.session {
+                        s.send_input(InputEvent::MouseMove(MouseMove { x, y }));
+                    }
+                }
             }
-
             WindowEvent::MouseInput { state, button, .. } => {
-                if let Some(btn) = map_mouse_button(button) {
-                    let (x, y) = self.last_cursor;
-                    self.session
-                        .send_input(InputEvent::MouseButton(MouseButton {
+                if self.forwarding_input(egui_consumed) {
+                    if let (Some(btn), Some(s)) = (map_mouse_button(button), &self.session) {
+                        let (x, y) = self.last_cursor;
+                        s.send_input(InputEvent::MouseButton(MouseButton {
                             button: btn,
                             pressed: state == ElementState::Pressed,
                             x,
                             y,
                         }));
-                }
-            }
-
-            WindowEvent::MouseWheel { delta, .. } => {
-                let (dx, dy) = match delta {
-                    // Line deltas are unit-less "clicks"; scale to something the
-                    // host can treat like pixels.
-                    MouseScrollDelta::LineDelta(x, y) => (f64::from(x) * 10.0, f64::from(y) * 10.0),
-                    MouseScrollDelta::PixelDelta(p) => (p.x, p.y),
-                };
-                self.session
-                    .send_input(InputEvent::MouseScroll(MouseScroll { dx, dy }));
-            }
-
-            WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = map_modifiers(mods.state());
-            }
-
-            WindowEvent::KeyboardInput { event, .. } => {
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    if let Some(hid_usage) = winit_keycode_to_hid(code) {
-                        self.session.send_input(InputEvent::Key(KeyEvent {
-                            hid_usage,
-                            pressed: event.state == ElementState::Pressed,
-                            modifiers: self.modifiers,
-                        }));
                     }
                 }
             }
-
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.forwarding_input(egui_consumed) {
+                    let (dx, dy) = match delta {
+                        MouseScrollDelta::LineDelta(x, y) => {
+                            (f64::from(x) * 10.0, f64::from(y) * 10.0)
+                        }
+                        MouseScrollDelta::PixelDelta(p) => (p.x, p.y),
+                    };
+                    if let Some(s) = &self.session {
+                        s.send_input(InputEvent::MouseScroll(MouseScroll { dx, dy }));
+                    }
+                }
+            }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = map_modifiers(mods.state());
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                // F1 toggles the HUD in-session; it is never forwarded.
+                if self.screen == Screen::InSession
+                    && event.state == ElementState::Pressed
+                    && event.physical_key == PhysicalKey::Code(KeyCode::F1)
+                {
+                    self.hud_visible = !self.hud_visible;
+                    window.request_redraw();
+                    return;
+                }
+                if self.forwarding_input(egui_consumed) {
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        if let (Some(hid_usage), Some(s)) =
+                            (winit_keycode_to_hid(code), &self.session)
+                        {
+                            s.send_input(InputEvent::Key(KeyEvent {
+                                hid_usage,
+                                pressed: event.state == ElementState::Pressed,
+                                modifiers: self.modifiers,
+                            }));
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
 
-    /// Drain decoded frames / connection updates and keep the poll loop alive.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        while let Some(update) = self.session.poll_update() {
-            match update {
-                ViewerUpdate::Frame(frame) => {
-                    if let Some(gpu) = self.gpu.as_mut() {
-                        gpu.upload_frame(&frame);
-                    }
-                    if let Some(win) = self.window.as_ref() {
-                        win.request_redraw();
-                    }
-                }
-                ViewerUpdate::Connected => tracing::info!("connected to host"),
-                ViewerUpdate::Paired(true) => tracing::info!("paired: host accepted this viewer"),
-                ViewerUpdate::Paired(false) => {
-                    tracing::warn!("pairing rejected by host (version mismatch)");
-                }
-                ViewerUpdate::Disconnected => tracing::warn!("disconnected from host"),
+        // Drain session updates.
+        loop {
+            let Some(update) = self.session.as_ref().and_then(|s| s.poll_update()) else {
+                break;
+            };
+            self.handle_session_update(update);
+        }
+
+        // Apply any completed background job.
+        self.poll_job();
+
+        // Probe latency periodically while in a live session.
+        if self.screen == Screen::InSession && self.last_ping.elapsed() >= PING_INTERVAL {
+            if let Some(s) = &self.session {
+                s.send_ping();
+            }
+            self.last_ping = Instant::now();
+        }
+
+        // Keep spinners animating while a job is in flight or we're establishing.
+        let animating = self.busy.is_some()
+            || matches!(
+                (self.screen, &self.conn),
+                (Screen::Connecting, ConnState::Establishing)
+            );
+        if animating {
+            if let Some(win) = &self.window {
+                win.request_redraw();
             }
         }
 
-        // Wake again shortly to poll for the next frame without busy-spinning.
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + POLL_INTERVAL));
     }
 }
 
-impl App {
-    /// Normalize a cursor position to [0, 1] over the current window inner size.
-    fn normalize_cursor(&self, position: PhysicalPosition<f64>) -> (f64, f64) {
-        let (w, h) = self.window.as_ref().map_or((1.0, 1.0), |win| {
-            let s = win.inner_size();
-            (f64::from(s.width.max(1)), f64::from(s.height.max(1)))
-        });
-        let x = (position.x / w).clamp(0.0, 1.0);
-        let y = (position.y / h).clamp(0.0, 1.0);
-        (x, y)
+// --- env quick-connect -----------------------------------------------------
+
+/// If the environment carries connect-through credentials, build the signaling
+/// backend (rendezvous by token+peer, else LAN relay). Returns `None` to fall
+/// back to the login UI.
+fn quick_connect_signaling() -> Option<anyhow::Result<Box<dyn Signaling>>> {
+    if let (Ok(token), Ok(peer)) = (
+        std::env::var("OPENREACH_TOKEN"),
+        std::env::var("OPENREACH_PEER_DEVICE_ID"),
+    ) {
+        let ws = std::env::var("OPENREACH_RENDEZVOUS_URL")
+            .unwrap_or_else(|_| "wss://openreach.brainwires.dev/ws".into());
+        tracing::info!(%ws, %peer, "quick-connect via rendezvous");
+        return Some(
+            RendezvousClient::connect(&ws, &token, Some(peer))
+                .map(|c| Box::new(c) as Box<dyn Signaling>),
+        );
+    }
+    if let Ok(addr) = std::env::var("OPENREACH_SIGNAL_ADDR") {
+        tracing::info!(%addr, "quick-connect via LAN relay");
+        return Some(SignalClient::connect(&addr).map(|c| Box::new(c) as Box<dyn Signaling>));
+    }
+    None
+}
+
+// --- small helpers ---------------------------------------------------------
+
+/// The config directory for identity + known-peers (`$XDG_CONFIG_HOME/openreach`
+/// or `~/.config/openreach`).
+fn config_dir() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("openreach");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".config").join("openreach");
+    }
+    PathBuf::from(".openreach")
+}
+
+/// Truncate a long hex id to `head…tail` for display.
+fn short(s: &str) -> String {
+    if s.len() <= 20 {
+        s.to_string()
+    } else {
+        format!("{}…{}", &s[..12], &s[s.len() - 6..])
+    }
+}
+
+/// Format a unix-seconds `last_seen` as a coarse "time ago", or "never".
+fn fmt_last_seen(ts: Option<i64>) -> String {
+    let Some(ts) = ts else {
+        return "never".into();
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(ts);
+    let secs = (now - ts).max(0);
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
     }
 }
 
@@ -303,9 +1230,9 @@ struct FrameTexture {
     bind_group: wgpu::BindGroup,
 }
 
-/// The wgpu renderer: surface, device/queue, the blit pipeline, and (once a
-/// frame arrives) the frame texture. Until the first frame the window simply
-/// clears to black.
+/// The wgpu renderer: surface, device/queue, the blit pipeline, the (optional)
+/// frame texture, and the egui overlay renderer. Until the first frame the video
+/// layer simply clears to black; egui always paints on top.
 struct Gpu {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -316,6 +1243,7 @@ struct Gpu {
     sampler: wgpu::Sampler,
     uniform_buf: wgpu::Buffer,
     frame: Option<FrameTexture>,
+    egui_renderer: egui_wgpu::Renderer,
 }
 
 /// Scale uniform consumed by the vertex shader for aspect-preserving letterbox.
@@ -327,10 +1255,6 @@ struct Uniforms {
 }
 
 impl Gpu {
-    /// Build the instance -> surface -> adapter -> device/queue chain and the
-    /// blit pipeline. wgpu 30 shape: `Instance::new(&desc)`, `create_surface`
-    /// returns a `Result`, and both `request_adapter` and `request_device`
-    /// resolve to `Result` futures (adapter is no longer an `Option`).
     async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
         let size = window.inner_size();
         let (width, height) = (size.width.max(1), size.height.max(1));
@@ -356,9 +1280,7 @@ impl Gpu {
             })
             .await?;
 
-        // Prefer an sRGB surface format: paired with an `Rgba8UnormSrgb` frame
-        // texture the sample (sRGB->linear) and present (linear->sRGB) cancel, so
-        // colours round-trip correctly.
+        // Prefer an sRGB surface so the sample/present gamma round-trips.
         let caps = surface.get_capabilities(&adapter);
         let format = caps
             .formats
@@ -370,7 +1292,6 @@ impl Gpu {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            color_space: wgpu::SurfaceColorSpace::Auto,
             width,
             height,
             present_mode: caps.present_modes[0],
@@ -380,7 +1301,6 @@ impl Gpu {
         };
         surface.configure(&device, &config);
 
-        // Bind group layout: scale uniform (vertex) + texture & sampler (fragment).
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("openreach-viewer bind group layout"),
             entries: &[
@@ -464,6 +1384,17 @@ impl Gpu {
             mapped_at_creation: false,
         });
 
+        // egui paints into the same surface format, one sample, no depth.
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &device,
+            format,
+            egui_wgpu::RendererOptions {
+                msaa_samples: 1,
+                depth_stencil_format: None,
+                ..Default::default()
+            },
+        );
+
         Ok(Self {
             surface,
             device,
@@ -474,15 +1405,14 @@ impl Gpu {
             sampler,
             uniform_buf,
             frame: None,
+            egui_renderer,
         })
     }
 
-    /// Reconfigure the surface at the current config size (after Lost/Outdated).
     fn reconfigure(&mut self) {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Handle a window resize: update the config and reconfigure the surface.
     fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width.max(1);
         self.config.height = height.max(1);
@@ -493,9 +1423,6 @@ impl Gpu {
     /// the incoming dimensions change.
     fn upload_frame(&mut self, frame: &openreach_codec::DecodedFrame) {
         let (w, h) = (frame.width.max(1), frame.height.max(1));
-
-        // (Re)create the texture + bind group only on a dimension change;
-        // otherwise reuse the existing texture and just overwrite its contents.
         let needs_new = self
             .frame
             .as_ref()
@@ -543,7 +1470,6 @@ impl Gpu {
             });
         }
 
-        // Upload the tightly-packed RGBA bytes (stride == width * 4).
         let Some(frame_tex) = self.frame.as_ref() else {
             return;
         };
@@ -568,15 +1494,15 @@ impl Gpu {
         );
     }
 
-    /// Draw the current frame (or clear to black if none yet).
-    ///
-    /// wgpu 30's `get_current_texture` returns a [`wgpu::CurrentSurfaceTexture`]
-    /// enum (not a `Result`); we reconfigure on Outdated/Lost and skip on
-    /// transient Timeout/Occluded.
-    fn render(&mut self) {
+    /// Blit the current video frame (or clear to black) and paint egui on top.
+    fn render(
+        &mut self,
+        paint_jobs: &[egui::ClippedPrimitive],
+        textures_delta: &egui::TexturesDelta,
+        screen: &ScreenDescriptor,
+    ) {
         let surface_tex = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
-            // Usable this frame; reconfigure so the next one is optimal.
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
                 self.reconfigure();
                 t
@@ -595,12 +1521,27 @@ impl Gpu {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        // egui: upload changed textures, then buffers (into our encoder).
+        for (id, delta) in &textures_delta.set {
+            self.egui_renderer
+                .update_texture(&self.device, &self.queue, *id, delta);
+        }
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("openreach-viewer encoder"),
             });
 
+        let user_cmd_bufs = self.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            paint_jobs,
+            screen,
+        );
+
+        // Pass 1: clear + video blit.
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("openreach-viewer blit pass"),
@@ -620,7 +1561,6 @@ impl Gpu {
             });
 
             if let Some(frame) = self.frame.as_ref() {
-                // Update the letterbox scale for the current window/frame aspect.
                 let uniforms = Uniforms {
                     scale: letterbox_scale(
                         self.config.width,
@@ -632,16 +1572,45 @@ impl Gpu {
                 };
                 self.queue
                     .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
-
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &frame.bind_group, &[]);
                 pass.draw(0..6, 0..1);
             }
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
-        // wgpu 30 presents via the queue, consuming the surface texture.
-        self.queue.present(surface_tex);
+        // Pass 2: egui overlay (load — don't clear the video).
+        {
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("openreach-viewer egui pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+            self.egui_renderer.render(&mut pass, paint_jobs, screen);
+        }
+
+        self.queue.submit(
+            user_cmd_bufs
+                .into_iter()
+                .chain(std::iter::once(encoder.finish())),
+        );
+        surface_tex.present();
+
+        for id in &textures_delta.free {
+            self.egui_renderer.free_texture(id);
+        }
     }
 }
 
@@ -650,10 +1619,8 @@ fn letterbox_scale(win_w: u32, win_h: u32, img_w: u32, img_h: u32) -> [f32; 2] {
     let win_aspect = win_w as f32 / win_h.max(1) as f32;
     let img_aspect = img_w as f32 / img_h.max(1) as f32;
     if win_aspect > img_aspect {
-        // Window wider than image: bars on the left/right.
         [img_aspect / win_aspect, 1.0]
     } else {
-        // Window taller than image: bars on the top/bottom.
         [1.0, win_aspect / img_aspect]
     }
 }
@@ -697,7 +1664,6 @@ fn map_modifiers(state: winit::keyboard::ModifiersState) -> u32 {
 fn winit_keycode_to_hid(code: KeyCode) -> Option<u32> {
     use KeyCode as K;
     let hid = match code {
-        // Letters a-z -> 0x04..=0x1D
         K::KeyA => 0x04,
         K::KeyB => 0x05,
         K::KeyC => 0x06,
@@ -724,7 +1690,6 @@ fn winit_keycode_to_hid(code: KeyCode) -> Option<u32> {
         K::KeyX => 0x1B,
         K::KeyY => 0x1C,
         K::KeyZ => 0x1D,
-        // Digits: 1-9 -> 0x1E..=0x26, 0 -> 0x27
         K::Digit1 => 0x1E,
         K::Digit2 => 0x1F,
         K::Digit3 => 0x20,
@@ -735,13 +1700,11 @@ fn winit_keycode_to_hid(code: KeyCode) -> Option<u32> {
         K::Digit8 => 0x25,
         K::Digit9 => 0x26,
         K::Digit0 => 0x27,
-        // Whitespace / editing
         K::Enter => 0x28,
         K::Escape => 0x29,
         K::Backspace => 0x2A,
         K::Tab => 0x2B,
         K::Space => 0x2C,
-        // Punctuation
         K::Minus => 0x2D,
         K::Equal => 0x2E,
         K::BracketLeft => 0x2F,
@@ -754,7 +1717,6 @@ fn winit_keycode_to_hid(code: KeyCode) -> Option<u32> {
         K::Period => 0x37,
         K::Slash => 0x38,
         K::CapsLock => 0x39,
-        // Function keys F1-F12 -> 0x3A..=0x45
         K::F1 => 0x3A,
         K::F2 => 0x3B,
         K::F3 => 0x3C,
@@ -767,7 +1729,6 @@ fn winit_keycode_to_hid(code: KeyCode) -> Option<u32> {
         K::F10 => 0x43,
         K::F11 => 0x44,
         K::F12 => 0x45,
-        // Navigation
         K::Home => 0x4A,
         K::PageUp => 0x4B,
         K::Delete => 0x4C,
@@ -777,7 +1738,6 @@ fn winit_keycode_to_hid(code: KeyCode) -> Option<u32> {
         K::ArrowLeft => 0x50,
         K::ArrowDown => 0x51,
         K::ArrowUp => 0x52,
-        // Modifiers (left/right)
         K::ControlLeft => 0xE0,
         K::ShiftLeft => 0xE1,
         K::AltLeft => 0xE2,

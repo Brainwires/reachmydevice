@@ -44,6 +44,8 @@ pub enum ViewerUpdate {
     Frame(codec::DecodedFrame),
     /// The host accepted (`true`) or rejected the pairing (version handshake).
     Paired(bool),
+    /// Round-trip latency measured from a data-channel `Ping`/`Pong` exchange.
+    Latency(Duration),
 }
 
 /// Running viewer session.
@@ -129,11 +131,22 @@ impl ViewerSession {
                             }
                             TransportEvent::Data(bytes) => {
                                 if let Ok(env) = proto::decode(&bytes) {
-                                    if let Some(Payload::HelloAck(ack)) = env.payload {
-                                        if !ack.accepted {
-                                            tracing::warn!(reason=%ack.reason, "host rejected pairing");
+                                    match env.payload {
+                                        Some(Payload::HelloAck(ack)) => {
+                                            if !ack.accepted {
+                                                tracing::warn!(reason=%ack.reason, "host rejected pairing");
+                                            }
+                                            let _ = updates_tx.send(ViewerUpdate::Paired(ack.accepted));
                                         }
-                                        let _ = updates_tx.send(ViewerUpdate::Paired(ack.accepted));
+                                        // Pong echoes the timestamp we stamped into our Ping;
+                                        // the elapsed monotonic time is the data-channel RTT.
+                                        Some(Payload::Pong(p)) => {
+                                            let now = proto::monotonic_micros();
+                                            let rtt = now.saturating_sub(p.t_micros);
+                                            let _ = updates_tx
+                                                .send(ViewerUpdate::Latency(Duration::from_micros(rtt)));
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
@@ -153,6 +166,16 @@ impl ViewerSession {
     /// Send an input event to the host over the control channel.
     pub fn send_input(&self, event: proto::input_event::Event) {
         let env = proto::input(event);
+        self.sender.send_data(Bytes::from(proto::encode(&env)));
+    }
+
+    /// Send a latency probe: a `Ping` stamped with the current monotonic clock.
+    ///
+    /// The host answers with a `Pong` echoing the timestamp; the pump thread then
+    /// surfaces the round-trip time as [`ViewerUpdate::Latency`]. Call this on a
+    /// timer (e.g. once per second) from the UI loop.
+    pub fn send_ping(&self) {
+        let env = proto::ping(proto::monotonic_micros());
         self.sender.send_data(Bytes::from(proto::encode(&env)));
     }
 }

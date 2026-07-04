@@ -29,6 +29,11 @@ tokio = { workspace = true }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 futures = { workspace = true }
 
+# Blocking REST client for the rendezvous account/device API (account.rs). Kept
+# light: ureq is a small synchronous HTTP client; base64 is only for Basic auth.
+ureq = { version = "2", features = ["json", "tls"] }
+base64 = "0.22"
+
 [[example]]
 name = "headless_viewer"
 path = "examples/headless_viewer.rs"

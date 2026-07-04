@@ -2,7 +2,9 @@
 name = "openreach-viewer"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# egui 0.35 (and the egui-wgpu it bundles) require a newer toolchain than the
+# workspace-wide 1.82 floor, so the GUI viewer opts into a higher MSRV.
+rust-version = "1.92"
 license.workspace = true
 
 [[bin]]
@@ -20,7 +22,16 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 # GPU-accelerated frame rendering + windowing/input (spec requires wgpu).
+# wgpu is pinned to 29 to match egui-wgpu 0.35 (the newest egui release, which
+# still targets wgpu 29); egui's renderer and our blit pipeline must share the
+# exact same wgpu crate version, so this is the tip that lets them coexist.
 winit = "0.30"
-wgpu = "30"
+wgpu = "29"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+
+# Immediate-mode UI (login / device list / connect flow / in-session HUD),
+# layered over the same wgpu surface. Versions are locked together and to wgpu 29.
+egui = "0.35"
+egui-winit = "0.35"
+egui-wgpu = "0.35"
