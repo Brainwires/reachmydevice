@@ -17,6 +17,8 @@ pub enum AppError {
     Conflict(String),
     #[error("registration is closed")]
     RegistrationClosed,
+    #[error("too many attempts; retry in {0}s")]
+    TooManyRequests(u64),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error("internal error")]
@@ -33,6 +35,10 @@ impl IntoResponse for AppError {
             AppError::RegistrationClosed => {
                 (StatusCode::FORBIDDEN, "registration is closed".into())
             }
+            AppError::TooManyRequests(secs) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("too many attempts; retry in {secs}s"),
+            ),
             // Never leak internal details to clients; log them instead.
             AppError::Db(e) => {
                 tracing::error!(error = %e, "database error");

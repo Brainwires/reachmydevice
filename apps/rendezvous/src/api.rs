@@ -93,7 +93,7 @@ pub async fn register_device(
     State(state): State<AppState>,
     Json(body): Json<RegisterDevice>,
 ) -> AppResult<Json<DeviceToken>> {
-    let user_id = authenticate_user(&state.pool, &body.username, &body.password).await?;
+    let user_id = authenticate_user(&state, &body.username, &body.password).await?;
 
     // Find or create the device, enforcing single ownership.
     let existing: Option<(i64, i64)> =
@@ -155,7 +155,7 @@ pub async fn list_devices(
     headers: HeaderMap,
 ) -> AppResult<Json<Vec<DeviceRow>>> {
     let (username, password) = basic_auth(&headers)?;
-    let user_id = authenticate_user(&state.pool, &username, &password).await?;
+    let user_id = authenticate_user(&state, &username, &password).await?;
     let rows = sqlx::query_as::<_, DeviceRow>(
         "SELECT device_id, name, public_key, role, created_at, last_seen \
          FROM devices WHERE user_id = ? ORDER BY created_at",
@@ -173,7 +173,7 @@ pub async fn delete_device(
     Path(device_id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let (username, password) = basic_auth(&headers)?;
-    let user_id = authenticate_user(&state.pool, &username, &password).await?;
+    let user_id = authenticate_user(&state, &username, &password).await?;
     let res = sqlx::query("DELETE FROM devices WHERE user_id = ? AND device_id = ?")
         .bind(user_id)
         .bind(&device_id)
@@ -187,16 +187,26 @@ pub async fn delete_device(
 
 // --- auth helpers ----------------------------------------------------------
 
-/// Resolve `(username, password)` → user id, verifying the Argon2 hash.
-async fn authenticate_user(pool: &SqlitePool, username: &str, password: &str) -> AppResult<i64> {
+/// Resolve `(username, password)` → user id, verifying the Argon2 hash, with a
+/// per-username lockout/backoff on repeated failures.
+async fn authenticate_user(state: &AppState, username: &str, password: &str) -> AppResult<i64> {
+    if let Err(retry) = state.throttle.check(username) {
+        return Err(AppError::TooManyRequests(retry));
+    }
     let row: Option<(i64, String)> =
         sqlx::query_as("SELECT id, password_hash FROM users WHERE username = ?")
             .bind(username)
-            .fetch_optional(pool)
+            .fetch_optional(&state.pool)
             .await?;
     match row {
-        Some((id, hash)) if auth::verify_password(password, &hash) => Ok(id),
-        _ => Err(AppError::Unauthorized),
+        Some((id, hash)) if auth::verify_password(password, &hash) => {
+            state.throttle.record_success(username);
+            Ok(id)
+        }
+        _ => {
+            state.throttle.record_failure(username);
+            Err(AppError::Unauthorized)
+        }
     }
 }
 

@@ -49,12 +49,16 @@ trust boundaries, the guarantees the design provides, and residual risks.
   device key (so the server cannot substitute a DTLS identity) is a hardening item.
 
 ### A3. Credential theft / brute force against the rendezvous
-- **Mitigation:** passwords hashed with **Argon2**; device tokens stored only as
-  **SHA-256 hashes** (a DB leak yields neither passwords nor live tokens). **Per-IP
-  rate limiting** (tower_governor) throttles credential stuffing and signaling floods.
-  TLS everywhere via Caddy/Cloudflare.
-- **Residual:** no account lockout / MFA in v1; operators should keep registration
-  closed after provisioning (`OPENREACH_RZ_OPEN_REGISTRATION=false`).
+- **Mitigation:** passwords hashed with **Argon2id** (explicitly pinned params:
+  64 MiB / t=3 / p=1); device tokens stored only as **SHA-256 hashes** (a DB leak
+  yields neither passwords nor live tokens). **Per-IP rate limiting** (tower_governor)
+  plus a **per-username lockout with exponential backoff** on repeated password
+  failures (defeats IP-rotating credential stuffing that per-IP limits miss).
+  **Registration is closed by default** (`OPENREACH_RZ_OPEN_REGISTRATION` must be
+  explicitly enabled). TLS everywhere via Caddy/Cloudflare.
+- **Residual:** no MFA yet (optional TOTP is a tracked item — but the account system
+  is being superseded by the direct QR/PAKE pairing path, which removes server-side
+  credentials entirely for that flow).
 
 ### A4. Unauthorized control of a host (the core risk of any remote-access tool)
 - **Mitigation:** a viewer can only reach a host it is paired with; the device token

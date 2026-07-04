@@ -18,6 +18,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod signaling;
+pub mod throttle;
 
 pub use config::Config;
 pub use db::AppState;
@@ -29,6 +30,7 @@ pub async fn init_state(cfg: Config) -> anyhow::Result<AppState> {
         pool,
         config: Arc::new(cfg),
         hub: Arc::new(signaling::Hub::new()),
+        throttle: Arc::new(throttle::LoginThrottle::new()),
     })
 }
 

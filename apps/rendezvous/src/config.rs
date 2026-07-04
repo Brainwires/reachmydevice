@@ -20,7 +20,7 @@ impl Config {
     /// |-----|---------|
     /// | `OPENREACH_RZ_ADDR` | `0.0.0.0:8080` |
     /// | `DATABASE_URL` | `sqlite:openreach.db?mode=rwc` |
-    /// | `OPENREACH_RZ_OPEN_REGISTRATION` | `true` |
+    /// | `OPENREACH_RZ_OPEN_REGISTRATION` | `false` (secure by default) |
     pub fn from_env() -> Self {
         let bind_addr = std::env::var("OPENREACH_RZ_ADDR")
             .ok()
@@ -28,9 +28,11 @@ impl Config {
             .unwrap_or_else(|| "0.0.0.0:8080".parse().unwrap());
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "sqlite:openreach.db?mode=rwc".to_string());
+        // Closed by default: an operator must explicitly opt into open signup.
+        // (Provision the first account with the CLI / OPENREACH_RZ_OPEN_REGISTRATION=1.)
         let allow_open_registration = std::env::var("OPENREACH_RZ_OPEN_REGISTRATION")
-            .map(|v| v != "false" && v != "0")
-            .unwrap_or(true);
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
         Self {
             bind_addr,
             database_url,

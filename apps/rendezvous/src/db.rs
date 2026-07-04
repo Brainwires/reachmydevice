@@ -11,6 +11,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Live WebSocket signaling hub (device pairing + relay).
     pub hub: Arc<crate::signaling::Hub>,
+    /// Per-username login throttle (credential-stuffing backoff).
+    pub throttle: Arc<crate::throttle::LoginThrottle>,
 }
 
 /// Open the SQLite pool and run migrations.

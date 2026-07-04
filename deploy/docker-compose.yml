@@ -30,7 +30,8 @@ services:
     environment:
       OPENREACH_RZ_ADDR: 0.0.0.0:8080
       DATABASE_URL: sqlite:/data/openreach.db?mode=rwc
-      OPENREACH_RZ_OPEN_REGISTRATION: ${OPENREACH_RZ_OPEN_REGISTRATION:-true}
+      # Closed by default; set to 1/true only to provision the first account.
+      OPENREACH_RZ_OPEN_REGISTRATION: ${OPENREACH_RZ_OPEN_REGISTRATION:-false}
       # Shared secret used to mint short-lived TURN credentials (must match coturn).
       OPENREACH_TURN_SECRET: ${TURN_SECRET}
       OPENREACH_TURN_HOST: ${OPENREACH_DOMAIN}

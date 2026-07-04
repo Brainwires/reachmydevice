@@ -6,22 +6,32 @@
 
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
 use sha2::{Digest, Sha256};
 
-/// Hash a password into an Argon2 PHC string.
+/// Explicitly pinned Argon2id parameters (don't rely on `Argon2::default()`,
+/// whose values can shift across crate versions). 64 MiB / 3 passes / 1 lane —
+/// above the OWASP minimum, comfortable for a small VPS. Existing hashes still
+/// verify: their parameters are read from the stored PHC string.
+fn argon2() -> Argon2<'static> {
+    let params = Params::new(64 * 1024, 3, 1, None).expect("valid argon2 params");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
+/// Hash a password into an Argon2id PHC string.
 pub fn hash_password(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
+    argon2()
         .hash_password(password.as_bytes(), &salt)
         .map(|h| h.to_string())
         .map_err(|e| anyhow::anyhow!("argon2 hash: {e}"))
 }
 
-/// Verify a password against a stored PHC string (constant-time in Argon2).
+/// Verify a password against a stored PHC string (constant-time in Argon2;
+/// parameters are taken from the stored hash, so old hashes still verify).
 pub fn verify_password(password: &str, phc: &str) -> bool {
     match PasswordHash::new(phc) {
-        Ok(parsed) => Argon2::default()
+        Ok(parsed) => argon2()
             .verify_password(password.as_bytes(), &parsed)
             .is_ok(),
         Err(_) => false,
