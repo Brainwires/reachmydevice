@@ -5,6 +5,7 @@
 //! viewer *app* drives winit/wgpu and simply polls [`ViewerSession::poll_update`]
 //! for decoded frames and connection state, and calls [`ViewerSession::send_input`].
 
+use crate::clipboard::ClipboardSync;
 use crate::signal::Signaling;
 use bytes::Bytes;
 use openreach_codec as codec;
@@ -99,6 +100,14 @@ impl ViewerSession {
                 })?;
         }
 
+        // Clipboard sync: forward local clipboard changes to the host and apply
+        // the host's. The handle moves into the pump thread so inbound updates
+        // can be applied there.
+        let clipboard = {
+            let sender = transport.sender();
+            ClipboardSync::spawn(move |env| sender.send_data(Bytes::from(proto::encode(&env))))
+        };
+
         // Pump thread: owns the transport, bridges signaling, routes media to decode.
         {
             let device_name = cfg.device_name.clone();
@@ -145,6 +154,9 @@ impl ViewerSession {
                                             let rtt = now.saturating_sub(p.t_micros);
                                             let _ = updates_tx
                                                 .send(ViewerUpdate::Latency(Duration::from_micros(rtt)));
+                                        }
+                                        Some(Payload::Clipboard(update)) => {
+                                            clipboard.apply_remote(update);
                                         }
                                         _ => {}
                                     }

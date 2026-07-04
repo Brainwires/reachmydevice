@@ -9,6 +9,7 @@
 //! - [`identity`] — device keypair identity + TOFU trust store.
 
 pub mod account;
+pub mod clipboard;
 pub mod host;
 pub mod identity;
 pub mod rendezvous;

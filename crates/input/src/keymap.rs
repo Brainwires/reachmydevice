@@ -93,24 +93,24 @@ pub fn hid_to_macos(hid: u32) -> Option<u16> {
         0x51 => 125, // Down
         0x52 => 126, // Up
         // Keypad (HID 0x53..0x63, 0x67)
-        0x53 => 71,  // NumLock/Clear
-        0x54 => 75,  // KP /
-        0x55 => 67,  // KP *
-        0x56 => 78,  // KP -
-        0x57 => 69,  // KP +
-        0x58 => 76,  // KP Enter
-        0x59 => 83,  // KP 1
-        0x5A => 84,  // KP 2
-        0x5B => 85,  // KP 3
-        0x5C => 86,  // KP 4
-        0x5D => 87,  // KP 5
-        0x5E => 88,  // KP 6
-        0x5F => 89,  // KP 7
-        0x60 => 91,  // KP 8
-        0x61 => 92,  // KP 9
-        0x62 => 82,  // KP 0
-        0x63 => 65,  // KP .
-        0x67 => 81,  // KP =
+        0x53 => 71, // NumLock/Clear
+        0x54 => 75, // KP /
+        0x55 => 67, // KP *
+        0x56 => 78, // KP -
+        0x57 => 69, // KP +
+        0x58 => 76, // KP Enter
+        0x59 => 83, // KP 1
+        0x5A => 84, // KP 2
+        0x5B => 85, // KP 3
+        0x5C => 86, // KP 4
+        0x5D => 87, // KP 5
+        0x5E => 88, // KP 6
+        0x5F => 89, // KP 7
+        0x60 => 91, // KP 8
+        0x61 => 92, // KP 9
+        0x62 => 82, // KP 0
+        0x63 => 65, // KP .
+        0x67 => 81, // KP =
         // Modifiers
         0xE0 => 59, // Left Control
         0xE1 => 56, // Left Shift

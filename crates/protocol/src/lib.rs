@@ -20,8 +20,8 @@ pub mod pb {
 pub use pb::{
     envelope, input_event, Bye, ClipboardKind, ClipboardUpdate, DisplayDescriptor, DisplayList,
     Envelope, FileAck, FileCancel, FileChunk, FileComplete, FileOffer, Hello, HelloAck, InputEvent,
-    KeyEvent, MouseButton, MouseMove, MouseScroll, Ping, Pong, RequestKeyframe, Role, SelectDisplay,
-    ViewOnly,
+    KeyEvent, MouseButton, MouseMove, MouseScroll, Ping, Pong, RequestKeyframe, Role,
+    SelectDisplay, ViewOnly,
 };
 
 /// Protocol major version. **Incompatible across mismatches** — bump only on a
@@ -261,7 +261,10 @@ mod tests {
     #[test]
     fn v1_control_messages_roundtrip() {
         assert!(matches!(
-            decode(&encode(&request_keyframe())).unwrap().payload.unwrap(),
+            decode(&encode(&request_keyframe()))
+                .unwrap()
+                .payload
+                .unwrap(),
             pb::envelope::Payload::RequestKeyframe(_)
         ));
         assert!(matches!(

@@ -5,6 +5,7 @@
 //! the WebRTC offerer and the video sender; it validates the viewer's protocol
 //! version, injects the viewer's input, and answers Ping with Pong.
 
+use crate::clipboard::ClipboardSync;
 use crate::signal::Signaling;
 use bytes::Bytes;
 use openreach_capture as capture;
@@ -101,6 +102,13 @@ pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<(
         }
     };
 
+    // Clipboard sync: forward local clipboard changes to the viewer and apply
+    // the viewer's. Sends before a viewer connects are dropped by the transport.
+    let clipboard = {
+        let sender = transport.sender();
+        ClipboardSync::spawn(move |env| sender.send_data(Bytes::from(proto::encode(&env))))
+    };
+
     tracing::info!(device = %cfg.device_name, "host ready; waiting for a viewer to connect");
 
     // Control / event loop: forward peer signaling in, react to transport events.
@@ -129,7 +137,7 @@ pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<(
                 connected.store(false, Ordering::Relaxed);
             }
             TransportEvent::Data(bytes) => {
-                handle_control(&bytes, &transport, &mut injector, &cfg.device_name);
+                handle_control(&bytes, &transport, &mut injector, &clipboard, &cfg.device_name);
             }
             TransportEvent::Video { .. } => {} // host does not receive video
         }
@@ -193,6 +201,7 @@ fn handle_control(
     bytes: &[u8],
     transport: &Transport,
     injector: &mut Option<Box<dyn input::Injector>>,
+    clipboard: &ClipboardSync,
     device_name: &str,
 ) {
     let env = match proto::decode(bytes) {
@@ -226,6 +235,7 @@ fn handle_control(
             let pong = proto::pong(p.t_micros);
             transport.send_data(Bytes::from(proto::encode(&pong)));
         }
+        Some(Payload::Clipboard(update)) => clipboard.apply_remote(update),
         _ => {}
     }
 }
