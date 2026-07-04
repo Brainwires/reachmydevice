@@ -64,17 +64,21 @@ confirmed and then run through the whole stack:
 ```
 audio_probe (capture only):  chunks=179 samples=171840 rms=553.4 peak=9716
 audio_e2e (full chain):      connected=true audio_frames_delivered=100 decoded_rms=524.8
+audio_e2e PLAY=1 (+speaker):  audio_frames_delivered=589 decoded_rms=942.5 speaker_samples_written=562240
 ```
 
 `audio_e2e` captures the **actual audio playing on the host** via ScreenCaptureKit,
-Opus-encodes it, sends it over the real WebRTC/DTLS-SRTP transport, and decodes it
-on the peer — the decoded stream carries real, **non-silent** energy (rms 524.8).
-So the audio path is verified end-to-end from **real OS capture → encode →
-encrypted transport → decode**. The only link not machine-verifiable is the final
-physical *speaker* transducer (a human-ear step) — the decoded non-silent PCM is
-handed to the cpal output device, which plays what it is given. Reproduce:
+Opus-encodes it, sends it over the real WebRTC/DTLS-SRTP transport, decodes it on
+the peer (real, **non-silent** energy), and — with `PLAY=1` — plays it back through
+the cpal output device. `speaker_samples_written=562240` is the count of real
+samples the **audio output device callback (CoreAudio) actually pulled and wrote**
+(~11.7 s at 48 kHz); CoreAudio only pulls when the device is actively outputting,
+so this confirms the audio reached the OS speaker-output path. The chain is thus
+verified in software end-to-end: **real OS capture → encode → encrypted transport
+→ decode → samples written to the output device**. The only element beyond
+software observation is the physical speaker cone / human ear. Reproduce:
 `cargo run -p openreach-capture --example audio_probe` and
-`cargo run -p openreach-session --example audio_e2e` (with audio playing).
+`PLAY=1 cargo run -p openreach-session --example audio_e2e` (with audio playing).
 
 ### Rendezvous deployment
 `openreach-rendezvous` runs in Docker on `biscuits` behind the existing Cloudflare

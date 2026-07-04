@@ -190,6 +190,9 @@ pub struct AudioPlayback {
     out_rate: u32,
     resampler: LinearResampler,
     last_seq: Option<u64>,
+    /// Real samples the output device callback actually pulled and wrote (i.e.
+    /// handed to CoreAudio/ALSA for the speaker) — excludes underrun silence.
+    played: Arc<std::sync::atomic::AtomicU64>,
     _stream: cpal::Stream,
 }
 
@@ -209,22 +212,33 @@ impl AudioPlayback {
         );
 
         let buffer = Arc::new(Mutex::new(VecDeque::<i16>::new()));
+        let played = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let err_fn = |e| tracing::warn!(error=%e, "audio output stream error");
+        use std::sync::atomic::Ordering;
 
         let stream = match config.sample_format() {
             cpal::SampleFormat::F32 => {
                 let buf = buffer.clone();
+                let played = played.clone();
                 device.build_output_stream(
                     &config.into(),
                     move |data: &mut [f32], _| {
                         let mut b = buf.lock().unwrap();
+                        let mut real = 0u64;
                         for frame in data.chunks_mut(out_channels) {
-                            let s = b.pop_front().unwrap_or(0);
+                            let s = match b.pop_front() {
+                                Some(v) => {
+                                    real += 1;
+                                    v
+                                }
+                                None => 0, // underrun → silence
+                            };
                             let v = s as f32 / 32768.0;
                             for c in frame.iter_mut() {
                                 *c = v; // mono fanned across channels
                             }
                         }
+                        played.fetch_add(real, Ordering::Relaxed);
                     },
                     err_fn,
                     None,
@@ -232,16 +246,25 @@ impl AudioPlayback {
             }
             cpal::SampleFormat::I16 => {
                 let buf = buffer.clone();
+                let played = played.clone();
                 device.build_output_stream(
                     &config.into(),
                     move |data: &mut [i16], _| {
                         let mut b = buf.lock().unwrap();
+                        let mut real = 0u64;
                         for frame in data.chunks_mut(out_channels) {
-                            let s = b.pop_front().unwrap_or(0);
+                            let s = match b.pop_front() {
+                                Some(v) => {
+                                    real += 1;
+                                    v
+                                }
+                                None => 0,
+                            };
                             for c in frame.iter_mut() {
                                 *c = s;
                             }
                         }
+                        played.fetch_add(real, Ordering::Relaxed);
                     },
                     err_fn,
                     None,
@@ -257,8 +280,15 @@ impl AudioPlayback {
             out_rate,
             resampler: LinearResampler::new(AUDIO_SAMPLE_RATE, out_rate),
             last_seq: None,
+            played,
             _stream: stream,
         })
+    }
+
+    /// Real samples the audio output device has pulled and written so far — the
+    /// last software-observable point before the physical speaker.
+    pub fn samples_played(&self) -> u64 {
+        self.played.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Decode one received Opus packet and enqueue it for playback. `seq` gaps

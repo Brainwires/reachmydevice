@@ -127,8 +127,9 @@ fn main() -> anyhow::Result<()> {
     } else {
         0.0
     };
+    let played = playback.as_ref().map(|p| p.samples_played()).unwrap_or(0);
     println!(
-        "RESULT connected={} audio_frames_delivered={recv_frames} decoded_rms={rms:.1}",
+        "RESULT connected={} audio_frames_delivered={recv_frames} decoded_rms={rms:.1} speaker_samples_written={played}",
         host_conn && view_conn
     );
     anyhow::ensure!(host_conn && view_conn, "transports did not connect");
