@@ -1,21 +1,23 @@
-//! Optional audio: host capture → Opus → viewer playback (default off).
+//! Optional audio: host capture → Opus → viewer playback (opt-in, default off).
 //!
-//! **Status / honesty note.** This wires a real, end-to-end audio path — cpal
-//! capture, Opus (via `codec::audio`), transport over the data channel, cpal
-//! playback — and is unit-tested at the codec layer. Two caveats remain,
-//! documented rather than hidden:
+//! Real end-to-end path: capture → Opus (`codec::audio`) → data channel → Opus
+//! decode → cpal playback, with a dependency-free resampler + mono downmix
+//! (codec and resampler are unit-tested).
 //!
-//! 1. **Source.** Capture uses the host's *default input device* (typically the
-//!    microphone). True desktop-audio loopback — what a remote-desktop user
-//!    usually wants — needs a platform monitor source (ScreenCaptureKit audio on
-//!    macOS, a PipeWire/PulseAudio monitor on Linux) and is a follow-up.
-//! 2. **Transport.** Frames ride the reliable/ordered data channel, so there is
-//!    no loss but latency can accrue under congestion. A dedicated Opus RTP
-//!    track is the production optimization; the decoder's PLC path is already in
-//!    place for it.
+//! **Source.** [`AudioCapture`] prefers real **desktop/system audio** — what's
+//! actually playing on the host — via the platform backend
+//! ([`openreach_capture::start_audio_capture`], ScreenCaptureKit on macOS). It
+//! falls back to the default **input device** (cpal) only where desktop capture
+//! isn't available (e.g. Linux) or is denied. macOS desktop capture requires the
+//! Screen Recording permission — the same one the host already needs for video.
 //!
-//! Because of this it is **opt-in** (`enable_audio`) and off by default, so the
-//! proven video path is never affected.
+//! **Transport.** Frames ride the reliable/ordered data channel (no loss, but
+//! latency can accrue under congestion). A dedicated Opus RTP track is a future
+//! optimization; the decoder's PLC path is already wired for it.
+//!
+//! It is **opt-in** (`enable_audio`) and off by default — a deliberate product
+//! choice (a host shouldn't broadcast its audio unless asked), which also keeps
+//! the proven video path unaffected.
 
 use codec::{AudioDecoder, AudioEncoder, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -26,17 +28,45 @@ use std::sync::{Arc, Mutex};
 
 /// Host-side capture: default input device → mono 48 kHz → Opus packets.
 ///
-/// Holds the live cpal stream (kept alive by this struct) and an encode thread.
+/// Holds the live capture source (kept alive by this struct) and an encode thread.
 pub struct AudioCapture {
-    _stream: cpal::Stream,
+    _source: AudioSource,
+}
+
+/// The kept-alive capture handle. `Desktop` is real system audio (macOS
+/// ScreenCaptureKit); `Device` is the cpal fallback (microphone / default input).
+/// Both variants are RAII guards — held only so capture stops when dropped.
+#[allow(dead_code)]
+enum AudioSource {
+    Desktop(Box<dyn openreach_capture::CaptureSession>),
+    Device(cpal::Stream),
 }
 
 impl AudioCapture {
     /// Start capturing. `on_packet` is called with each Opus packet (~50/sec).
+    ///
+    /// Prefers real **desktop/system audio** (what's playing on the host) via the
+    /// platform capture backend; falls back to the default input device where
+    /// desktop capture isn't available.
     pub fn start<F>(bitrate_bps: i32, on_packet: F) -> anyhow::Result<Self>
     where
         F: Fn(Vec<u8>) + Send + 'static,
     {
+        // Preferred path: desktop/system audio (mono 48 kHz i16 from the backend).
+        let (desk_tx, desk_rx) = mpsc::channel::<Vec<i16>>();
+        match openreach_capture::start_audio_capture(0, desk_tx) {
+            Ok(handle) => {
+                tracing::info!("audio source: desktop (system audio)");
+                spawn_encode(48_000, bitrate_bps, desk_rx, on_packet);
+                return Ok(Self {
+                    _source: AudioSource::Desktop(handle),
+                });
+            }
+            Err(e) => tracing::info!(
+                "desktop audio capture unavailable ({e}); using default input device"
+            ),
+        }
+
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -82,7 +112,9 @@ impl AudioCapture {
         stream.play()?;
 
         spawn_encode(in_rate, bitrate_bps, raw_rx, on_packet);
-        Ok(Self { _stream: stream })
+        Ok(Self {
+            _source: AudioSource::Device(stream),
+        })
     }
 }
 

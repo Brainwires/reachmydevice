@@ -88,6 +88,10 @@ impl std::fmt::Debug for Frame {
 /// backends drop frames rather than block the capture callback.
 pub type FrameSink = Sender<Frame>;
 
+/// Where captured **audio** is delivered: chunks of mono 48 kHz `i16` PCM
+/// (desktop/system audio). Dropped/lagging receivers cause samples to be dropped.
+pub type AudioSink = Sender<Vec<i16>>;
+
 /// A running capture. Dropping it (or calling [`CaptureSession::stop`]) ends capture.
 ///
 /// Not required to be `Send`: platform stream objects may be thread-affine, so
@@ -142,6 +146,25 @@ pub fn start_capture(
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (config, display_index, sink);
+        Err(CaptureError::Unsupported.into())
+    }
+}
+
+/// Start capturing **desktop/system audio** (mono, 48 kHz `i16`) to `sink`.
+///
+/// macOS: ScreenCaptureKit system-audio (the real desktop mix). Other platforms
+/// return [`CaptureError::Unsupported`] — callers fall back to a device source.
+pub fn start_audio_capture(
+    display_index: usize,
+    sink: AudioSink,
+) -> anyhow::Result<Box<dyn CaptureSession>> {
+    #[cfg(target_os = "macos")]
+    {
+        mac::start_audio_capture(display_index, sink)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (display_index, sink);
         Err(CaptureError::Unsupported.into())
     }
 }

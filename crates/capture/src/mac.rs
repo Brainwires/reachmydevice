@@ -15,7 +15,8 @@
 //! `docs/macos-permissions.md`); the first `start_capture` triggers the prompt.
 
 use crate::{
-    CaptureConfig, CaptureError, CaptureSession, DisplayInfo, Frame, FrameSink, PixelFormat,
+    AudioSink, CaptureConfig, CaptureError, CaptureSession, DisplayInfo, Frame, FrameSink,
+    PixelFormat,
 };
 use bytes::Bytes;
 use openreach_protocol::monotonic_micros;
@@ -27,7 +28,10 @@ use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass};
-use objc2_core_media::{CMSampleBuffer, CMTime};
+use objc2_core_audio_types::AudioBufferList;
+use objc2_core_media::{
+    kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment, CMBlockBuffer, CMSampleBuffer, CMTime,
+};
 use objc2_core_video::{
     kCVPixelFormatType_32BGRA, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
     CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
@@ -357,4 +361,211 @@ pub fn start_capture(
         _output: output,
         _queue: queue,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Desktop audio (ScreenCaptureKit system audio) — isolated from video capture
+// ---------------------------------------------------------------------------
+
+/// Requested capture sample rate; SCK resamples the system mix to this.
+const AUDIO_RATE: isize = 48_000;
+
+define_class!(
+    // SAFETY: superclass `NSObject` has no subclassing requirements; the only
+    // ivar (an `AudioSink`) is dropped by the generated `dealloc`.
+    #[unsafe(super(NSObject))]
+    #[name = "OpenReachAudioOutput"]
+    #[ivars = AudioSink]
+    struct AudioStreamOutput;
+
+    unsafe impl NSObjectProtocol for AudioStreamOutput {}
+
+    unsafe impl SCStreamOutput for AudioStreamOutput {
+        #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
+        fn stream_did_output_sample_buffer(
+            &self,
+            _stream: &SCStream,
+            sample_buffer: &CMSampleBuffer,
+            output_type: SCStreamOutputType,
+        ) {
+            if output_type == SCStreamOutputType::Audio {
+                self.handle_audio(sample_buffer);
+            }
+        }
+    }
+
+    unsafe impl SCStreamDelegate for AudioStreamOutput {
+        #[unsafe(method(stream:didStopWithError:))]
+        fn stream_did_stop_with_error(&self, _stream: &SCStream, error: &NSError) {
+            tracing::warn!("audio SCStream stopped: {}", error.localizedDescription());
+        }
+    }
+);
+
+impl AudioStreamOutput {
+    fn new(sink: AudioSink) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(sink);
+        // SAFETY: NSObject designated initializer.
+        unsafe { msg_send![super(this), init] }
+    }
+
+    /// Extract mono `i16` PCM from an audio CMSampleBuffer and forward it.
+    ///
+    /// Runs on the audio dispatch queue; never panics or blocks.
+    fn handle_audio(&self, sample_buffer: &CMSampleBuffer) {
+        let mut abl = AudioBufferList {
+            mNumberBuffers: 1,
+            mBuffers: [objc2_core_audio_types::AudioBuffer {
+                mNumberChannels: 0,
+                mDataByteSize: 0,
+                mData: std::ptr::null_mut(),
+            }],
+        };
+        let mut size_needed: usize = 0;
+        let mut block_buffer: *mut CMBlockBuffer = std::ptr::null_mut();
+
+        // SAFETY: FFI. Fills `abl` and hands us a retained CMBlockBuffer that owns
+        // the sample memory `abl.mBuffers[0].mData` points into; we take ownership
+        // below so it is released once we've copied the samples out.
+        let status = unsafe {
+            sample_buffer.audio_buffer_list_with_retained_block_buffer(
+                &mut size_needed,
+                &mut abl,
+                std::mem::size_of::<AudioBufferList>(),
+                None,
+                None,
+                kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+                &mut block_buffer,
+            )
+        };
+        if status != 0 || block_buffer.is_null() {
+            return;
+        }
+        // Take ownership so the backing memory is released when this drops.
+        // SAFETY: the call returned a +1-retained CMBlockBuffer.
+        let _block = unsafe { Retained::from_raw(block_buffer) };
+
+        let buffer = &abl.mBuffers[0];
+        if buffer.mData.is_null() || buffer.mDataByteSize == 0 {
+            return;
+        }
+        let channels = buffer.mNumberChannels.max(1) as usize;
+        let n_f32 = buffer.mDataByteSize as usize / std::mem::size_of::<f32>();
+        // SAFETY: `mData` points to `mDataByteSize` bytes of Float32 PCM, valid
+        // while `_block` is alive; we copy out immediately.
+        let samples = unsafe { std::slice::from_raw_parts(buffer.mData.cast::<f32>(), n_f32) };
+
+        let to_i16 = |s: f32| (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        let mono: Vec<i16> = if channels <= 1 {
+            samples.iter().map(|&s| to_i16(s)).collect()
+        } else {
+            // Interleaved multi-channel → average to mono.
+            samples
+                .chunks(channels)
+                .map(|f| to_i16(f.iter().copied().sum::<f32>() / channels as f32))
+                .collect()
+        };
+
+        if !mono.is_empty() && self.ivars().send(mono).is_err() {
+            tracing::debug!("audio sink closed; samples dropped");
+        }
+    }
+}
+
+/// Start ScreenCaptureKit **system-audio** capture on `display_index`.
+///
+/// A dedicated audio-only `SCStream` (no screen output registered) so it never
+/// disturbs the video capture path. Delivers mono 48 kHz `i16` to `sink`.
+pub fn start_audio_capture(
+    display_index: usize,
+    sink: AudioSink,
+) -> anyhow::Result<Box<dyn CaptureSession>> {
+    let content = fetch_shareable_content()?;
+    // SAFETY: FFI accessor returning a retained array of displays.
+    let displays = unsafe { content.displays() };
+    let display: Retained<SCDisplay> = displays
+        .to_vec()
+        .into_iter()
+        .nth(display_index)
+        .ok_or(CaptureError::NoSuchDisplay(display_index))?;
+
+    let no_windows: Retained<NSArray<SCWindow>> = NSArray::new();
+    // SAFETY: FFI init; args valid for the call.
+    let filter = unsafe {
+        SCContentFilter::initWithDisplay_excludingWindows(
+            SCContentFilter::alloc(),
+            &display,
+            &no_windows,
+        )
+    };
+
+    // SAFETY: FFI init + setters. capturesAudio drives the system-audio path;
+    // we keep video minimal (1×1) since no screen output is registered.
+    let stream_config = unsafe {
+        let cfg = SCStreamConfiguration::init(SCStreamConfiguration::alloc());
+        cfg.setCapturesAudio(true);
+        cfg.setSampleRate(AUDIO_RATE);
+        cfg.setChannelCount(1);
+        cfg.setExcludesCurrentProcessAudio(true);
+        cfg.setWidth(2);
+        cfg.setHeight(2);
+        cfg
+    };
+
+    let output = AudioStreamOutput::new(sink);
+    let delegate = ProtocolObject::from_ref(&*output);
+    let stream_output: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*output);
+
+    // SAFETY: FFI init with a valid filter/config and our delegate object.
+    let stream = unsafe {
+        SCStream::initWithFilter_configuration_delegate(
+            SCStream::alloc(),
+            &filter,
+            &stream_config,
+            Some(delegate),
+        )
+    };
+
+    let queue = DispatchQueue::new("com.openreach.audio", DispatchQueueAttr::SERIAL);
+
+    // SAFETY: FFI; registers our output for AUDIO samples on `queue`.
+    unsafe {
+        stream
+            .addStreamOutput_type_sampleHandlerQueue_error(
+                stream_output,
+                SCStreamOutputType::Audio,
+                Some(&queue),
+            )
+            .map_err(|e| CaptureError::Backend(format!("addStreamOutput(audio): {e:?}")))?;
+    }
+
+    let start_handler = RcBlock::new(move |error: *mut NSError| {
+        if let Some(error) = unsafe { error.as_ref() } {
+            tracing::warn!("audio SCStream start failed: {}", error.localizedDescription());
+        }
+    });
+    // SAFETY: FFI; handler retained for the call.
+    unsafe { stream.startCaptureWithCompletionHandler(Some(&start_handler)) };
+
+    tracing::info!(display_index, "ScreenCaptureKit desktop-audio capture started");
+
+    Ok(Box::new(MacAudioSession {
+        stream,
+        _output: output,
+        _queue: queue,
+    }))
+}
+
+/// Live desktop-audio SCStream; dropping/stopping ends capture.
+pub struct MacAudioSession {
+    stream: Retained<SCStream>,
+    _output: Retained<AudioStreamOutput>,
+    _queue: DispatchRetained<DispatchQueue>,
+}
+
+impl CaptureSession for MacAudioSession {
+    fn stop(self: Box<Self>) {
+        // SAFETY: FFI; `None` handler is permitted.
+        unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
+    }
 }

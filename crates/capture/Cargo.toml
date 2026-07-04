@@ -45,7 +45,16 @@ objc2-core-media = { version = "0.3", default-features = false, features = [
     "objc2",
     "CMSampleBuffer",
     "CMTime",
+    "CMBlockBuffer",
     "objc2-core-video",
+    "objc2-core-audio-types",
+] }
+# AudioBufferList / AudioBuffer for extracting PCM from audio CMSampleBuffers
+# (desktop-audio capture via ScreenCaptureKit).
+objc2-core-audio-types = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2",
+    "CoreAudioBaseTypes",
 ] }
 # CV pixel-buffer lock/geometry FFI. `CVBase`/`CVReturn` are required by the
 # `CVPixelBufferLockBaseAddress` cfg gate.

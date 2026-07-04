@@ -36,13 +36,15 @@ All notable changes to OpenReach. Format loosely follows Keep a Changelog.
   shows a picker and switches the captured monitor on demand (`DisplayList` /
   `SelectDisplay`), with capture restarted transparently to the encode thread.
 - **Audio (Opus, host→viewer), opt-in / default-off**: real end-to-end path —
-  cpal capture → Opus (`codec::audio`) → data channel → Opus decode → cpal
-  playback, with a dependency-free linear resampler and mono downmix. Codec and
-  resampler are unit-tested. **Honest caveats** (see `session/audio.rs`): capture
-  uses the default *input* device (true desktop-audio loopback is a platform
-  follow-up), and frames ride the reliable data channel (a dedicated Opus RTP
-  track is the latency optimization). Off by default so video is never affected;
-  enable with `OPENREACH_AUDIO=1` on host and viewer.
+  capture → Opus (`codec::audio`) → data channel → Opus decode → cpal playback,
+  with a dependency-free resampler and mono downmix (codec + resampler
+  unit-tested). Capture prefers real **desktop/system audio** via ScreenCaptureKit
+  on macOS (`capture::start_audio_capture`, extracting PCM from audio
+  `CMSampleBuffer`s), falling back to the default input device where unavailable.
+  macOS desktop capture uses the Screen Recording permission the host already
+  needs; verified to that permission boundary (`examples/audio_probe`). Transport
+  is the reliable data channel for now (a dedicated Opus RTP track is the latency
+  optimization). Off by default; enable with `OPENREACH_AUDIO=1` on host + viewer.
 - **Clipboard sync** (bidirectional, text): each side polls the OS clipboard and
   forwards changes over the control channel; an FNV-1a content hash breaks the
   echo loop. (`session/clipboard.rs`)
