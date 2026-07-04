@@ -63,6 +63,14 @@ pub enum ViewerUpdate {
     File(FileEvent),
     /// The host's available displays (for the multi-monitor picker).
     Displays(Vec<proto::DisplayDescriptor>),
+    /// The host's cryptographically-proven identity for this session (bound to the
+    /// DTLS fingerprint). `verified=false` means the proof failed — treat as a
+    /// possible MITM. Use this key (not the registry's) for TOFU/SAS.
+    HostIdentity {
+        public_key: Vec<u8>,
+        device_id: String,
+        verified: bool,
+    },
 }
 
 /// Running viewer session.
@@ -170,8 +178,19 @@ impl ViewerSession {
                     // Our own DTLS fingerprint, learned from the answer we emit;
                     // signed into the access proof to bind it to this session.
                     let mut local_fingerprint: Option<String> = None;
+                    // The host's DTLS fingerprint, from the offer we receive; the
+                    // host's identity proof must be bound to it (authenticates the
+                    // real endpoint against a MITM relay).
+                    let mut host_fingerprint: Option<String> = None;
                     loop {
                         while let Some(msg) = signal.try_recv() {
+                            if let SignalMsg::Offer(json) = &msg {
+                                if let Some(fp) =
+                                    crate::identity::fingerprint_from_session_json(json)
+                                {
+                                    host_fingerprint = Some(fp);
+                                }
+                            }
                             transport.feed_signal(msg);
                         }
                         while let Ok(path) = file_cmd_rx.try_recv() {
@@ -230,6 +249,35 @@ impl ViewerSession {
                                         Some(Payload::HelloAck(ack)) => {
                                             if !ack.accepted {
                                                 tracing::warn!(reason=%ack.reason, "host rejected pairing");
+                                            }
+                                            // Verify the host's identity proof, bound
+                                            // to the host's DTLS fingerprint.
+                                            if !ack.host_public_key.is_empty()
+                                                && !ack.host_proof.is_empty()
+                                            {
+                                                let binding = host_fingerprint
+                                                    .clone()
+                                                    .unwrap_or_default();
+                                                let update = match crate::identity::verify_access_proof(
+                                                    &ack.host_public_key,
+                                                    &ack.host_proof,
+                                                    binding.as_bytes(),
+                                                ) {
+                                                    Ok(device_id) => ViewerUpdate::HostIdentity {
+                                                        public_key: ack.host_public_key.clone(),
+                                                        device_id,
+                                                        verified: true,
+                                                    },
+                                                    Err(e) => {
+                                                        tracing::warn!(error=%e, "host identity proof INVALID — possible MITM");
+                                                        ViewerUpdate::HostIdentity {
+                                                            public_key: ack.host_public_key.clone(),
+                                                            device_id: String::new(),
+                                                            verified: false,
+                                                        }
+                                                    }
+                                                };
+                                                let _ = updates_tx.send(update);
                                             }
                                             let _ = updates_tx.send(ViewerUpdate::Paired(ack.accepted));
                                         }

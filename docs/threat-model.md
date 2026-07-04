@@ -37,16 +37,21 @@ trust boundaries, the guarantees the design provides, and residual risks.
 
 ### A2. Malicious/compromised rendezvous server
 - **Goal:** impersonate a host to a viewer (MITM), or read content.
-- **Mitigation:** content is E2EE (A1), so the server cannot read it. Endpoint
-  authenticity rests on **device identity keys + TOFU**: on first connect the viewer
-  pins the host's public-key fingerprint (short-auth-string comparison), and a later
-  key change is **refused** (`known_peers::trust_on_first_use`). A malicious server
-  swapping keys is detected on any connection after the first.
-- **Residual (v1 gap):** the SAS/TOFU pin binds to the device public key shown at
-  pairing; a server that MITMs the **very first** connection before the user has an
-  out-of-band fingerprint could pin an attacker key. Users should verify the
-  fingerprint out-of-band on first pairing. Binding the DTLS fingerprint to the signed
-  device key (so the server cannot substitute a DTLS identity) is a hardening item.
+- **Mitigation:** content is E2EE (A1), so the server cannot read it. **The host now
+  proves its identity, bound to the session's DTLS fingerprint**, in its `HelloAck`
+  (an ed25519 signature over `"openreach-access-proof-v2" || host_pubkey || 0x00 ||
+  dtls_fingerprint`). The viewer verifies the proof against the host fingerprint it
+  observed in the offer, then **authenticates and TOFU-pins *that* proven key** (not
+  the registry's claimed key). So a server that merely lies about the host's key —
+  without also MITMing the DTLS — is defeated: the real host's proof carries the real
+  key, and the substituted key is ignored. A later key change is still refused
+  (`known_peers::trust_on_first_use`). If the host's proof fails to verify the viewer
+  **refuses the session** (possible MITM).
+- **Residual:** a server that performs a *full* DTLS MITM (its own cert on both legs)
+  can present a self-consistent proof over its own key/fingerprint; only the **SAS /
+  QR out-of-band check** catches that on the very first pairing (the SAS reflects the
+  actually-negotiated endpoints, so it differs under MITM). The new QR/PAKE pairing
+  path removes this window entirely for enrolled devices.
 
 ### A3. Credential theft / brute force against the rendezvous
 - **Mitigation:** passwords hashed with **Argon2id** (explicitly pinned params:
@@ -93,8 +98,11 @@ trust boundaries, the guarantees the design provides, and residual risks.
 ## Cryptography summary
 - **Transport:** DTLS 1.2+ with SRTP (media) and SCTP-over-DTLS (data channel) —
   keys negotiated per session, never shared with relays.
-- **Passwords:** Argon2 (PHC). **Tokens:** random 256-bit, stored as SHA-256.
-- **Device identity:** ed25519. **SAS:** SHA-256 over the sorted key pair → 6 digits.
+- **Passwords:** Argon2id, pinned 64 MiB/t=3/p=1 (PHC). **Tokens:** random 256-bit,
+  stored as SHA-256.
+- **Device identity:** ed25519, encrypted at rest (Argon2id + XChaCha20-Poly1305) when
+  a passphrase is set. **SAS:** SHA-256 over the sorted key pair → 6 digits. **Identity
+  proofs** (both directions) are ed25519 signatures bound to the session DTLS fingerprint.
 
 ## Non-goals / assumptions
 - Endpoints are not hardened against a fully compromised host OS (kernel-level malware
@@ -103,11 +111,15 @@ trust boundaries, the guarantees the design provides, and residual risks.
   registration) on a maintained VPS.
 
 ## Open hardening items (tracked)
-1. Extend the DTLS-fingerprint binding (already used for A4 unattended access) to the
-   *interactive* first-connect path so A2's manual SAS/TOFU is backstopped automatically.
-2. Passphrase-wrap the identity key at rest (A5).
-3. Optional per-host password as a second factor alongside the authorized-key gate.
+1. QR/PAKE direct-pairing path (removes the A2 first-connect window and server-side
+   credentials entirely for enrolled devices).
+2. Hardware-backed identity keys (TPM / Apple Secure Enclave) — non-exportable, the
+   strongest answer to A5.
+3. Optional per-host password / TOTP MFA as a second factor.
 
-*(Resolved: the A4 unattended-access proof is now bound to the session DTLS fingerprint,
-closing the prior proof-replay residual — see A4.)*
-4. Account lockout / optional MFA on the rendezvous (A3).
+*(Resolved:
+ — A4 unattended-access proof bound to the session DTLS fingerprint;
+ — A2 host identity proof bound to DTLS on the interactive path, with TOFU pinning the
+   proven key;
+ — A5 identity key encrypted at rest (Argon2id + XChaCha20-Poly1305) + zeroized + Windows ACL;
+ — A3 registration closed by default, Argon2id params pinned, per-username login lockout.)*

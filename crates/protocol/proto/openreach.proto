@@ -65,6 +65,14 @@ message HelloAck {
   string reason = 2;
   string device_name = 3;
   uint64 features = 4;
+  // Host's proof of identity, bound to this DTLS session (closes first-connect
+  // MITM). `host_public_key` is the 32-byte ed25519 key; `host_proof` is a
+  // signature over `"openreach-access-proof-v2" || host_public_key || 0x00 ||
+  // dtls_fingerprint`. The viewer verifies it against the host's fingerprint from
+  // the offer, then authenticates/TOFU-pins this key. Empty when the host has no
+  // identity (LAN/dev).
+  bytes host_public_key = 5;
+  bytes host_proof = 6;
 }
 
 // --- Input (viewer -> host) ------------------------------------------------

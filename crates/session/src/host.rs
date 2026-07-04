@@ -48,6 +48,10 @@ pub struct HostConfig {
     /// Authorized viewer `device_id`s (32-hex-char fingerprints). Only consulted
     /// when `require_authorization` is set.
     pub authorized_device_ids: Vec<String>,
+    /// This host's identity. When present, the host proves possession of it —
+    /// bound to the session's DTLS fingerprint — in its `HelloAck`, so the viewer
+    /// can authenticate the real endpoint (closes first-connect MITM).
+    pub identity: Option<std::sync::Arc<crate::identity::DeviceIdentity>>,
 }
 
 impl Default for HostConfig {
@@ -64,6 +68,7 @@ impl Default for HostConfig {
             enable_audio: false,
             require_authorization: false,
             authorized_device_ids: Vec::new(),
+            identity: None,
         }
     }
 }
@@ -244,6 +249,9 @@ where
     // The viewer's DTLS fingerprint (from its answer), used to bind its access
     // proof to this session.
     let mut remote_fingerprint: Option<String> = None;
+    // Our own DTLS fingerprint, from the offer we emit — the value the host signs
+    // into its identity proof so the viewer can authenticate this endpoint.
+    let mut local_fingerprint: Option<String> = None;
 
     // Control / event loop: forward peer signaling in, react to transport events.
     loop {
@@ -264,6 +272,11 @@ where
         };
         match ev {
             TransportEvent::LocalSignal(msg) => {
+                if let SignalMsg::Offer(json) = &msg {
+                    if let Some(fp) = crate::identity::fingerprint_from_session_json(json) {
+                        local_fingerprint = Some(fp);
+                    }
+                }
                 if let Err(e) = signal.send(&msg) {
                     tracing::warn!(error=%e, "failed to send local signaling");
                 }
@@ -290,6 +303,8 @@ where
                     &mut capture_ctl,
                     &access,
                     remote_fingerprint.as_deref().unwrap_or_default().as_bytes(),
+                    cfg.identity.as_deref(),
+                    local_fingerprint.as_deref().unwrap_or_default().as_bytes(),
                     &cfg.device_name,
                 );
             }
@@ -430,6 +445,8 @@ fn handle_control(
     capture_ctl: &mut CaptureController,
     access: &AccessControl,
     channel_binding: &[u8],
+    host_identity: Option<&crate::identity::DeviceIdentity>,
+    local_fingerprint: &[u8],
     device_name: &str,
 ) {
     let env = match proto::decode(bytes) {
@@ -454,7 +471,17 @@ fn handle_control(
                 .and_then(|()| access.authorize(&h, channel_binding));
             match decision {
                 Ok(()) => {
-                    let ack = proto::hello_ack_ok(device_name, 0);
+                    // Prove the host's identity bound to this DTLS session so the
+                    // viewer can authenticate the real endpoint (closes A2 MITM).
+                    let ack = match host_identity {
+                        Some(id) => proto::hello_ack_ok_signed(
+                            device_name,
+                            0,
+                            id.public_key_bytes().to_vec(),
+                            id.access_proof(local_fingerprint).to_vec(),
+                        ),
+                        None => proto::hello_ack_ok(device_name, 0),
+                    };
                     transport.send_data(Bytes::from(proto::encode(&ack)));
                     // Advertise the host's displays so the viewer can switch monitors.
                     let list = proto::display_list(capture_ctl.descriptors());

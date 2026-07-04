@@ -84,6 +84,11 @@ fn main() -> anyhow::Result<()> {
                 ViewerUpdate::Latency(rtt) => eprintln!("[headless] rtt={rtt:?}"),
                 ViewerUpdate::File(ev) => eprintln!("[headless] file {ev:?}"),
                 ViewerUpdate::Displays(d) => eprintln!("[headless] displays={}", d.len()),
+                ViewerUpdate::HostIdentity {
+                    device_id,
+                    verified,
+                    ..
+                } => eprintln!("[headless] host_identity device_id={device_id} verified={verified}"),
             }
         }
         std::thread::sleep(Duration::from_millis(5));

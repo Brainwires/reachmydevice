@@ -60,6 +60,24 @@ fn authorized_device_ids() -> Vec<String> {
     }
 }
 
+/// Load (or first-run create) this host's device identity, used to prove the
+/// host's identity to viewers (bound to the DTLS session). Encrypted at rest when
+/// `OPENREACH_KEY_PASSPHRASE` is set.
+fn load_host_identity() -> Option<std::sync::Arc<openreach_session::DeviceIdentity>> {
+    let home = std::env::var("HOME").ok()?;
+    let path = std::path::PathBuf::from(home).join(".config/openreach/identity.key");
+    match openreach_session::DeviceIdentity::load_or_create(&path) {
+        Ok(id) => {
+            tracing::info!(device_id = %id.device_id(), "host identity loaded");
+            Some(std::sync::Arc::new(id))
+        }
+        Err(e) => {
+            tracing::warn!(error=%e, "could not load host identity; viewers can't verify this host");
+            None
+        }
+    }
+}
+
 /// Read the device bearer token, preferring a `0600` file over the environment
 /// (env vars leak via `ps e` / `/proc/<pid>/environ`). File path from
 /// `OPENREACH_TOKEN_FILE`, else `~/.config/openreach/token`.
@@ -126,6 +144,9 @@ fn main() -> anyhow::Result<()> {
         require_authorization: std::env::var("OPENREACH_REQUIRE_AUTH").is_ok()
             || !authorized_device_ids().is_empty(),
         authorized_device_ids: authorized_device_ids(),
+        // The host's own identity, presented (DTLS-bound) to viewers so they can
+        // authenticate this endpoint. Persisted under the config dir.
+        identity: load_host_identity(),
     };
 
     tracing::info!(

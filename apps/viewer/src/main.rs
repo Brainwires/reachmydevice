@@ -162,6 +162,8 @@ struct App {
     conn: ConnState,
     session: Option<ViewerSession>,
     paired: Option<bool>,
+    /// Whether the host's DTLS-bound identity proof verified this session.
+    host_verified: Option<bool>,
     latency: Option<Duration>,
     last_ping: Instant,
 
@@ -250,6 +252,7 @@ impl App {
             conn: ConnState::Establishing,
             session: None,
             paired: None,
+            host_verified: None,
             latency: None,
             last_ping: Instant::now(),
             view_only: false,
@@ -320,6 +323,7 @@ impl App {
         self.session = None;
         self.selected_host = None;
         self.paired = None;
+        self.host_verified = None;
         self.latency = None;
         self.view_only = false;
         self.hud_visible = true;
@@ -359,6 +363,22 @@ impl App {
                     self.screen = Screen::InSession;
                 } else {
                     self.error = Some("host rejected pairing (protocol version mismatch)".into());
+                    self.leave_session();
+                }
+            }
+            ViewerUpdate::HostIdentity {
+                device_id,
+                verified,
+                ..
+            } => {
+                self.host_verified = Some(verified);
+                if verified {
+                    tracing::info!(%device_id, "host identity cryptographically verified");
+                } else {
+                    // The host's DTLS-bound identity proof did not check out.
+                    self.error = Some(
+                        "host identity could not be verified — refusing (possible MITM)".into(),
+                    );
                     self.leave_session();
                 }
             }

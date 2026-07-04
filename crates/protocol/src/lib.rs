@@ -30,8 +30,9 @@ pub const PROTOCOL_MAJOR: u32 = 1;
 /// Protocol minor version. Backward-compatible additions bump this.
 /// MINOR 1 added clipboard/file-transfer/multi-monitor/session-control messages;
 /// MINOR 2 added the Opus `AudioFrame`;
-/// MINOR 3 replaced `FileComplete.sha256_prefix` (64-bit) with a full `sha256`.
-pub const PROTOCOL_MINOR: u32 = 3;
+/// MINOR 3 replaced `FileComplete.sha256_prefix` (64-bit) with a full `sha256`;
+/// MINOR 4 added the host identity proof to `HelloAck` (first-connect MITM).
+pub const PROTOCOL_MINOR: u32 = 4;
 
 /// Errors from encoding/decoding or handshake validation.
 #[derive(Debug, thiserror::Error)]
@@ -123,13 +124,33 @@ pub fn hello_authenticated(
     }))
 }
 
-/// An accepting `HelloAck`.
+/// An accepting `HelloAck` (no host identity proof — LAN/dev).
 pub fn hello_ack_ok(device_name: impl Into<String>, features: u64) -> Envelope {
     envelope(pb::envelope::Payload::HelloAck(HelloAck {
         accepted: true,
         reason: String::new(),
         device_name: device_name.into(),
         features,
+        host_public_key: Vec::new(),
+        host_proof: Vec::new(),
+    }))
+}
+
+/// An accepting `HelloAck` carrying the host's identity proof bound to this
+/// session's DTLS fingerprint, so the viewer can authenticate the real endpoint.
+pub fn hello_ack_ok_signed(
+    device_name: impl Into<String>,
+    features: u64,
+    host_public_key: Vec<u8>,
+    host_proof: Vec<u8>,
+) -> Envelope {
+    envelope(pb::envelope::Payload::HelloAck(HelloAck {
+        accepted: true,
+        reason: String::new(),
+        device_name: device_name.into(),
+        features,
+        host_public_key,
+        host_proof,
     }))
 }
 
@@ -140,6 +161,8 @@ pub fn hello_ack_reject(reason: impl Into<String>) -> Envelope {
         reason: reason.into(),
         device_name: String::new(),
         features: 0,
+        host_public_key: Vec::new(),
+        host_proof: Vec::new(),
     }))
 }
 
