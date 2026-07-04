@@ -51,11 +51,32 @@ fn main() -> anyhow::Result<()> {
     let mut pending: VecDeque<i16> = VecDeque::new();
     let mut seq = 0u64;
 
+    // Optional: also play the round-tripped audio out the speaker (PLAY=1), so a
+    // human can hear the full loop. Our own output is excluded from capture
+    // (excludesCurrentProcessAudio), so it doesn't feed back.
+    let mut playback = if std::env::var("PLAY").is_ok() {
+        match openreach_session::audio::AudioPlayback::start() {
+            Ok(p) => {
+                eprintln!("playback ON — you should hear the captured audio round-tripped");
+                Some(p)
+            }
+            Err(e) => {
+                eprintln!("playback unavailable: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let (mut host_conn, mut view_conn) = (false, false);
     let (mut recv_frames, mut recv_energy) = (0u64, 0.0_f64);
-    let deadline = Instant::now() + Duration::from_secs(12);
+    // Run longer when playing so a human can actually hear the round trip.
+    let secs = if playback.is_some() { 12 } else { 6 };
+    let frame_cap = if playback.is_some() { u64::MAX } else { 100 };
+    let deadline = Instant::now() + Duration::from_secs(secs);
 
-    while Instant::now() < deadline && recv_frames < 100 {
+    while Instant::now() < deadline && recv_frames < frame_cap {
         for ev in drain(&host) {
             match ev {
                 TransportEvent::LocalSignal(m) => viewer.feed_signal(m),
@@ -73,6 +94,9 @@ fn main() -> anyhow::Result<()> {
                             if let Ok(pcm) = decoder.decode(Some(&a.opus), false) {
                                 recv_frames += 1;
                                 recv_energy += pcm.iter().map(|&s| (s as f64).powi(2)).sum::<f64>();
+                            }
+                            if let Some(p) = playback.as_mut() {
+                                p.push_packet(&a.opus, a.seq);
                             }
                         }
                     }
