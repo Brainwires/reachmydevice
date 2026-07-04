@@ -20,6 +20,8 @@ tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Scrub the device token from memory after use.
+zeroize = "1"
 
 # Optional desktop tray companion. Behind a feature so headless/server hosts
 # (which have no display and often no GTK) build without pulling GTK/winit.

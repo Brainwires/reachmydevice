@@ -16,7 +16,6 @@
 //! Requires **Screen Recording** (capture) and **Accessibility** (input)
 //! permissions on macOS — see `docs/macos-permissions.md`.
 
-use anyhow::Context;
 use openreach_session::rendezvous::RendezvousClient;
 use openreach_session::{run_host, HostConfig, SignalClient, Signaling};
 
@@ -61,12 +60,38 @@ fn authorized_device_ids() -> Vec<String> {
     }
 }
 
+/// Read the device bearer token, preferring a `0600` file over the environment
+/// (env vars leak via `ps e` / `/proc/<pid>/environ`). File path from
+/// `OPENREACH_TOKEN_FILE`, else `~/.config/openreach/token`.
+fn read_token() -> anyhow::Result<zeroize::Zeroizing<String>> {
+    let path = std::env::var("OPENREACH_TOKEN_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            std::path::PathBuf::from(home).join(".config/openreach/token")
+        });
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        return Ok(zeroize::Zeroizing::new(s.trim().to_string()));
+    }
+    if let Ok(s) = std::env::var("OPENREACH_TOKEN") {
+        tracing::warn!(
+            "using OPENREACH_TOKEN from the environment (visible in process listings); \
+             prefer a 0600 token file at {}",
+            path.display()
+        );
+        return Ok(zeroize::Zeroizing::new(s));
+    }
+    anyhow::bail!(
+        "no device token: create {} (0600) or set OPENREACH_TOKEN_FILE / OPENREACH_TOKEN",
+        path.display()
+    )
+}
+
 /// Build the signaling backend: rendezvous WebSocket if configured, else LAN relay.
 /// `peer` is the device to address (None for the host — it learns the viewer).
 fn build_signaling(peer: Option<String>) -> anyhow::Result<Box<dyn Signaling>> {
     if let Ok(url) = std::env::var("OPENREACH_RENDEZVOUS_URL") {
-        let token = std::env::var("OPENREACH_TOKEN")
-            .context("OPENREACH_TOKEN is required in rendezvous mode")?;
+        let token = read_token()?;
         tracing::info!(%url, "signaling via rendezvous");
         Ok(Box::new(RendezvousClient::connect(&url, &token, peer)?))
     } else {

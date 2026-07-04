@@ -9,9 +9,96 @@
 //! The private key never leaves the device and is not shared with the rendezvous
 //! server — the server only stores the public key for display.
 
+use argon2::Argon2;
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use zeroize::Zeroizing;
+
+/// Env var holding the passphrase used to encrypt the identity key at rest.
+/// When set, the key file is wrapped (Argon2id + XChaCha20-Poly1305); when
+/// absent, the key is stored in plaintext (with a loud warning) so headless
+/// hosts still start — the hardware-backed (TPM/Enclave) option is the future
+/// answer for non-exportable unattended keys.
+pub const KEY_PASSPHRASE_ENV: &str = "OPENREACH_KEY_PASSPHRASE";
+
+/// Magic header identifying an encrypted (wrapped) identity file.
+const WRAP_MAGIC: &[u8; 4] = b"ORK1";
+const WRAP_SALT_LEN: usize = 16;
+const WRAP_NONCE_LEN: usize = 24;
+
+/// Derive a 32-byte wrapping key from a passphrase + salt via Argon2id.
+fn derive_wrap_key(passphrase: &[u8], salt: &[u8]) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+    let mut key = Zeroizing::new([0u8; 32]);
+    Argon2::default()
+        .hash_password_into(passphrase, salt, key.as_mut())
+        .map_err(|e| anyhow::anyhow!("argon2 kdf: {e}"))?;
+    Ok(key)
+}
+
+/// Encrypt a 32-byte seed under `passphrase` → `MAGIC ‖ salt ‖ nonce ‖ ct+tag`.
+fn wrap_seed(seed: &[u8; 32], passphrase: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut salt = [0u8; WRAP_SALT_LEN];
+    let mut nonce = [0u8; WRAP_NONCE_LEN];
+    getrandom::getrandom(&mut salt).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
+    getrandom::getrandom(&mut nonce).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
+    let key = derive_wrap_key(passphrase, &salt)?;
+    let cipher = XChaCha20Poly1305::new(key.as_ref().into());
+    let ct = cipher
+        .encrypt(XNonce::from_slice(&nonce), seed.as_ref())
+        .map_err(|_| anyhow::anyhow!("identity key encryption failed"))?;
+    let mut out = Vec::with_capacity(4 + WRAP_SALT_LEN + WRAP_NONCE_LEN + ct.len());
+    out.extend_from_slice(WRAP_MAGIC);
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Decrypt a wrapped identity blob back to the 32-byte seed.
+fn unwrap_seed(blob: &[u8], passphrase: &[u8]) -> anyhow::Result<Zeroizing<[u8; 32]>> {
+    let header = 4 + WRAP_SALT_LEN + WRAP_NONCE_LEN;
+    anyhow::ensure!(
+        blob.len() > header && &blob[..4] == WRAP_MAGIC,
+        "not a wrapped identity file"
+    );
+    let salt = &blob[4..4 + WRAP_SALT_LEN];
+    let nonce = &blob[4 + WRAP_SALT_LEN..header];
+    let ct = &blob[header..];
+    let key = derive_wrap_key(passphrase, salt)?;
+    let cipher = XChaCha20Poly1305::new(key.as_ref().into());
+    let pt = cipher
+        .decrypt(XNonce::from_slice(nonce), ct)
+        .map_err(|_| anyhow::anyhow!("wrong passphrase or corrupt identity file"))?;
+    let seed: [u8; 32] = pt
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("decrypted seed is not 32 bytes"))?;
+    Ok(Zeroizing::new(seed))
+}
+
+/// Restrict the identity file to the current user (unix `0600`; Windows ACL).
+fn restrict_perms(path: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(windows)]
+    {
+        // Break ACL inheritance and grant only the current user full control.
+        if let Ok(user) = std::env::var("USERNAME") {
+            let _ = std::process::Command::new("icacls")
+                .arg(path)
+                .args(["/inheritance:r", "/grant:r"])
+                .arg(format!("{user}:F"))
+                .output();
+        }
+    }
+    Ok(())
+}
 
 /// Domain-separation tag for the unattended-access proof-of-possession. The
 /// viewer signs `TAG || public_key || 0x00 || channel_binding`; verifying it
@@ -99,8 +186,8 @@ impl std::fmt::Debug for DeviceIdentity {
 impl DeviceIdentity {
     /// Generate a fresh keypair from the OS CSPRNG.
     pub fn generate() -> anyhow::Result<Self> {
-        let mut seed = [0u8; 32];
-        getrandom::getrandom(&mut seed).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
+        let mut seed = Zeroizing::new([0u8; 32]);
+        getrandom::getrandom(seed.as_mut()).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
         Ok(Self {
             signing: SigningKey::from_bytes(&seed),
         })
@@ -157,34 +244,71 @@ impl DeviceIdentity {
     }
 
     /// Load the identity from `path`, or generate + save a new one if absent.
+    ///
+    /// If `OPENREACH_KEY_PASSPHRASE` is set the file is encrypted at rest; a
+    /// legacy plaintext file is read (with a warning) and transparently upgraded
+    /// to the encrypted form when a passphrase is available.
     pub fn load_or_create(path: &Path) -> anyhow::Result<Self> {
-        if path.exists() {
-            let hex_seed = std::fs::read_to_string(path)?;
-            let bytes = hex::decode(hex_seed.trim())?;
-            let seed: [u8; 32] = bytes
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("identity file is not a 32-byte key"))?;
-            Ok(Self {
-                signing: SigningKey::from_bytes(&seed),
-            })
-        } else {
+        let passphrase = std::env::var(KEY_PASSPHRASE_ENV).ok();
+        if !path.exists() {
             let id = Self::generate()?;
             id.save(path)?;
-            Ok(id)
+            return Ok(id);
         }
+
+        let data = std::fs::read(path)?;
+        let wrapped = data.starts_with(WRAP_MAGIC);
+        let seed: Zeroizing<[u8; 32]> = if wrapped {
+            let pass = passphrase.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("identity is encrypted; set {KEY_PASSPHRASE_ENV}")
+            })?;
+            unwrap_seed(&data, pass.as_bytes())?
+        } else {
+            // Legacy plaintext hex.
+            let hex_seed = Zeroizing::new(String::from_utf8_lossy(&data).trim().to_string());
+            let bytes = Zeroizing::new(hex::decode(hex_seed.as_str())?);
+            let s: [u8; 32] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("identity file is not a 32-byte key"))?;
+            if passphrase.is_none() {
+                tracing::warn!(
+                    "identity key stored in PLAINTEXT — set {KEY_PASSPHRASE_ENV} to encrypt at rest"
+                );
+            }
+            Zeroizing::new(s)
+        };
+
+        let id = Self {
+            signing: SigningKey::from_bytes(&seed),
+        };
+        // Opportunistically upgrade a legacy plaintext file once a passphrase exists.
+        if !wrapped && passphrase.is_some() {
+            tracing::info!("upgrading plaintext identity key to encrypted-at-rest");
+            id.save(path)?;
+        }
+        Ok(id)
     }
 
-    /// Persist the private seed (hex) to `path` with restrictive permissions.
+    /// Persist the private seed to `path` with restrictive permissions —
+    /// encrypted (Argon2id + XChaCha20-Poly1305) when a passphrase is set, else
+    /// plaintext hex with a warning.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, hex::encode(self.signing.to_bytes()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        }
+        let seed = Zeroizing::new(self.signing.to_bytes());
+        let bytes = match std::env::var(KEY_PASSPHRASE_ENV).ok() {
+            Some(pass) => wrap_seed(&seed, pass.as_bytes())?,
+            None => {
+                tracing::warn!(
+                    "writing identity key in PLAINTEXT — set {KEY_PASSPHRASE_ENV} to encrypt at rest"
+                );
+                hex::encode(seed.as_ref()).into_bytes()
+            }
+        };
+        std::fs::write(path, &bytes)?;
+        restrict_perms(path)?;
         Ok(())
     }
 }
@@ -295,6 +419,38 @@ mod tests {
             Some("SHA-256 AB:CD:EF")
         );
         assert_eq!(dtls_fingerprint_from_sdp("v=0\r\n"), None);
+    }
+
+    #[test]
+    fn key_wrap_roundtrip_and_rejects_wrong_passphrase() {
+        let id = DeviceIdentity::generate().unwrap();
+        let seed = id.signing.to_bytes();
+        let blob = wrap_seed(&seed, b"correct horse battery").unwrap();
+        assert_eq!(&blob[..4], WRAP_MAGIC);
+        assert_ne!(&blob[4..], &seed[..], "seed must not appear in the wrapped blob");
+        // Correct passphrase recovers the exact seed.
+        assert_eq!(*unwrap_seed(&blob, b"correct horse battery").unwrap(), seed);
+        // Wrong passphrase → AEAD failure.
+        assert!(unwrap_seed(&blob, b"wrong").is_err());
+        // A plaintext (non-magic) blob is not accepted as wrapped.
+        assert!(unwrap_seed(b"not-a-wrapped-key-blob-xxxxxxxxxxxxxxxxxxxxxx", b"x").is_err());
+    }
+
+    #[test]
+    fn save_load_roundtrip_is_stable() {
+        let dir = std::env::temp_dir().join(format!("or-id-{}", std::process::id()));
+        let path = dir.join("identity.key");
+        let _ = std::fs::remove_dir_all(&dir);
+        let id = DeviceIdentity::load_or_create(&path).unwrap();
+        let again = DeviceIdentity::load_or_create(&path).unwrap();
+        assert_eq!(id.public_key_hex(), again.public_key_hex());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "identity file must be user-only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

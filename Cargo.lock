@@ -3704,6 +3704,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "winit",
+ "zeroize",
 ]
 
 [[package]]
@@ -3759,8 +3760,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "argon2",
  "base64",
  "bytes",
+ "chacha20poly1305",
  "cpal",
  "ed25519-dalek",
  "futures",
@@ -3780,6 +3783,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "ureq",
+ "zeroize",
 ]
 
 [[package]]
