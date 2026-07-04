@@ -20,6 +20,9 @@ use anyhow::Context;
 use openreach_session::rendezvous::RendezvousClient;
 use openreach_session::{run_host, HostConfig, SignalClient, Signaling};
 
+#[cfg(feature = "tray")]
+mod tray;
+
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
         .ok()
@@ -82,5 +85,14 @@ fn main() -> anyhow::Result<()> {
     );
     // The host is the offerer; it learns the viewer's id from the rendezvous hello.
     let signaling = build_signaling(None)?;
+
+    // Desktop tray companion when built with `--features tray` and requested via
+    // `OPENREACH_TRAY=1`; otherwise run headless (the default, and the only
+    // option on servers without a display).
+    #[cfg(feature = "tray")]
+    if std::env::var("OPENREACH_TRAY").is_ok() {
+        return tray::run_with_tray(cfg, signaling);
+    }
+
     run_host(cfg, signaling)
 }

@@ -59,8 +59,33 @@ impl Default for HostConfig {
     }
 }
 
+/// High-level host session state, reported to an optional observer (e.g. a tray
+/// companion) so a UI can reflect whether a remote is connected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostStatus {
+    /// Ready, no viewer connected.
+    Waiting,
+    /// A viewer is connected (remote session active).
+    Active,
+    /// The viewer disconnected; back to waiting.
+    Ended,
+}
+
 /// Run the host session with the given signaling backend. Blocks until stopped.
 pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<()> {
+    run_host_reporting(cfg, signal, |_| {})
+}
+
+/// Like [`run_host`], but invokes `on_status` on each [`HostStatus`] transition.
+/// The callback runs on the session thread and must not block.
+pub fn run_host_reporting<F>(
+    cfg: HostConfig,
+    signal: Box<dyn Signaling>,
+    on_status: F,
+) -> anyhow::Result<()>
+where
+    F: Fn(HostStatus),
+{
     let bind_addr = cfg
         .bind_addr
         .parse()
@@ -157,6 +182,7 @@ pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<(
     };
 
     tracing::info!(device = %cfg.device_name, "host ready; waiting for a viewer to connect");
+    on_status(HostStatus::Waiting);
 
     // Control / event loop: forward peer signaling in, react to transport events.
     loop {
@@ -177,14 +203,16 @@ pub fn run_host(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Result<(
                 }
             }
             TransportEvent::Connected => {
-                // Visible session indicator (tray comes later).
+                // Visible session indicator (also surfaced to the tray companion).
                 tracing::warn!("★ REMOTE SESSION ACTIVE ★");
                 connected.store(true, Ordering::Relaxed);
                 force_keyframe.store(true, Ordering::Relaxed);
+                on_status(HostStatus::Active);
             }
             TransportEvent::Disconnected => {
                 tracing::warn!("remote session ended");
                 connected.store(false, Ordering::Relaxed);
+                on_status(HostStatus::Ended);
             }
             TransportEvent::Data(bytes) => {
                 handle_control(

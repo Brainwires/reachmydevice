@@ -14,6 +14,11 @@ All notable changes to OpenReach. Format loosely follows Keep a Changelog.
   Docker container behind a Cloudflare tunnel (or Caddy/ACME).
 
 ### Added
+- **Host tray companion** (`--features tray`, opt-in via `OPENREACH_TRAY=1`): a
+  menu-bar/system-tray icon that goes green while a remote is connected, with a
+  Quit item. The session runs on a background thread and reports state
+  (`HostStatus`) to the tray, which owns the main thread (required on macOS).
+  Feature-gated so headless/server hosts build without GTK/winit.
 - **Special keys**: PrintScreen/ScrollLock/Pause/Insert/Menu and the extended
   function row (F13+) added to both the macOS and Linux HID→keycode maps.
 - **Multi-monitor**: the host enumerates and advertises its displays; the viewer
