@@ -40,13 +40,13 @@ trust boundaries, the guarantees the design provides, and residual risks.
 - **Mitigation:** content is E2EE (A1), so the server cannot read it. **The host now
   proves its identity, bound to the session's DTLS fingerprint**, in its `HelloAck`
   (an ed25519 signature over `"openreach-access-proof-v2" || host_pubkey || 0x00 ||
-  dtls_fingerprint`). The viewer verifies the proof against the host fingerprint it
-  observed in the offer, then **authenticates and TOFU-pins *that* proven key** (not
-  the registry's claimed key). So a server that merely lies about the host's key —
-  without also MITMing the DTLS — is defeated: the real host's proof carries the real
-  key, and the substituted key is ignored. A later key change is still refused
-  (`known_peers::trust_on_first_use`). If the host's proof fails to verify the viewer
-  **refuses the session** (possible MITM).
+  dtls_fingerprint`). A valid proof is **necessary but not sufficient**: the viewer
+  additionally requires the proven identity to match **both** the device the user
+  selected *and the key pinned for it* (`known_peers`) — a valid self-proof over the
+  relay's *own* key is rejected because it doesn't match the pinned key. So a server
+  that lies about the host's key is defeated (SAS/pin mismatch), and a full-DTLS-MITM
+  relay is defeated on any **reconnect** (its own key ≠ the pinned key). A changed key
+  is refused (`known_peers::trust_on_first_use`).
 - **Residual:** a server that performs a *full* DTLS MITM (its own cert on both legs)
   can present a self-consistent proof over its own key/fingerprint; only the **SAS /
   QR out-of-band check** catches that on the very first pairing (the SAS reflects the

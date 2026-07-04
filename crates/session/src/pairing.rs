@@ -133,13 +133,40 @@ pub fn derive_key_from_seed(
     kdf(seed, pubkey_a, pubkey_b)
 }
 
-/// A short confirmation tag over a pairing key, exchanged out of the derived key
-/// so both sides can detect a mismatch (wrong code / seed) before trusting it.
-pub fn confirmation(key: &[u8; 32]) -> [u8; 16] {
-    let hk = Hkdf::<Sha256>::new(Some(b"openreach-pairing-confirm-v1"), key);
+/// A **directional** confirmation tag over a pairing key. Each side sends the tag
+/// for *its own* role and verifies the tag for the *peer's* role; because the two
+/// roles produce different tags, a party that doesn't hold the key cannot pass the
+/// check by reflecting the tag it received. Roles are assigned deterministically
+/// by [`role_label`] (whoever has the lexicographically-smaller public key is the
+/// "initiator"), so both sides agree without negotiation.
+pub fn confirmation(key: &[u8; 32], role: &[u8]) -> [u8; 16] {
+    let hk = Hkdf::<Sha256>::new(Some(b"openreach-pairing-confirm-v2"), key);
     let mut tag = [0u8; 16];
-    hk.expand(&[], &mut tag).expect("16 is a valid HKDF length");
+    hk.expand(role, &mut tag)
+        .expect("16 is a valid HKDF length");
     tag
+}
+
+/// Deterministic role labels `(ours, peers)` from the two public keys: the
+/// smaller key is the "initiator". Both sides compute the same split.
+pub fn role_labels(our_pubkey: &[u8; 32], peer_pubkey: &[u8; 32]) -> (&'static [u8], &'static [u8]) {
+    if our_pubkey < peer_pubkey {
+        (b"initiator", b"responder")
+    } else {
+        (b"responder", b"initiator")
+    }
+}
+
+/// Constant-time equality for the fixed-size confirmation tags.
+pub fn tags_equal(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Render a pairing ticket as a compact Unicode QR code for a terminal, so a
@@ -253,7 +280,10 @@ mod tests {
         let ka = derive_key_from_seed(&seed, &pa, &pb);
         let kb = derive_key_from_seed(&seed, &pb, &pa);
         assert_eq!(*ka, *kb);
-        assert_eq!(confirmation(&ka), confirmation(&kb));
+        // Same key + same role label → same tag; different roles → different tags
+        // (this directionality is what defeats a reflection attack).
+        assert_eq!(confirmation(&ka, b"initiator"), confirmation(&kb, b"initiator"));
+        assert_ne!(confirmation(&ka, b"initiator"), confirmation(&ka, b"responder"));
         // A different seed yields a different key.
         let kc = derive_key_from_seed(&[43u8; 32], &pa, &pb);
         assert_ne!(*ka, *kc);
@@ -283,7 +313,11 @@ mod tests {
         let ka = pake_finish(sa, &mb, &pa, &pb).unwrap();
         let kb = pake_finish(sb, &ma, &pa, &pb).unwrap();
         assert_eq!(*ka, *kb, "matching code must agree");
-        assert_eq!(confirmation(&ka), confirmation(&kb));
+        // Directional confirmation: each side's own-role tag equals the other's
+        // expected peer-role tag.
+        let (a_role, _b_role) = role_labels(&pa, &pb);
+        assert_eq!(confirmation(&ka, a_role), confirmation(&kb, a_role));
+        assert!(tags_equal(&confirmation(&ka, a_role), &confirmation(&kb, a_role)));
 
         // Mismatched code → keys differ (confirmation tags won't match).
         let (sc, mc) = pake_start("right-code");
@@ -291,6 +325,20 @@ mod tests {
         let kc = pake_finish(sc, &md, &pa, &pb).unwrap();
         let kd = pake_finish(sd, &mc, &pa, &pb).unwrap();
         assert_ne!(*kc, *kd, "mismatched code must not agree");
-        assert_ne!(confirmation(&kc), confirmation(&kd));
+        assert!(!tags_equal(
+            &confirmation(&kc, a_role),
+            &confirmation(&kd, a_role)
+        ));
+    }
+
+    #[test]
+    fn reflected_tag_does_not_pass_directional_check() {
+        // An attacker who doesn't hold the key receives our tag and echoes it.
+        // With directional tags, the echoed (our-role) tag is NOT the peer-role
+        // tag we verify against, so the reflection fails.
+        let key = [5u8; 32];
+        let our_tag = confirmation(&key, b"initiator");
+        let expected_peer = confirmation(&key, b"responder");
+        assert!(!tags_equal(&our_tag, &expected_peer), "reflection must not pass");
     }
 }

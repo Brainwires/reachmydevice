@@ -382,17 +382,38 @@ impl App {
             }
             ViewerUpdate::HostIdentity {
                 device_id,
+                public_key,
                 verified,
-                ..
             } => {
-                self.host_verified = Some(verified);
-                if verified {
-                    tracing::info!(%device_id, "host identity cryptographically verified");
+                // A valid self-proof is necessary but NOT sufficient: a MITM relay
+                // could present its own key + a valid proof over its own DTLS
+                // fingerprint. So we also require the proven identity to match the
+                // host we intended to reach — the device the user selected AND the
+                // key pinned for it (established out-of-band via SAS/TOFU or the
+                // QR/PAKE pairing flow). Anything else is a possible MITM.
+                let public_key_hex = hex::encode(&public_key);
+                let dialed_ok = self
+                    .selected_host
+                    .as_ref()
+                    .map(|h| h.device_id == device_id)
+                    .unwrap_or(false);
+                let pin_ok = known_peers::get(&self.known_peers_path, &device_id)
+                    .map(|pinned| pinned == public_key_hex)
+                    .unwrap_or(false);
+                let ok = verified && dialed_ok && pin_ok;
+                self.host_verified = Some(ok);
+                if ok {
+                    tracing::info!(%device_id, "host identity verified against the pinned key");
                 } else {
-                    // The host's DTLS-bound identity proof did not check out.
-                    self.error = Some(
-                        "host identity could not be verified — refusing (possible MITM)".into(),
-                    );
+                    let why = if !verified {
+                        "proof invalid"
+                    } else if !dialed_ok {
+                        "identity does not match the device you selected"
+                    } else {
+                        "key does not match the one pinned for this host"
+                    };
+                    self.error =
+                        Some(format!("host verification failed ({why}) — refusing (possible MITM)"));
                     self.leave_session();
                 }
             }

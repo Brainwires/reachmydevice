@@ -105,9 +105,13 @@ pub async fn pair_pake(
 
     // 3. Derive the shared key (bound to both identities).
     let key = pairing::pake_finish(exchange, &peer_msg, &our_pubkey, &peer_pubkey)?;
-    let our_tag = pairing::confirmation(&key);
 
-    // 4. Exchange confirmation tags to detect a wrong/mistyped code.
+    // 4. Exchange **directional** confirmation tags. We send the tag for our role
+    //    and require the peer's tag for *their* role — so an attacker who doesn't
+    //    hold the key cannot pass by reflecting the tag we sent.
+    let (our_role, peer_role) = pairing::role_labels(&our_pubkey, &peer_pubkey);
+    let our_tag = pairing::confirmation(&key, our_role);
+    let expected_peer_tag = pairing::confirmation(&key, peer_role);
     send(
         &mut sink,
         &PairMsg::Confirm {
@@ -122,8 +126,8 @@ pub async fn pair_pake(
         }
     };
     anyhow::ensure!(
-        peer_tag == our_tag,
-        "pairing confirmation failed — codes did not match"
+        pairing::tags_equal(&peer_tag, &expected_peer_tag),
+        "pairing confirmation failed — codes did not match (or a MITM attempt)"
     );
 
     Ok(PairedPeer {
