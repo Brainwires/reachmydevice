@@ -45,6 +45,10 @@ All notable changes to OpenReach. Format loosely follows Keep a Changelog.
   needs; verified to that permission boundary (`examples/audio_probe`). Transport
   is the reliable data channel for now (a dedicated Opus RTP track is the latency
   optimization). Off by default; enable with `OPENREACH_AUDIO=1` on host + viewer.
+  **Delivery is proven end-to-end** by `tests/audio_delivery.rs` — a synthetic
+  tone survives Opus encode → the real WebRTC/DTLS-SRTP data channel → Opus
+  decode between two live transports, the exact standard `pipeline.rs` sets for
+  video (the capture *device* and speaker are the on-device boundaries).
 - **Clipboard sync** (bidirectional, text): each side polls the OS clipboard and
   forwards changes over the control channel; an FNV-1a content hash breaks the
   echo loop. (`session/clipboard.rs`)
