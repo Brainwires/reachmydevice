@@ -103,6 +103,7 @@ fn relay_only_sees_ciphertext() {
         ice_servers: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         video_bitrate_bps: 1_000_000,
+        video_codec: Default::default(),
     })
     .unwrap();
     let viewer = Transport::spawn(TransportConfig {
@@ -110,6 +111,7 @@ fn relay_only_sees_ciphertext() {
         ice_servers: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         video_bitrate_bps: 1_000_000,
+        video_codec: Default::default(),
     })
     .unwrap();
 

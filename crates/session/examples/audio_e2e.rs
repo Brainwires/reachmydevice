@@ -38,12 +38,14 @@ fn main() -> anyhow::Result<()> {
         ice_servers: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         video_bitrate_bps: 1_500_000,
+        video_codec: Default::default(),
     })?;
     let viewer = Transport::spawn(TransportConfig {
         role: TransportRole::Viewer,
         ice_servers: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         video_bitrate_bps: 1_500_000,
+        video_codec: Default::default(),
     })?;
 
     let mut encoder = AudioEncoder::new(24_000)?;

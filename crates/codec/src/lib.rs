@@ -18,6 +18,8 @@ use bytes::Bytes;
 
 #[cfg(feature = "audio")]
 pub mod audio;
+#[cfg(feature = "av1")]
+pub mod av1;
 pub mod software;
 
 #[cfg(feature = "audio")]
@@ -25,11 +27,35 @@ pub use audio::{
     AudioDecoder, AudioEncoder, AUDIO_CHANNELS, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE,
 };
 
-/// Video codecs ReachMyDevice can negotiate. v1 wires H.264 only; VP8/VP9/H.265 are
-/// extension points behind the same traits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Video codecs ReachMyDevice can negotiate.
+///
+/// **H.264** (default) is symmetric: encode + decode both work natively
+/// ([`software`], via `openh264`) and browsers decode it in the WASM viewer.
+/// **AV1** is encode-only on the native side — a pure-Rust AV1 *encoder* (rav1e,
+/// behind `--features av1`) for browser viewers, which decode AV1 themselves.
+/// There is no pure-Rust AV1 *decoder* with a usable library API, so a native
+/// viewer cannot receive AV1 and always negotiates H.264.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum VideoCodec {
+    #[default]
     H264,
+    Av1,
+}
+
+impl VideoCodec {
+    /// Whether this codec can be *decoded* natively (in Rust). H.264 yes; AV1 is
+    /// browser-decode-only.
+    pub fn is_natively_decodable(self) -> bool {
+        matches!(self, VideoCodec::H264)
+    }
+
+    /// Short wire/label token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VideoCodec::H264 => "h264",
+            VideoCodec::Av1 => "av1",
+        }
+    }
 }
 
 /// Encoder settings. `width`/`height` must match the frames handed to
@@ -126,14 +152,33 @@ pub trait Decoder {
     fn decode(&mut self, annexb: &[u8]) -> anyhow::Result<Option<DecodedFrame>>;
 }
 
-/// Construct the default (software H.264) encoder.
-pub fn new_encoder(config: EncoderConfig) -> anyhow::Result<Box<dyn Encoder>> {
-    Ok(Box::new(software::OpenH264Encoder::new(config)?))
+/// Construct an encoder for `codec`.
+///
+/// H.264 → software openh264. AV1 → pure-Rust rav1e (requires `--features av1`).
+pub fn new_encoder(codec: VideoCodec, config: EncoderConfig) -> anyhow::Result<Box<dyn Encoder>> {
+    match codec {
+        VideoCodec::H264 => Ok(Box::new(software::OpenH264Encoder::new(config)?)),
+        #[cfg(feature = "av1")]
+        VideoCodec::Av1 => Ok(Box::new(av1::Rav1eEncoder::new(config)?)),
+        #[cfg(not(feature = "av1"))]
+        VideoCodec::Av1 => {
+            anyhow::bail!("AV1 encode requires building with `--features av1`")
+        }
+    }
 }
 
-/// Construct the default (software H.264) decoder.
-pub fn new_decoder() -> anyhow::Result<Box<dyn Decoder>> {
-    Ok(Box::new(software::OpenH264Decoder::new()?))
+/// Construct a decoder for `codec`.
+///
+/// Only H.264 is natively decodable. AV1 is browser-decode-only (no pure-Rust AV1
+/// decoder exists), so this errors for AV1 — a native viewer never negotiates it.
+pub fn new_decoder(codec: VideoCodec) -> anyhow::Result<Box<dyn Decoder>> {
+    match codec {
+        VideoCodec::H264 => Ok(Box::new(software::OpenH264Decoder::new()?)),
+        VideoCodec::Av1 => anyhow::bail!(
+            "AV1 decode is browser-only; native viewers use H.264 \
+             (no pure-Rust AV1 decoder with a library API exists)"
+        ),
+    }
 }
 
 /// Scan an Annex-B buffer for an IDR (NAL type 5) — i.e. a keyframe.

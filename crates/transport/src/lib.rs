@@ -33,6 +33,20 @@ pub enum TransportRole {
     Viewer,
 }
 
+/// Video codec for the RTP send track (host side).
+///
+/// A transport-local mirror of `rmd_codec::VideoCodec`, kept here so the
+/// transport doesn't link the (C) codec crate. The host registers the matching
+/// SDP codec; the fork's payloader is selected automatically from the MIME type.
+/// The viewer's receive path is always H.264 (AV1 has no pure-Rust decoder and is
+/// consumed only by the browser WASM viewer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum VideoCodec {
+    #[default]
+    H264,
+    Av1,
+}
+
 /// Transport setup.
 #[derive(Clone, Debug)]
 pub struct TransportConfig {
@@ -43,6 +57,9 @@ pub struct TransportConfig {
     pub bind_addr: SocketAddr,
     /// Initial encoder bitrate target (bits/sec); GCC adjusts from here.
     pub video_bitrate_bps: u32,
+    /// Codec the host advertises + packetizes for its send track. Ignored by the
+    /// viewer (which always receives H.264). Defaults to H.264.
+    pub video_codec: VideoCodec,
 }
 
 /// A signaling message exchanged with the peer (opaque to the relay).

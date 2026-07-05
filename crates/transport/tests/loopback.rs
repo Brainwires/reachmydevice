@@ -82,6 +82,7 @@ fn config(role: TransportRole) -> TransportConfig {
         ice_servers: vec![], // loopback host candidates only
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         video_bitrate_bps: 1_500_000,
+        video_codec: Default::default(),
     }
 }
 

@@ -122,6 +122,7 @@ fn connect_two_peers_through_real_rendezvous() {
         ice_servers: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         video_bitrate_bps: 1_000_000,
+        video_codec: Default::default(),
     })
     .unwrap();
     let viewer = Transport::spawn(TransportConfig {
@@ -129,6 +130,7 @@ fn connect_two_peers_through_real_rendezvous() {
         ice_servers: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         video_bitrate_bps: 1_000_000,
+        video_codec: Default::default(),
     })
     .unwrap();
 

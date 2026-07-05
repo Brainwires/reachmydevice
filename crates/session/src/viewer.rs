@@ -96,6 +96,9 @@ impl ViewerSession {
             ice_servers: cfg.ice_servers.clone(),
             bind_addr,
             video_bitrate_bps: 8_000_000, // viewer doesn't encode; nominal
+            // A native viewer always receives H.264 (AV1 has no pure-Rust decoder;
+            // the browser WASM viewer is the AV1 consumer).
+            video_codec: rmd_transport::VideoCodec::H264,
         })?;
         let sender = transport.sender();
 
@@ -108,7 +111,8 @@ impl ViewerSession {
             std::thread::Builder::new()
                 .name("rmd-decode".into())
                 .spawn(move || {
-                    let mut decoder = match codec::new_decoder() {
+                    // Native decode is H.264 only (AV1 is browser-decoded).
+                    let mut decoder = match codec::new_decoder(codec::VideoCodec::H264) {
                         Ok(d) => d,
                         Err(e) => {
                             tracing::error!(error=%e, "decoder init failed");

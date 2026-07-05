@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReachMyDevice — self-hostable remote desktop</title>
+<meta name="description" content="Open-source, self-hostable, end-to-end-encrypted remote desktop. Pure-Rust host, WebRTC transport, and a no-install browser viewer.">
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --border:#2a2f3a;
+    --text:#e6e8ec; --muted:#9aa3b2; --accent:#4f8cff; --accent2:#3a6fd8;
+    --ok:#39d98a; --radius:14px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f6f8; --panel:#fff; --panel2:#f0f2f5; --border:#e2e5ea;
+      --text:#1a1d23; --muted:#5b6472; }
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; }
+  body { font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    background:var(--bg); color:var(--text); -webkit-font-smoothing:antialiased; }
+  a { color:var(--accent); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  .wrap { max-width:960px; margin:0 auto; padding:0 20px; }
+
+  header { display:flex; align-items:center; gap:12px; padding:22px 0; }
+  .logo { min-width:40px; height:40px; border-radius:10px; padding:0 12px;
+    background:linear-gradient(135deg,var(--accent),#8a5cff); display:grid;
+    place-items:center; color:#fff; font-weight:700; font-size:15px; letter-spacing:1px; }
+  header h1 { font-size:19px; margin:0; font-weight:650; }
+  header nav { margin-left:auto; display:flex; gap:20px; align-items:center; font-size:15px; }
+
+  .hero { padding:56px 0 40px; text-align:center; }
+  .hero h2 { font-size:clamp(30px,5vw,46px); line-height:1.1; margin:0 0 18px;
+    letter-spacing:-0.02em; }
+  .hero p { font-size:clamp(16px,2.2vw,20px); color:var(--muted); max-width:640px;
+    margin:0 auto 30px; }
+  .cta { display:flex; gap:14px; justify-content:center; flex-wrap:wrap; }
+  .btn { display:inline-block; padding:13px 22px; border-radius:11px; font-weight:600;
+    font-size:15px; cursor:pointer; border:1px solid transparent; }
+  .btn.primary { background:var(--accent); color:#fff; }
+  .btn.primary:hover { background:var(--accent2); text-decoration:none; }
+  .btn.ghost { background:transparent; color:var(--text); border-color:var(--border); }
+  .btn.ghost:hover { border-color:var(--accent); text-decoration:none; }
+
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+    gap:16px; margin:44px 0; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius);
+    padding:22px; }
+  .card h3 { margin:0 0 8px; font-size:16px; }
+  .card p { margin:0; color:var(--muted); font-size:14.5px; }
+  .badge { display:inline-block; font-size:12px; color:var(--ok); border:1px solid var(--border);
+    background:var(--panel2); border-radius:20px; padding:2px 10px; margin-bottom:12px; }
+
+  .downloads { background:var(--panel); border:1px solid var(--border);
+    border-radius:var(--radius); padding:26px; margin:20px 0 44px; }
+  .downloads h3 { margin:0 0 6px; font-size:19px; }
+  .downloads .sub { color:var(--muted); font-size:14.5px; margin:0 0 18px; }
+  .dl-row { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }
+  .dl { display:block; background:var(--panel2); border:1px solid var(--border);
+    border-radius:11px; padding:16px; }
+  .dl:hover { border-color:var(--accent); text-decoration:none; }
+  .dl .os { font-weight:650; font-size:15px; }
+  .dl .arch { color:var(--muted); font-size:13px; margin-top:2px; }
+  pre { background:var(--panel2); border:1px solid var(--border); border-radius:10px;
+    padding:14px 16px; overflow-x:auto; font-size:13.5px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .note { color:var(--muted); font-size:13px; margin-top:10px; }
+
+  footer { border-top:1px solid var(--border); margin-top:40px; padding:26px 0 50px;
+    color:var(--muted); font-size:13.5px; display:flex; gap:18px; flex-wrap:wrap;
+    align-items:center; }
+  footer .sp { flex:1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">RMD</div>
+    <h1>ReachMyDevice</h1>
+    <nav>
+      <a href="https://github.com/Brainwires/reachmydevice">GitHub</a>
+      <a href="https://app.reachmy.dev/">Console</a>
+      <a class="btn primary" href="/app/">Launch web viewer</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <h2>Your devices, everywhere — privately.</h2>
+    <p>
+      Open-source, self-hostable remote desktop. The host is <strong>pure Rust</strong>,
+      media is <strong>end-to-end encrypted</strong> (DTLS-SRTP over WebRTC), and the
+      rendezvous only ever relays ciphertext. Connect from a native app or straight
+      from your browser — no install.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="/app/">Launch web viewer</a>
+      <a class="btn ghost" href="#downloads">Download the app</a>
+      <a class="btn ghost" href="https://app.reachmy.dev/">Open console</a>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <div class="badge">End-to-end encrypted</div>
+      <h3>The relay never sees your screen</h3>
+      <p>DTLS-SRTP secures video and the data channel peer-to-peer. The rendezvous
+        does signaling + device registry only — it can't decrypt your session.</p>
+    </div>
+    <div class="card">
+      <div class="badge">Pure-Rust host</div>
+      <h3>No C toolchain, easy to trust</h3>
+      <p>The host encodes with a pure-Rust pipeline (H.264 by default, optional AV1
+        via rav1e) and ships as a single signed binary. Verify it with minisign.</p>
+    </div>
+    <div class="card">
+      <div class="badge">Browser viewer</div>
+      <h3>Connect with zero install</h3>
+      <p>A WebAssembly + WebGPU viewer runs in Chromium browsers: the browser decodes
+        the H.264 track and renders it on the GPU. Just open a link.</p>
+    </div>
+    <div class="card">
+      <div class="badge">Self-hostable</div>
+      <h3>Run your own rendezvous</h3>
+      <p>One small binary (or Docker image) is the whole server. Point it at your own
+        domain and own your infrastructure end to end.</p>
+    </div>
+  </section>
+
+  <section class="downloads" id="downloads">
+    <h3>Download</h3>
+    <p class="sub">Pre-built, signed binaries. Windows users build from source (see the repo).</p>
+    <div class="dl-row">
+      <a class="dl" href="https://github.com/Brainwires/reachmydevice/releases/latest">
+        <div class="os">macOS · Apple Silicon</div><div class="arch">.dmg · arm64</div></a>
+      <a class="dl" href="https://github.com/Brainwires/reachmydevice/releases/latest">
+        <div class="os">macOS · Intel</div><div class="arch">.dmg · x86_64</div></a>
+      <a class="dl" href="https://github.com/Brainwires/reachmydevice/releases/latest">
+        <div class="os">Linux</div><div class="arch">.deb / tarball · x86_64</div></a>
+    </div>
+    <p class="note">Or install the host with one line:</p>
+    <pre>curl -fsSL https://reachmy.dev/install.sh | sh</pre>
+    <p class="note">
+      Every artifact is signed (minisign / rsign2) and listed with SHA-256 checksums on the
+      <a href="https://github.com/Brainwires/reachmydevice/releases/latest">releases page</a>.
+      Windows: <a href="https://github.com/Brainwires/reachmydevice#build-from-source">build from source</a>.
+    </p>
+  </section>
+
+  <footer>
+    <div class="logo" style="width:32px;height:32px;min-width:32px;font-size:12px;padding:0 8px">RMD</div>
+    <div>ReachMyDevice — self-hostable, end-to-end-encrypted remote desktop.</div>
+    <div class="sp"></div>
+    <a href="https://github.com/Brainwires/reachmydevice">Source</a>
+    <a href="https://app.reachmy.dev/">Console</a>
+    <a href="/app/">Web viewer</a>
+  </footer>
+</div>
+</body>
+</html>

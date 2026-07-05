@@ -26,6 +26,44 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Map the codec crate's `VideoCodec` to the transport's local mirror (the
+/// transport deliberately doesn't link the codec crate).
+pub(crate) fn to_transport_codec(c: codec::VideoCodec) -> rmd_transport::VideoCodec {
+    match c {
+        codec::VideoCodec::H264 => rmd_transport::VideoCodec::H264,
+        codec::VideoCodec::Av1 => rmd_transport::VideoCodec::Av1,
+    }
+}
+
+/// Map the codec crate's `VideoCodec` to the protocol enum (for the HelloAck
+/// announcement + the viewer's decode-capability check).
+pub(crate) fn to_proto_codec(c: codec::VideoCodec) -> proto::VideoCodec {
+    match c {
+        codec::VideoCodec::H264 => proto::VideoCodec::H264,
+        codec::VideoCodec::Av1 => proto::VideoCodec::Av1,
+    }
+}
+
+/// Reject a viewer that cannot decode the codec this host is sending. An empty
+/// `supported_video_codecs` means a MINOR<5 peer, which is H.264-only — so an
+/// AV1 host correctly refuses it, and an H.264 host accepts it.
+fn check_codec_compatible(h: &proto::Hello, host_codec: proto::VideoCodec) -> Result<(), String> {
+    let supported: Vec<i32> = if h.supported_video_codecs.is_empty() {
+        vec![proto::VideoCodec::H264 as i32]
+    } else {
+        h.supported_video_codecs.clone()
+    };
+    if supported.contains(&(host_codec as i32)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "viewer cannot decode the host's video codec ({:?}); \
+             it supports {:?}",
+            host_codec, supported
+        ))
+    }
+}
+
 /// Host configuration.
 #[derive(Clone, Debug)]
 pub struct HostConfig {
@@ -43,6 +81,10 @@ pub struct HostConfig {
     /// Stream host audio (Opus) to the viewer. Off by default — see `audio.rs`
     /// for the current source (default input device) and transport caveats.
     pub enable_audio: bool,
+    /// Video codec to encode with. Default H.264 (symmetric, browser-decodable).
+    /// `VideoCodec::Av1` uses the pure-Rust rav1e encoder (requires the codec
+    /// crate's `av1` feature) for browser viewers, which decode AV1 themselves.
+    pub video_codec: codec::VideoCodec,
     /// Require viewers to prove an authorized device identity before a session
     /// is accepted (unattended-access gate). When false, any viewer that
     /// completes the handshake is accepted (LAN/dev convenience).
@@ -68,6 +110,7 @@ impl Default for HostConfig {
             ice_servers: Vec::new(),
             bind_addr: "0.0.0.0:0".to_string(),
             enable_audio: false,
+            video_codec: codec::VideoCodec::default(),
             require_authorization: false,
             authorized_device_ids: Vec::new(),
             identity: None,
@@ -140,6 +183,7 @@ where
         ice_servers: cfg.ice_servers.clone(),
         bind_addr,
         video_bitrate_bps: cfg.bitrate_bps,
+        video_codec: to_transport_codec(cfg.video_codec),
     })?;
 
     // Force a keyframe on start and whenever a viewer (re)connects.
@@ -319,6 +363,7 @@ where
                     cfg.identity.as_deref(),
                     local_fingerprint.as_deref().unwrap_or_default().as_bytes(),
                     &cfg.device_name,
+                    to_proto_codec(cfg.video_codec),
                 );
             }
             TransportEvent::Video { .. } => {} // host does not receive video
@@ -408,10 +453,11 @@ fn spawn_encode_thread(
         fps: cfg.fps,
         bitrate_bps: cfg.bitrate_bps,
     };
+    let video_codec = cfg.video_codec;
     std::thread::Builder::new()
         .name("rmd-encode".into())
         .spawn(move || {
-            let mut encoder = match codec::new_encoder(enc_cfg) {
+            let mut encoder = match codec::new_encoder(video_codec, enc_cfg) {
                 Ok(e) => e,
                 Err(e) => {
                     tracing::error!(error=%e, "encoder init failed");
@@ -461,6 +507,7 @@ fn handle_control(
     host_identity: Option<&crate::identity::DeviceIdentity>,
     local_fingerprint: &[u8],
     device_name: &str,
+    host_codec: proto::VideoCodec,
 ) {
     let env = match proto::decode(bytes) {
         Ok(e) => e,
@@ -478,9 +525,11 @@ fn handle_control(
     }
     match payload {
         Payload::Hello(h) => {
-            // 1. Protocol compatibility, then 2. unattended-access authorization.
+            // 1. Protocol compatibility, 2. the viewer can decode our codec, then
+            // 3. unattended-access authorization.
             let decision = proto::check_compatibility(env.protocol_major)
                 .map_err(|e| format!("{e}"))
+                .and_then(|()| check_codec_compatible(&h, host_codec))
                 .and_then(|()| access.authorize(&h, channel_binding));
             match decision {
                 Ok(()) => {
@@ -492,8 +541,9 @@ fn handle_control(
                             0,
                             id.public_key_bytes().to_vec(),
                             id.access_proof(local_fingerprint).to_vec(),
+                            host_codec,
                         ),
-                        None => proto::hello_ack_ok(device_name, 0),
+                        None => proto::hello_ack_ok(device_name, 0, host_codec),
                     };
                     transport.send_data(Bytes::from(proto::encode(&ack)));
                     // Advertise the host's displays so the viewer can switch monitors.
@@ -545,7 +595,7 @@ fn log_file_event(ev: FileEvent) {
 
 #[cfg(test)]
 mod tests {
-    use super::AccessControl;
+    use super::{check_codec_compatible, AccessControl};
     use crate::identity::DeviceIdentity;
     use rmd_protocol as proto;
     use std::collections::HashSet;
@@ -615,5 +665,32 @@ mod tests {
             _ => unreachable!(),
         };
         assert!(access.authorize(&bare, b"").is_ok());
+    }
+
+    fn hello_with_codecs(codecs: Vec<i32>) -> proto::Hello {
+        let mut h = match proto::hello("v", proto::Role::Viewer, 0).payload.unwrap() {
+            proto::pb::envelope::Payload::Hello(h) => h,
+            _ => unreachable!(),
+        };
+        h.supported_video_codecs = codecs;
+        h
+    }
+
+    #[test]
+    fn codec_negotiation_matches_intersection() {
+        use proto::VideoCodec;
+        // A native viewer (H.264 only) ↔ H.264 host: accepted.
+        let native = hello_with_codecs(vec![VideoCodec::H264 as i32]);
+        assert!(check_codec_compatible(&native, VideoCodec::H264).is_ok());
+        // Native viewer ↔ AV1 host: rejected (it can't decode AV1).
+        assert!(check_codec_compatible(&native, VideoCodec::Av1).is_err());
+        // A browser viewer advertising [AV1, H264] ↔ AV1 host: accepted.
+        let browser = hello_with_codecs(vec![VideoCodec::Av1 as i32, VideoCodec::H264 as i32]);
+        assert!(check_codec_compatible(&browser, VideoCodec::Av1).is_ok());
+        assert!(check_codec_compatible(&browser, VideoCodec::H264).is_ok());
+        // A legacy MINOR<5 peer (empty list) is treated as H.264-only.
+        let legacy = hello_with_codecs(vec![]);
+        assert!(check_codec_compatible(&legacy, VideoCodec::H264).is_ok());
+        assert!(check_codec_compatible(&legacy, VideoCodec::Av1).is_err());
     }
 }

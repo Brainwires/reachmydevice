@@ -6,7 +6,7 @@
 //! screen, window, or OS permissions. (Screen capture, input injection, and
 //! on-glass rendering are validated separately on-device; see the Phase 1 report.)
 
-use rmd_codec::{new_decoder, new_encoder, EncoderConfig};
+use rmd_codec::{new_decoder, new_encoder, EncoderConfig, VideoCodec};
 use rmd_transport::{SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole};
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,7 @@ fn end_to_end_encode_transport_decode() {
         ice_servers: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         video_bitrate_bps: 1_500_000,
+        video_codec: Default::default(),
     })
     .expect("host transport");
     let viewer = Transport::spawn(TransportConfig {
@@ -51,17 +52,21 @@ fn end_to_end_encode_transport_decode() {
         ice_servers: Vec::new(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         video_bitrate_bps: 1_500_000,
+        video_codec: Default::default(),
     })
     .expect("viewer transport");
 
-    let mut encoder = new_encoder(EncoderConfig {
-        width: w,
-        height: h,
-        fps: 30,
-        bitrate_bps: 1_500_000,
-    })
+    let mut encoder = new_encoder(
+        VideoCodec::H264,
+        EncoderConfig {
+            width: w,
+            height: h,
+            fps: 30,
+            bitrate_bps: 1_500_000,
+        },
+    )
     .expect("encoder");
-    let mut decoder = new_decoder().expect("decoder");
+    let mut decoder = new_decoder(VideoCodec::H264).expect("decoder");
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut host_connected = false;

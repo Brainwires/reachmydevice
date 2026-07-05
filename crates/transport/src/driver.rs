@@ -22,7 +22,7 @@
 //! locally and hands it to the generic [`event_loop`], which is monomorphised
 //! once per role.
 
-use crate::{DriverCmd, SignalMsg, TransportConfig, TransportEvent, TransportRole};
+use crate::{DriverCmd, SignalMsg, TransportConfig, TransportEvent, TransportRole, VideoCodec};
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
@@ -40,7 +40,9 @@ use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::interceptor_registry::{
     configure_nack, configure_rtcp_reports, register_default_interceptors,
 };
-use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_H264};
+use rtc::peer_connection::configuration::media_engine::{
+    MediaEngine, MIME_TYPE_AV1, MIME_TYPE_H264,
+};
 use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
@@ -67,10 +69,14 @@ use rtc::stun::addr::MappedAddress;
 use rtc::stun::message::{Getter, Message, TransactionId, BINDING_REQUEST};
 use rtc::stun::xoraddr::XorMappedAddress;
 
-/// H.264 clock rate (Hz) — RTP timestamps advance at 90 kHz.
+/// Video RTP clock rate (Hz) — timestamps advance at 90 kHz for H.264 and AV1.
 const VIDEO_CLOCK_RATE: u32 = 90_000;
 /// H.264 dynamic payload type used on the wire.
-const VIDEO_PAYLOAD_TYPE: u8 = 102;
+const H264_PAYLOAD_TYPE: u8 = 102;
+/// AV1 dynamic payload type used on the wire.
+const AV1_PAYLOAD_TYPE: u8 = 41;
+/// AV1 `sdp_fmtp_line` (main profile, level auto).
+const AV1_FMTP: &str = "profile-id=0";
 /// Outbound RTP MTU (bytes) for the packetizer, leaving headroom under 1500.
 const RTP_OUTBOUND_MTU: usize = 1200;
 /// `SampleBuilder` reorder window, in RTP sequence numbers.
@@ -108,17 +114,25 @@ pub(crate) fn run(
     }
 }
 
-/// The H.264 codec parameters shared by the send track and the RTP packetizer.
-fn h264_codec_params() -> RTCRtpCodecParameters {
+/// The codec parameters shared by the send track and the RTP packetizer.
+///
+/// The fork's `RTCRtpCodec::payloader()` selects the payloader from the MIME
+/// type, so switching this to AV1 auto-selects `Av1Payloader` — no packetizer
+/// change needed. Both use the 90 kHz video clock.
+fn codec_params(codec: VideoCodec) -> RTCRtpCodecParameters {
+    let (mime_type, sdp_fmtp_line, payload_type) = match codec {
+        VideoCodec::H264 => (MIME_TYPE_H264, H264_FMTP, H264_PAYLOAD_TYPE),
+        VideoCodec::Av1 => (MIME_TYPE_AV1, AV1_FMTP, AV1_PAYLOAD_TYPE),
+    };
     RTCRtpCodecParameters {
         rtp_codec: RTCRtpCodec {
-            mime_type: MIME_TYPE_H264.to_owned(),
+            mime_type: mime_type.to_owned(),
             clock_rate: VIDEO_CLOCK_RATE,
             channels: 0,
-            sdp_fmtp_line: H264_FMTP.to_owned(),
+            sdp_fmtp_line: sdp_fmtp_line.to_owned(),
             rtcp_feedback: vec![],
         },
-        payload_type: VIDEO_PAYLOAD_TYPE,
+        payload_type,
     }
 }
 
@@ -374,12 +388,12 @@ fn run_host(
 ) -> anyhow::Result<()> {
     let (socket, local_addr) = bind_socket(config.bind_addr)?;
 
-    // Media engine: register the H.264 send codec.
+    // Media engine: register the configured send codec (H.264 or AV1).
     let mut media_engine = MediaEngine::default();
-    let codec = h264_codec_params();
+    let codec = codec_params(config.video_codec);
     media_engine
         .register_codec(codec.clone(), RtpCodecKind::Video)
-        .context("register H264 codec")?;
+        .context("register video codec")?;
 
     // Interceptor chain. NACK + RTCP reports come from the shared helpers; on top
     // of those we stack the congestion-control pair required for GCC:
@@ -456,12 +470,13 @@ fn run_host(
         )));
     }
 
-    // Packetizer for outbound Annex-B access units.
+    // Packetizer for outbound encoded frames. The payloader is selected from the
+    // codec's MIME type (H264Payloader or Av1Payloader) by the fork.
     let packetizer: Box<dyn Packetizer> = Box::new(new_packetizer(
         RTP_OUTBOUND_MTU,
-        VIDEO_PAYLOAD_TYPE,
+        codec.payload_type,
         video_ssrc,
-        codec.rtp_codec.payloader().context("h264 payloader")?,
+        codec.rtp_codec.payloader().context("video payloader")?,
         Box::new(rtc::rtp::sequence::new_random_sequencer()),
         VIDEO_CLOCK_RATE,
     ));
@@ -501,9 +516,11 @@ fn run_viewer(
 ) -> anyhow::Result<()> {
     let (socket, local_addr) = bind_socket(config.bind_addr)?;
 
+    // The viewer receives H.264 (its SampleBuilder uses the H.264 depacketizer;
+    // AV1 has no pure-Rust decoder and is consumed only by the browser viewer).
     let mut media_engine = MediaEngine::default();
     media_engine
-        .register_codec(h264_codec_params(), RtpCodecKind::Video)
+        .register_codec(codec_params(VideoCodec::H264), RtpCodecKind::Video)
         .context("register H264 codec")?;
 
     // Default interceptors give us NACK, RTCP reports, and — crucially for the

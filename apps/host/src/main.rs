@@ -105,6 +105,20 @@ fn read_token() -> anyhow::Result<zeroize::Zeroizing<String>> {
     )
 }
 
+/// Video codec from `RMD_CODEC` (`h264` default, or `av1`). AV1 is the pure-Rust
+/// rav1e encoder for browser viewers and requires the host built with
+/// `--features av1`; otherwise encoder init fails with a clear message.
+fn video_codec_from_env() -> rmd_codec::VideoCodec {
+    match std::env::var("RMD_CODEC")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "av1" => rmd_codec::VideoCodec::Av1,
+        _ => rmd_codec::VideoCodec::H264,
+    }
+}
+
 /// Build the signaling backend: rendezvous WebSocket if configured, else LAN relay.
 /// `peer` is the device to address (None for the host — it learns the viewer).
 fn build_signaling(peer: Option<String>) -> anyhow::Result<Box<dyn Signaling>> {
@@ -139,6 +153,7 @@ fn main() -> anyhow::Result<()> {
         ice_servers: ice_servers(),
         bind_addr: std::env::var("RMD_BIND").unwrap_or_else(|_| "0.0.0.0:0".to_string()),
         enable_audio: std::env::var("RMD_AUDIO").is_ok(),
+        video_codec: video_codec_from_env(),
         // Unattended access is enforced when explicitly requested or when an
         // authorized-keys list is present.
         require_authorization: std::env::var("RMD_REQUIRE_AUTH").is_ok()

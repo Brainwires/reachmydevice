@@ -21,7 +21,7 @@ pub use pb::{
     envelope, input_event, AudioFrame, Bye, ClipboardKind, ClipboardUpdate, DisplayDescriptor,
     DisplayList, Envelope, FileAck, FileCancel, FileChunk, FileComplete, FileOffer, Hello,
     HelloAck, InputEvent, KeyEvent, MouseButton, MouseMove, MouseScroll, Ping, Pong,
-    RequestKeyframe, Role, SelectDisplay, ViewOnly,
+    RequestKeyframe, Role, SelectDisplay, VideoCodec, ViewOnly,
 };
 
 /// Protocol major version. **Incompatible across mismatches** — bump only on a
@@ -31,8 +31,10 @@ pub const PROTOCOL_MAJOR: u32 = 1;
 /// MINOR 1 added clipboard/file-transfer/multi-monitor/session-control messages;
 /// MINOR 2 added the Opus `AudioFrame`;
 /// MINOR 3 replaced `FileComplete.sha256_prefix` (64-bit) with a full `sha256`;
-/// MINOR 4 added the host identity proof to `HelloAck` (first-connect MITM).
-pub const PROTOCOL_MINOR: u32 = 4;
+/// MINOR 4 added the host identity proof to `HelloAck` (first-connect MITM);
+/// MINOR 5 added video-codec negotiation (`Hello.supported_video_codecs`,
+///   `HelloAck.video_codec`) for the AV1 (browser) / H.264 split.
+pub const PROTOCOL_MINOR: u32 = 5;
 
 /// Errors from encoding/decoding or handshake validation.
 #[derive(Debug, thiserror::Error)]
@@ -94,6 +96,13 @@ pub fn check_compatibility(remote_major: u32) -> Result<(), ProtocolError> {
 
 // --- Convenience constructors ---------------------------------------------
 
+/// The decodable-codec list a native peer advertises. Native endpoints decode
+/// H.264 only (AV1 is browser-decode-only); the browser viewer builds its own
+/// `Hello` with `[AV1, H264]`.
+fn native_supported_codecs() -> Vec<i32> {
+    vec![VideoCodec::H264 as i32]
+}
+
 /// A `Hello` envelope announcing our identity/role (no access proof).
 pub fn hello(device_name: impl Into<String>, role: Role, features: u64) -> Envelope {
     envelope(pb::envelope::Payload::Hello(Hello {
@@ -102,6 +111,7 @@ pub fn hello(device_name: impl Into<String>, role: Role, features: u64) -> Envel
         features,
         public_key: Vec::new(),
         signature: Vec::new(),
+        supported_video_codecs: native_supported_codecs(),
     }))
 }
 
@@ -121,11 +131,17 @@ pub fn hello_authenticated(
         features,
         public_key,
         signature,
+        supported_video_codecs: native_supported_codecs(),
     }))
 }
 
-/// An accepting `HelloAck` (no host identity proof — LAN/dev).
-pub fn hello_ack_ok(device_name: impl Into<String>, features: u64) -> Envelope {
+/// An accepting `HelloAck` (no host identity proof — LAN/dev). `video_codec` is
+/// the codec the host is sending on the RTP track.
+pub fn hello_ack_ok(
+    device_name: impl Into<String>,
+    features: u64,
+    video_codec: VideoCodec,
+) -> Envelope {
     envelope(pb::envelope::Payload::HelloAck(HelloAck {
         accepted: true,
         reason: String::new(),
@@ -133,6 +149,7 @@ pub fn hello_ack_ok(device_name: impl Into<String>, features: u64) -> Envelope {
         features,
         host_public_key: Vec::new(),
         host_proof: Vec::new(),
+        video_codec: video_codec as i32,
     }))
 }
 
@@ -143,6 +160,7 @@ pub fn hello_ack_ok_signed(
     features: u64,
     host_public_key: Vec<u8>,
     host_proof: Vec<u8>,
+    video_codec: VideoCodec,
 ) -> Envelope {
     envelope(pb::envelope::Payload::HelloAck(HelloAck {
         accepted: true,
@@ -151,6 +169,7 @@ pub fn hello_ack_ok_signed(
         features,
         host_public_key,
         host_proof,
+        video_codec: video_codec as i32,
     }))
 }
 
@@ -163,6 +182,7 @@ pub fn hello_ack_reject(reason: impl Into<String>) -> Envelope {
         features: 0,
         host_public_key: Vec::new(),
         host_proof: Vec::new(),
+        video_codec: VideoCodec::Unspecified as i32,
     }))
 }
 

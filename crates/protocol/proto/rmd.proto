@@ -44,6 +44,15 @@ enum Role {
   ROLE_VIEWER = 2;
 }
 
+// Video codecs a peer can handle. H.264 is symmetric (encode+decode, and browser-
+// decodable); AV1 is host-encode / browser-decode only (no pure-Rust AV1 decoder),
+// so a native viewer never lists it. Added in MINOR 3.
+enum VideoCodec {
+  VIDEO_CODEC_UNSPECIFIED = 0;
+  VIDEO_CODEC_H264 = 1;
+  VIDEO_CODEC_AV1 = 2;
+}
+
 // First message each side sends after the data channel opens.
 message Hello {
   string device_name = 1;
@@ -56,6 +65,10 @@ message Hello {
   // its authorized list. Empty when the viewer has no identity (LAN/dev flows).
   bytes public_key = 4;
   bytes signature = 5;
+  // Video codecs this peer can DECODE, best-preferred first (added MINOR 3).
+  // A native viewer sends [H264]; a browser viewer sends e.g. [AV1, H264]. Empty
+  // is treated as [H264] for backward compatibility with MINOR<3 peers.
+  repeated VideoCodec supported_video_codecs = 6;
 }
 
 // Response to Hello. `accepted=false` carries a human-readable `reason`
@@ -73,6 +86,10 @@ message HelloAck {
   // identity (LAN/dev).
   bytes host_public_key = 5;
   bytes host_proof = 6;
+  // The codec the host is actually sending on the RTP track (added MINOR 3), so
+  // the viewer configures the right decoder / detects an undecodable mismatch.
+  // UNSPECIFIED is treated as H264 for MINOR<3 hosts.
+  VideoCodec video_codec = 7;
 }
 
 // --- Input (viewer -> host) ------------------------------------------------
