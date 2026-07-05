@@ -122,10 +122,15 @@
       body:JSON.stringify({username:user,password:passOf(),device_id,name,public_key:'browser',role})});
     if(!r.ok) throw new Error('request failed ('+r.status+')'); return (await r.json()).token;
   }
+  // This browser's own signaling identity: a viewer device whose token lets us
+  // authenticate to /ws. Reused across sessions (localStorage); auto re-created if
+  // the device is deleted. Hidden from the device list (it's not something to view).
+  const VTOK=()=>'rmd_vtok_'+user, VDEV=()=>'rmd_vdev_'+user;
   async function viewerToken(){
-    const key='rmd_vtok_'+user; let t=localStorage.getItem(key); if(t) return t;
-    t=await issueToken(crypto.randomUUID().replace(/-/g,''),'web viewer (browser)','viewer');
-    localStorage.setItem(key,t); return t;
+    let t=localStorage.getItem(VTOK()); if(t) return t;
+    const id=crypto.randomUUID().replace(/-/g,'');
+    t=await issueToken(id,'web viewer (this browser)','viewer');
+    localStorage.setItem(VTOK(),t); localStorage.setItem(VDEV(),id); return t;
   }
 
   function frame(inner){ el.innerHTML=`<div class="brand" style="margin-bottom:8px">
@@ -167,8 +172,14 @@
   // ---- Devices ----
   let panelHtml='';   // transient panel (register / command output) under the list
   async function renderDevices(){
-    let devices=[]; try{ devices=await listDevices(); }
+    let all=[]; try{ all=await listDevices(); }
     catch(r){ auth=null; sessionStorage.clear(); return go('#/login'); }
+    // Heal: if this browser's viewer device was deleted, drop the stale token so
+    // Connect re-mints one. Then hide our own identity from the list.
+    const myDev=localStorage.getItem(VDEV());
+    if(myDev && !all.some(d=>d.device_id===myDev)){ localStorage.removeItem(VTOK()); localStorage.removeItem(VDEV()); }
+    const devices=all.filter(d=>d.device_id!==myDev);
+    const hostCount=devices.filter(d=>['host','both'].includes((d.role||'').toLowerCase())).length;
     const rows=devices.map(d=>{
       const s=fmtSeen(d.last_seen), canView=['host','both'].includes((d.role||'').toLowerCase());
       return `<div class="dev"><div class="dot ${s.on?'on':''}"></div>
@@ -179,17 +190,28 @@
           ${canView?`<button class="iconbtn ghost" data-act="cmd" data-id="${esc(d.device_id)}" data-name="${esc(d.name)}" data-role="${esc(d.role)}" title="Show run command (issues a fresh token)">${ICON.cmd}</button>`:''}
           <button class="iconbtn danger" data-act="del" data-id="${esc(d.device_id)}" title="Remove this device">${ICON.del}</button>
         </div></div>`;}).join('');
+    // No host to view yet → onboarding call-to-action (download/install + register).
+    const onboarding = hostCount ? '' : `<div class="panel" style="text-align:center">
+      <div style="font-size:15px;font-weight:600">Add a device to view</div>
+      <div class="hint" style="max-width:430px;margin:6px auto 0">Install the ReachMyDevice host
+        (<span class="mono">rmdd</span>) on the machine you want to control, then register it here.</div>
+      <pre class="mono" style="text-align:left;margin-top:12px">curl -fsSL https://reachmy.dev/install.sh | sh</pre>
+      <div class="hint">…or <a href="https://github.com/Brainwires/reachmydevice/releases/latest" target="_blank" rel="noopener">download from the releases page ↗</a>
+        and put <span class="mono">rmdd</span> on your PATH.</div>
+      <div class="row" style="justify-content:center;margin-top:12px"><button id="addHostCta">+ Register your first host</button></div></div>`;
     frame(`
       <div class="head"><h1 style="margin:6px 0">Your devices</h1><div class="sp"></div>
         <span class="muted" style="font-size:12.5px">${esc(user)}</span></div>
       <p class="sub">Connect to a host that's running the agent, or manage your devices.</p>
-      <div class="devs">${rows||'<div class="muted" style="font-size:13px">No devices yet.</div>'}</div>
+      ${onboarding}
+      ${rows?`<div class="devs">${rows}</div>`:''}
       <div id="panel">${panelHtml}</div>
       <div class="row"><button id="addHost">+ Register a host</button>
         <button class="ghost sm" id="refresh">Refresh</button>
         <button class="ghost sm" id="signout" style="margin-left:auto">Sign out</button></div>`);
     el.querySelectorAll('[data-act]').forEach(b=>b.onclick=()=>deviceAction(b.dataset));
-    $('addHost').onclick=registerHost; $('refresh').onclick=()=>{panelHtml='';renderDevices();};
+    $('addHost').onclick=registerHost; if($('addHostCta'))$('addHostCta').onclick=registerHost;
+    $('refresh').onclick=()=>{panelHtml='';renderDevices();};
     $('signout').onclick=()=>{sessionStorage.clear(); localStorage.removeItem('rmd_vtok_'+user); auth=null; go('#/login');};
     wirePanel();
   }
