@@ -10,47 +10,48 @@
     --muted:#9aa3b2;--accent:#4f8cff;--accent2:#3a6fd8;--err:#ff5c5c;--ok:#39d98a;}
   *{box-sizing:border-box;}
   html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
-    font:14px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overflow:hidden;}
+    font:14px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
+  body{overflow:hidden;}
   a{color:var(--accent);text-decoration:none;} a:hover{text-decoration:underline;}
-  /* Logo badge sizes to its content (RMD) so the gradient always fits. */
   .logo{height:28px;border-radius:8px;padding:0 9px;display:inline-grid;place-items:center;
     background:linear-gradient(135deg,var(--accent),#8a5cff);color:#fff;font-weight:700;
     font-size:12px;letter-spacing:1.5px;line-height:1;}
   .brand{display:flex;align-items:center;gap:10px;}
   .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
   #bar{position:fixed;top:0;left:0;right:0;display:flex;gap:10px;align-items:center;
-    padding:8px 12px;background:rgba(15,17,21,.72);backdrop-filter:blur(6px);font-size:13px;
-    z-index:10;transition:opacity .25s;}
-  #bar.idle:not(:hover){opacity:.2;}
+    padding:8px 12px;background:rgba(15,17,21,.72);backdrop-filter:blur(6px);font-size:13px;z-index:10;
+    transition:opacity .25s;} #bar.idle:not(:hover){opacity:.2;}
   #barStatus{color:var(--muted);} #bar .sp{flex:1;}
 
-  #connect{position:fixed;inset:0;display:grid;place-items:center;padding:20px;overflow:auto;}
-  .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;
-    padding:24px;width:100%;max-width:440px;}
-  .card h1{font-size:20px;margin:14px 0 4px;}
-  .card .sub{color:var(--muted);margin:0 0 16px;font-size:13.5px;}
+  #connect{position:fixed;inset:0;overflow:auto;padding:20px;display:grid;place-items:start center;}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:24px;
+    width:100%;max-width:560px;margin:max(4vh,16px) 0;}
+  .card h1{font-size:20px;margin:14px 0 4px;} .card .sub{color:var(--muted);margin:0 0 16px;font-size:13.5px;}
   label{display:block;font-size:13px;color:var(--muted);margin:12px 0 5px;}
   input{width:100%;padding:11px 12px;border-radius:9px;border:1px solid var(--border);
     background:var(--panel2);color:var(--text);font-size:14px;}
-  button{padding:10px 15px;border-radius:9px;border:0;background:var(--accent);color:#fff;
-    font-weight:600;cursor:pointer;font-size:14px;} button:hover{background:var(--accent2);}
+  button{padding:9px 14px;border-radius:9px;border:0;background:var(--accent);color:#fff;
+    font-weight:600;cursor:pointer;font-size:13.5px;} button:hover{background:var(--accent2);}
   button.ghost{background:transparent;color:var(--text);border:1px solid var(--border);}
-  button.sm{padding:7px 11px;font-size:13px;}
-  button:disabled{opacity:.5;cursor:default;}
+  button.danger{background:transparent;color:var(--err);border:1px solid var(--border);}
+  button.sm{padding:6px 10px;font-size:12.5px;} button:disabled{opacity:.5;cursor:default;}
   .err{color:var(--err);font-size:13px;min-height:18px;margin-top:10px;}
   .row{display:flex;gap:10px;align-items:center;margin-top:16px;flex-wrap:wrap;}
-  .devs{display:flex;flex-direction:column;gap:8px;margin:4px 0;}
+  .head{display:flex;align-items:center;gap:10px;} .head .sp{flex:1;}
+  .devs{display:flex;flex-direction:column;gap:8px;margin:8px 0;}
   .dev{display:flex;align-items:center;gap:12px;background:var(--panel2);border:1px solid var(--border);
-    border-radius:10px;padding:12px 14px;}
+    border-radius:10px;padding:11px 13px;}
   .dev .meta{flex:1;min-width:0;} .dev .name{font-weight:600;}
   .dev .sub2{color:var(--muted);font-size:12px;margin-top:2px;overflow:hidden;
     text-overflow:ellipsis;white-space:nowrap;}
+  .dev .acts{display:flex;gap:6px;flex:0 0 auto;}
   .pill{font-size:11px;color:var(--muted);border:1px solid var(--border);border-radius:20px;padding:1px 8px;}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--border);flex:0 0 auto;}
-  .dot.on{background:var(--ok);}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--border);flex:0 0 auto;} .dot.on{background:var(--ok);}
   .muted{color:var(--muted);} .foot{color:var(--muted);font-size:12px;margin-top:18px;text-align:center;}
   pre{background:var(--panel2);border:1px solid var(--border);border-radius:9px;padding:12px;
     overflow:auto;font-size:12.5px;} .hint{color:var(--muted);font-size:12.5px;margin-top:8px;}
+  .panel{border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:14px;background:#12151c;}
+  .panel h2{margin:0 0 4px;font-size:15px;}
 
   #stage{position:fixed;inset:0;display:grid;place-items:center;background:#000;}
   #screen{max-width:100vw;max-height:100vh;width:auto;height:auto;background:#000;outline:none;}
@@ -68,54 +69,10 @@
   <div id="bar" class="idle hidden">
     <div class="brand"><div class="logo">RMD</div><strong>ReachMyDevice</strong></div>
     <span id="barStatus"></span><div class="sp"></div>
-    <a href="#" id="disconnect">Disconnect</a>
+    <a href="#" id="disconnect">← Devices</a>
   </div>
 
-  <div id="connect" class="hidden">
-    <div class="card">
-      <div class="brand"><div class="logo">RMD</div><strong style="font-size:15px">ReachMyDevice</strong></div>
-
-      <!-- Sign in / create account -->
-      <div id="loginView">
-        <h1 id="authTitle">Connect to a device</h1>
-        <p class="sub" id="authSub">Sign in with your ReachMyDevice account to pick a host to view.</p>
-        <label>Username</label><input id="u" autocomplete="username">
-        <label>Password</label><input id="p" type="password" autocomplete="current-password">
-        <div class="err" id="loginErr"></div>
-        <div class="row"><button id="loginBtn">Sign in</button>
-          <button class="ghost" id="toggleAuth" style="margin-left:auto"><span id="toggleTxt">Create account</span></button></div>
-      </div>
-
-      <!-- Host picker + inline host registration -->
-      <div id="pickView" class="hidden">
-        <h1>Choose a host</h1>
-        <p class="sub">Signed in as <b id="who"></b>. Pick a device running the host agent, or register a new one.</p>
-        <div class="devs" id="devs"></div>
-        <div id="noHosts" class="hidden muted" style="font-size:13px">No host devices yet — register one below, then run the host agent on that machine.</div>
-        <div class="err" id="pickErr"></div>
-        <div class="row">
-          <button id="addHost">+ Register a host</button>
-          <button class="ghost sm" id="refresh">Refresh</button>
-          <button class="ghost sm" id="signout" style="margin-left:auto">Sign out</button>
-        </div>
-
-        <!-- New-host result: install + run command -->
-        <div id="hostReg" class="hidden" style="margin-top:16px">
-          <div class="hint" style="margin-top:0"><b>1. Install the host</b> on the machine you want to view:</div>
-          <pre class="mono">curl -fsSL https://reachmy.dev/install.sh | sh</pre>
-          <div class="hint">…or <a href="https://github.com/Brainwires/reachmydevice/releases/latest" target="_blank" rel="noopener">download it from the releases page ↗</a>
-            and move <span class="mono">rmdd</span> onto your <b>PATH</b> (e.g. <span class="mono">/usr/local/bin</span>).
-            Grant Screen Recording + Accessibility on first launch.</div>
-          <div class="hint" style="margin-top:12px"><b>2. Run it</b> with this device's token:</div>
-          <pre id="runCmd" class="mono"></pre>
-          <div class="row" style="margin-top:8px"><button class="ghost sm" id="copyCmd">Copy command</button>
-            <span class="hint" style="margin:0">Then <b>Refresh</b> — it'll appear above with a green dot.</span></div>
-        </div>
-      </div>
-
-      <div class="foot">The browser decodes H.264; media is end-to-end encrypted (DTLS-SRTP).</div>
-    </div>
-  </div>
+  <div id="connect" class="hidden"><div class="card" id="cardBody"></div></div>
 
   <div id="stage" class="hidden"><video id="screen" playsinline autoplay muted tabindex="0"></video></div>
   <div id="overlay" class="hidden"><div class="box"><div class="spin"></div>
@@ -125,7 +82,7 @@
 (function(){
   const API=location.origin, q=new URLSearchParams(location.search), $=id=>document.getElementById(id);
 
-  // ---- Session mode: token+host present → WASM runs; show the stage/overlay ----
+  // ================= Session mode (?token&host present) =====================
   if(q.get('token') && q.get('host')){
     $('stage').classList.remove('hidden'); $('overlay').classList.remove('hidden'); $('bar').classList.remove('hidden');
     $('ovHint').textContent='host '+(q.get('host')||'').slice(0,12)+'…';
@@ -135,104 +92,145 @@
     const vid=$('screen');
     vid.addEventListener('playing',()=>$('overlay').classList.add('hidden'));
     vid.addEventListener('emptied',()=>$('overlay').classList.remove('hidden'));
-    $('disconnect').onclick=e=>{e.preventDefault(); location.href='/app/';};
+    // "← Devices": go back if there's history, else load the devices screen.
+    $('disconnect').onclick=e=>{e.preventDefault(); if(history.length>1) history.back(); else location.href='/app/#/devices';};
     return;
   }
 
-  // ---- Connect mode: sign in / create account → host picker -------------------
+  // ================= Connect app (device management) ========================
   $('connect').classList.remove('hidden');
-  let mode='login', auth=sessionStorage.getItem('rmd_va'), user=sessionStorage.getItem('rmd_vu')||'';
-  if($('u')) $('u').value=user;
+  let auth=sessionStorage.getItem('rmd_va'), user=sessionStorage.getItem('rmd_vu')||'', mode='login';
+  const el=$('cardBody');
   const basic=(u,p)=>'Basic '+btoa(u+':'+p);
-  const listDevices=a=>fetch(API+'/api/devices',{headers:{authorization:a}});
+  const passOf=()=>{ try{ return atob((auth||'').slice(6)).split(':').slice(1).join(':'); }catch(e){ return ''; } };
   const esc=s=>(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const fmtSeen=t=>{if(!t)return{txt:'never seen',on:false}; const d=new Date(t*1000),m=Math.round((Date.now()-d)/60000);
+  const wssBase=()=>(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws';
+  const runCmd=t=>`RMD_RENDEZVOUS_URL=${wssBase()} \\\n  RMD_TOKEN=${t} \\\n  rmdd`;
+  const fmtSeen=t=>{if(!t)return{txt:'never seen',on:false};const d=new Date(t*1000),m=Math.round((Date.now()-d)/60000);
     return{txt:m<2?'online now':m<60?m+' min ago':d.toLocaleString(),on:m<2};};
-
-  async function ensureViewerToken(u,p){
-    const key='rmd_vtok_'+u; let tok=localStorage.getItem(key); if(tok)return tok;
-    const r=await fetch(API+'/api/devices',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({username:u,password:p,device_id:crypto.randomUUID().replace(/-/g,''),
-        name:'web viewer (browser)',public_key:'browser',role:'viewer'})});
-    if(!r.ok) throw new Error('could not create a viewer token ('+r.status+')');
-    tok=(await r.json()).token; localStorage.setItem(key,tok); return tok;
+  async function api(path,opts){ return fetch(API+path,opts); }
+  async function listDevices(){ const r=await api('/api/devices',{headers:{authorization:auth}}); if(!r.ok) throw r; return r.json(); }
+  async function issueToken(device_id,name,role){
+    const r=await api('/api/devices',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({username:user,password:passOf(),device_id,name,public_key:'browser',role})});
+    if(!r.ok) throw new Error('request failed ('+r.status+')'); return (await r.json()).token;
+  }
+  async function viewerToken(){
+    const key='rmd_vtok_'+user; let t=localStorage.getItem(key); if(t) return t;
+    t=await issueToken(crypto.randomUUID().replace(/-/g,''),'web viewer (browser)','viewer');
+    localStorage.setItem(key,t); return t;
   }
 
-  function showPicker(devices){
-    $('loginView').classList.add('hidden'); $('pickView').classList.remove('hidden'); $('who').textContent=user;
-    const hosts=devices.filter(d=>['host','both'].includes((d.role||'').toLowerCase()));
-    const box=$('devs'); box.innerHTML=''; $('noHosts').classList.toggle('hidden',hosts.length>0);
-    for(const d of hosts){
-      const s=fmtSeen(d.last_seen), row=document.createElement('div'); row.className='dev';
-      row.innerHTML=`<div class="dot ${s.on?'on':''}"></div>
+  function frame(inner){ el.innerHTML=`<div class="brand" style="margin-bottom:8px">
+    <div class="logo">RMD</div><strong style="font-size:15px">ReachMyDevice</strong></div>${inner}
+    <div class="foot">The browser decodes H.264; media is end-to-end encrypted (DTLS-SRTP).</div>`; }
+
+  // ---- Login / create account ----
+  function renderLogin(){
+    frame(`
+      <h1>${mode==='login'?'Sign in':'Create an account'}</h1>
+      <p class="sub">${mode==='login'?'Sign in to view or manage your devices.':'Create a ReachMyDevice account.'}</p>
+      <label>Username</label><input id="u" autocomplete="username" value="${esc(user)}">
+      <label>Password</label><input id="p" type="password" autocomplete="current-password">
+      <div class="err" id="e"></div>
+      <div class="row"><button id="go">${mode==='login'?'Sign in':'Create account'}</button>
+        <button class="ghost" id="tog" style="margin-left:auto">${mode==='login'?'Create account':'Have an account? Sign in'}</button></div>`);
+    $('go').onclick=submitAuth; $('tog').onclick=()=>{mode=mode==='login'?'register':'login'; renderLogin();};
+    $('p').addEventListener('keydown',e=>{if(e.key==='Enter')submitAuth();});
+    if(!user)$('u').focus();
+  }
+  async function submitAuth(){
+    const u=$('u').value.trim(),p=$('p').value,e=$('e'); e.textContent='';
+    if(!u||!p){e.textContent='Enter your username and password.';return;}
+    $('go').disabled=true;
+    try{
+      if(mode==='register'){ const r=await api('/api/register',{method:'POST',headers:{'content-type':'application/json'},
+          body:JSON.stringify({username:u,password:p})});
+        if(!r.ok){e.textContent=(await r.json().catch(()=>({}))).error||('Registration failed ('+r.status+')');return;} }
+      auth=basic(u,p); const r=await api('/api/devices',{headers:{authorization:auth}});
+      if(r.status===401){e.textContent='Invalid username or password.';auth=null;return;}
+      if(!r.ok){e.textContent='Sign-in failed ('+r.status+').';auth=null;return;}
+      user=u; sessionStorage.setItem('rmd_va',auth); sessionStorage.setItem('rmd_vu',u);
+      try{ await viewerToken(); }catch(err){ e.textContent=String(err.message||err); return; }
+      go('#/devices');
+    }catch(err){ e.textContent='Network error: '+(err.message||err); }
+    finally{ $('go').disabled=false; }
+  }
+
+  // ---- Devices ----
+  let panelHtml='';   // transient panel (register / command output) under the list
+  async function renderDevices(){
+    let devices=[]; try{ devices=await listDevices(); }
+    catch(r){ auth=null; sessionStorage.clear(); return go('#/login'); }
+    const rows=devices.map(d=>{
+      const s=fmtSeen(d.last_seen), canView=['host','both'].includes((d.role||'').toLowerCase());
+      return `<div class="dev"><div class="dot ${s.on?'on':''}"></div>
         <div class="meta"><div class="name">${esc(d.name)} <span class="pill">${esc(d.role)}</span></div>
-        <div class="sub2 mono">${esc(d.device_id.slice(0,20))}… · ${esc(s.txt)}</div></div>`;
-      const btn=document.createElement('button'); btn.className='sm'; btn.textContent='Connect';
-      btn.onclick=()=>{const tok=localStorage.getItem('rmd_vtok_'+user);
-        if(!tok){$('pickErr').textContent='No viewer token — sign in again.';return;}
-        location.href=`/app/?token=${encodeURIComponent(tok)}&host=${encodeURIComponent(d.device_id)}`;};
-      row.appendChild(btn); box.appendChild(row);
+          <div class="sub2 mono">${esc(d.device_id.slice(0,22))}… · ${esc(s.txt)}</div></div>
+        <div class="acts">
+          ${canView?`<button class="sm" data-act="connect" data-id="${esc(d.device_id)}">Connect</button>`:''}
+          ${canView?`<button class="sm ghost" data-act="cmd" data-id="${esc(d.device_id)}" data-name="${esc(d.name)}" data-role="${esc(d.role)}">Command</button>`:''}
+          <button class="sm danger" data-act="del" data-id="${esc(d.device_id)}">Remove</button>
+        </div></div>`;}).join('');
+    frame(`
+      <div class="head"><h1 style="margin:6px 0">Your devices</h1><div class="sp"></div>
+        <span class="muted" style="font-size:12.5px">${esc(user)}</span></div>
+      <p class="sub">Connect to a host that's running the agent, or manage your devices.</p>
+      <div class="devs">${rows||'<div class="muted" style="font-size:13px">No devices yet.</div>'}</div>
+      <div id="panel">${panelHtml}</div>
+      <div class="row"><button id="addHost">+ Register a host</button>
+        <button class="ghost sm" id="refresh">Refresh</button>
+        <button class="ghost sm" id="signout" style="margin-left:auto">Sign out</button></div>`);
+    el.querySelectorAll('[data-act]').forEach(b=>b.onclick=()=>deviceAction(b.dataset));
+    $('addHost').onclick=registerHost; $('refresh').onclick=()=>{panelHtml='';renderDevices();};
+    $('signout').onclick=()=>{sessionStorage.clear(); localStorage.removeItem('rmd_vtok_'+user); auth=null; go('#/login');};
+    wirePanel();
+  }
+  function commandPanel(title,token){
+    panelHtml=`<div class="panel"><h2>${esc(title)}</h2>
+      <div class="hint" style="margin-top:2px"><b>1.</b> Install once:
+        <span class="mono">curl -fsSL https://reachmy.dev/install.sh | sh</span>
+        — or <a href="https://github.com/Brainwires/reachmydevice/releases/latest" target="_blank" rel="noopener">download ↗</a>
+        and put <span class="mono">rmdd</span> on your PATH.</div>
+      <div class="hint" style="margin:10px 0 4px"><b>2.</b> Run it (grant Screen Recording on first launch):</div>
+      <pre id="cmdPre" class="mono">${esc(runCmd(token))}</pre>
+      <div class="row" style="margin-top:8px"><button class="sm ghost" id="copyCmd">Copy command</button>
+        <button class="sm ghost" id="closeCmd">Close</button>
+        <span class="hint" style="margin:0">Then <b>Refresh</b> — it appears with a green dot.</span></div></div>`;
+  }
+  function wirePanel(){
+    const c=$('copyCmd'); if(c) c.onclick=()=>{navigator.clipboard.writeText($('cmdPre').textContent);c.textContent='Copied';};
+    const x=$('closeCmd'); if(x) x.onclick=()=>{panelHtml='';renderDevices();};
+  }
+  async function deviceAction(ds){
+    if(ds.act==='connect'){
+      try{ const t=await viewerToken(); location.href=`/app/?token=${encodeURIComponent(t)}&host=${encodeURIComponent(ds.id)}`; }
+      catch(e){ alert('Could not get a viewer token: '+(e.message||e)); }
+    } else if(ds.act==='cmd'){
+      try{ const t=await issueToken(ds.id,ds.name,ds.role); commandPanel('Run “'+ds.name+'” — new token issued',t); renderDevices(); }
+      catch(e){ alert('Failed to issue a token: '+(e.message||e)); }
+    } else if(ds.act==='del'){
+      if(!confirm('Remove this device? Any tokens it holds stop working.')) return;
+      const r=await api('/api/devices/'+encodeURIComponent(ds.id),{method:'DELETE',headers:{authorization:auth}});
+      if(!r.ok) alert('Remove failed ('+r.status+')'); panelHtml=''; renderDevices();
     }
   }
-  async function refresh(){ try{const r=await listDevices(auth); if(r.ok) showPicker(await r.json()); }catch(e){} }
-
   async function registerHost(){
     const name=prompt('Name this host (e.g. "Office Mac"):','my host'); if(name===null) return;
-    const p=$('p').value; // may be blank on a restored tab
-    $('pickErr').textContent='';
-    // POST requires the password; if we don't have it (restored session), ask.
-    let pass=p; if(!pass){ pass=prompt('Confirm your password to register a device:')||''; if(!pass) return; }
-    try{
-      const device_id=crypto.randomUUID().replace(/-/g,'');
-      const r=await fetch(API+'/api/devices',{method:'POST',headers:{'content-type':'application/json'},
-        body:JSON.stringify({username:user,password:pass,device_id,name:name||'host',public_key:'pending',role:'host'})});
-      if(!r.ok){ $('pickErr').textContent='Register failed ('+r.status+')'; return; }
-      const {token}=await r.json();
-      const wss=(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws';
-      $('runCmd').textContent=`RMD_RENDEZVOUS_URL=${wss} \\\n  RMD_TOKEN=${token} \\\n  rmdd`;
-      $('hostReg').classList.remove('hidden'); refresh();
-    }catch(e){ $('pickErr').textContent='Network error: '+(e.message||e); }
+    try{ const id=crypto.randomUUID().replace(/-/g,''); const t=await issueToken(id,name||'host','host');
+      commandPanel('New host “'+(name||'host')+'” registered',t); renderDevices();
+    }catch(e){ alert('Register failed: '+(e.message||e)); }
   }
 
-  async function submitAuth(){
-    const u=$('u').value.trim(), p=$('p').value, err=$('loginErr'); err.textContent='';
-    if(!u||!p){ err.textContent='Enter your username and password.'; return; }
-    $('loginBtn').disabled=true;
-    try{
-      if(mode==='register'){
-        const r=await fetch(API+'/api/register',{method:'POST',headers:{'content-type':'application/json'},
-          body:JSON.stringify({username:u,password:p})});
-        if(!r.ok){ err.textContent=(await r.json().catch(()=>({}))).error||('Registration failed ('+r.status+')'); return; }
-      }
-      const a=basic(u,p), r=await listDevices(a);
-      if(r.status===401){ err.textContent='Invalid username or password.'; return; }
-      if(!r.ok){ err.textContent='Sign-in failed ('+r.status+').'; return; }
-      user=u; auth=a; sessionStorage.setItem('rmd_va',a); sessionStorage.setItem('rmd_vu',u);
-      const devices=await r.json();
-      try{ await ensureViewerToken(u,p); }catch(e){ err.textContent=String(e.message||e); return; }
-      showPicker(devices);
-    }catch(e){ err.textContent='Network error: '+(e.message||e); }
-    finally{ $('loginBtn').disabled=false; }
+  // ---- Router (hash → screen; back button works) ----
+  function go(hash){ if(location.hash===hash) route(); else location.hash=hash; }
+  function route(){
+    if(!auth){ if(location.hash!=='#/login'){location.hash='#/login';return;} return renderLogin(); }
+    if(location.hash==='#/login'){ location.hash='#/devices'; return; }
+    renderDevices();
   }
-  function toggleAuth(){
-    mode=mode==='login'?'register':'login';
-    $('authTitle').textContent=mode==='login'?'Connect to a device':'Create an account';
-    $('authSub').textContent=mode==='login'?'Sign in with your ReachMyDevice account to pick a host to view.'
-      :'Create a ReachMyDevice account, then pick a host to view.';
-    $('loginBtn').textContent=mode==='login'?'Sign in':'Create account';
-    $('toggleTxt').textContent=mode==='login'?'Create account':'Have an account? Sign in';
-    $('loginErr').textContent='';
-  }
-
-  $('loginBtn').onclick=submitAuth;
-  $('toggleAuth').onclick=toggleAuth;
-  $('p').addEventListener('keydown',e=>{if(e.key==='Enter') submitAuth();});
-  $('addHost').onclick=registerHost;
-  $('refresh').onclick=refresh;
-  $('signout').onclick=()=>{ sessionStorage.clear(); location.reload(); };
-  $('copyCmd').onclick=()=>{ navigator.clipboard.writeText($('runCmd').textContent); $('copyCmd').textContent='Copied'; };
-
-  if(auth){ listDevices(auth).then(r=>r.ok?r.json():Promise.reject()).then(showPicker).catch(()=>sessionStorage.clear()); }
+  window.addEventListener('hashchange',route);
+  if(!location.hash) location.hash = auth?'#/devices':'#/login'; else route();
 })();
 </script>
 </body>
