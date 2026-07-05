@@ -7,11 +7,15 @@
 FROM rust:1-slim AS webviewer
 WORKDIR /build
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config \
+    && apt-get install -y --no-install-recommends pkg-config curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 # No protoc: rmd-protocol compiles its schema with the pure-Rust `protox`.
+# Use the prebuilt `trunk` binary (compiling it from source takes ~20 min);
+# trunk auto-fetches the matching wasm-bindgen + wasm-opt at build time.
+ARG TRUNK_VERSION=v0.21.14
 RUN rustup target add wasm32-unknown-unknown \
-    && cargo install trunk --locked --version ^0.21
+    && curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+       | tar -xz -C /usr/local/bin trunk
 COPY . .
 RUN cd apps/web-viewer \
     && trunk build --release --public-url /app/ --dist /build/web-viewer-dist
