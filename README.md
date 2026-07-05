@@ -80,6 +80,27 @@ the adversary model and residual risks.
 > Full formal certification (FIPS / NSA CSfC / Common Criteria) and hardware-backed keys (TPM / Secure
 > Enclave) are **out of scope** today; the design meets their technical prerequisites.
 
+## Install
+
+**Prebuilt (macOS Apple Silicon, Linux x86_64):**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Brainwires/openreach/main/deploy/release/install.sh | sh
+```
+
+Detects your OS/arch, downloads the latest **signed** release, verifies it
+(minisign if installed, otherwise SHA-256), and installs `openreach-viewer` +
+`openreach-host` into `~/.local/bin`. macOS builds are **unsigned** (no Apple
+Developer ID yet) — on first launch right-click → *Open*, or
+`xattr -d com.apple.quarantine ~/.local/bin/openreach-viewer`.
+
+Other download options on the [Releases](https://github.com/Brainwires/openreach/releases)
+page: a `.dmg` (viewer `.app`) for macOS, `.deb` packages (host + rendezvous) for
+Debian/Ubuntu, and plain `.tar.gz` archives — each with a minisign `.minisig`.
+
+**Build from source** (any platform, and the **only** route on **Windows** — see
+[Build](#build)). How releases are produced: [`deploy/release/README.md`](deploy/release/README.md).
+
 ## Quick start (self-hosted)
 
 1. **Deploy the rendezvous** on a VPS (`deploy/docker-compose.yml`, or the single container behind an

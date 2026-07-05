@@ -1,0 +1,12 @@
+# Keep the Docker build context small — the multi-GB target/ dir and local git
+# state must never be copied into `COPY . .` (deploy/Dockerfile).
+target
+**/target
+dist
+.git
+.github
+**/*.deb
+**/*.tar.gz
+# Release signing material must never enter an image layer.
+**/minisign.key
+.openreach

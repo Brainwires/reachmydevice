@@ -4,6 +4,21 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "OpenReach host agent — end-to-end-encrypted remote-desktop host (screen capture, input injection, WebRTC)."
+repository.workspace = true
+
+# Debian package: `cargo deb -p openreach-host`. Ships the binary + docs; the
+# systemd unit is a per-user service (see deploy/service/), installed by
+# deploy/install-host.sh rather than system-wide.
+[package.metadata.deb]
+maintainer = "Brainwires <viipe.com@gmail.com>"
+section = "net"
+priority = "optional"
+extended-description = """\
+OpenReach is a self-hostable, end-to-end-encrypted remote desktop / KVM-over-IP \
+system. This package installs the host agent (the machine you connect to). After \
+install, run `openreach-host` or set up the per-user service with \
+deploy/install-host.sh."""
 
 [[bin]]
 name = "openreach-host"

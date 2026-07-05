@@ -11,5 +11,10 @@
 /debug-bundles
 *.log
 
+# Release build output + signing material (NEVER commit the secret key)
+/dist
+*.minisig
+minisign.key
+
 # OS cruft
 .DS_Store

@@ -4,6 +4,19 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description = "OpenReach rendezvous — self-hostable signaling + device registry + web console (untrusted for session content)."
+repository.workspace = true
+
+# Debian package: `cargo deb -p openreach-rendezvous`. Ships the binary + docs;
+# most deployments run the container (deploy/Dockerfile) behind a TLS proxy.
+[package.metadata.deb]
+maintainer = "Brainwires <viipe.com@gmail.com>"
+section = "net"
+priority = "optional"
+extended-description = """\
+The OpenReach rendezvous server: WebSocket signaling relay, account/device \
+registry, stateless direct-pairing mailbox, and web console. It never sees \
+session plaintext (media + control are E2E-encrypted host to viewer)."""
 
 [[bin]]
 name = "openreach-rendezvous"
