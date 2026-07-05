@@ -95,12 +95,30 @@ struct Session {
 pub fn start() {
     console_error_panic_hook::set_once();
     let _ = tracing_wasm::try_set_as_global_default();
+    // Only run a session when the connect params are present. Otherwise the page's
+    // connect screen (login + host picker, in index.html) is shown and it will
+    // reload here with `?token=&host=` once the user chooses a host.
+    if !has_session_params() {
+        return;
+    }
     spawn_local(async {
         if let Err(e) = run().await {
             web_sys::console::error_1(&format!("[rmd-web-viewer] fatal: {e}").into());
             show_error(&e);
         }
     });
+}
+
+/// Whether the URL carries both `token` and `host` (i.e. a session to run).
+fn has_session_params() -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .and_then(|s| web_sys::UrlSearchParams::new_with_str(&s).ok())
+        .map(|p| {
+            p.get("token").filter(|t| !t.is_empty()).is_some()
+                && p.get("host").filter(|h| !h.is_empty()).is_some()
+        })
+        .unwrap_or(false)
 }
 
 async fn run() -> Result<(), String> {
