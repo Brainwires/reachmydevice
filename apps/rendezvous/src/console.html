@@ -196,7 +196,8 @@ async function registerDevice(){
   document.getElementById('tokenVal').value=token;
   const host = location.host;
   document.getElementById('onboardCmd').textContent =
-    `RMD_RENDEZVOUS_URL=wss://${host}/ws \\\n  RMD_TOKEN=${token} \\\n  cargo run --release -p rmd-host`;
+    `# Install the host once:  curl -fsSL https://reachmy.dev/install.sh | sh\n` +
+    `RMD_RENDEZVOUS_URL=wss://${host}/ws \\\n  RMD_TOKEN=${token} \\\n  rmdd`;
   toast("Device registered");
   refresh();
 }

@@ -15,7 +15,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/rmd"
 BIN_DIR="$HOME/.local/bin"
-BIN_NAME="rmd-host"
+BIN_NAME="rmdd"   # the host daemon binary (package rmd-host builds `rmdd`)
 
 log() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
@@ -57,7 +57,7 @@ case "$(uname -s)" in
   Linux)
     UNIT_DIR="$HOME/.config/systemd/user"
     mkdir -p "$UNIT_DIR"
-    sed "s|/usr/local/bin/rmd-host|$BIN_DIR/$BIN_NAME|g" \
+    sed "s|%h/.local/bin/rmdd|$BIN_DIR/$BIN_NAME|g" \
       "$REPO_ROOT/deploy/service/rmd-host.service" > "$UNIT_DIR/rmd-host.service"
     log "Installed systemd user unit → $UNIT_DIR/rmd-host.service"
     if command -v systemctl >/dev/null; then
@@ -74,7 +74,7 @@ EOF
   Darwin)
     AGENT_DIR="$HOME/Library/LaunchAgents"
     mkdir -p "$AGENT_DIR"
-    sed "s|/usr/local/bin/rmd-host|$BIN_DIR/$BIN_NAME|g" \
+    sed "s|/usr/local/bin/rmdd|$BIN_DIR/$BIN_NAME|g" \
       "$REPO_ROOT/deploy/service/com.brainwires.rmd-host.plist" \
       > "$AGENT_DIR/com.brainwires.rmd-host.plist"
     log "Installed launchd agent → $AGENT_DIR/com.brainwires.rmd-host.plist"

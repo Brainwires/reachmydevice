@@ -7,8 +7,9 @@ edition.workspace = true
 rust-version = "1.92"
 license.workspace = true
 
+# The client/viewer is the main command users run → `rmd`. (Package stays rmd-viewer.)
 [[bin]]
-name = "rmd-viewer"
+name = "rmd"
 path = "src/main.rs"
 
 [dependencies]

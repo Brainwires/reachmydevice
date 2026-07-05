@@ -125,17 +125,27 @@ SRC="rmd-$VER-$SLUG/bin"
 [ -d "$SRC" ] || die "unexpected archive layout"
 mkdir -p "$BINDIR"
 installed=""
-for b in rmd-host rmd-viewer rmd-rendezvous; do
-  if [ -f "$SRC/$b" ]; then install -m 0755 "$SRC/$b" "$BINDIR/$b"; installed="$installed $b"; fi
-done
+# Install under the Unix-style command names: the host daemon is `rmdd`, the
+# client/viewer is `rmd`. Accept both the new archive layout (bin/rmdd, bin/rmd)
+# and the pre-rename one (bin/rmd-host, bin/rmd-viewer).
+install_pref() { # destname newsrc oldsrc
+  if   [ -f "$SRC/$2" ]; then install -m 0755 "$SRC/$2" "$BINDIR/$1"; installed="$installed $1"
+  elif [ -f "$SRC/$3" ]; then install -m 0755 "$SRC/$3" "$BINDIR/$1"; installed="$installed $1"; fi
+}
+install_pref rmdd rmdd rmd-host
+install_pref rmd  rmd  rmd-viewer
+if [ -f "$SRC/rmd-rendezvous" ]; then
+  install -m 0755 "$SRC/rmd-rendezvous" "$BINDIR/rmd-rendezvous"; installed="$installed rmd-rendezvous"
+fi
 say "Installed:$installed -> $BINDIR"
 
 case ":$PATH:" in
-  *":$BINDIR:"*) : ;;
-  *) warn "$BINDIR is not on your PATH. Add:  export PATH=\"$BINDIR:\$PATH\"" ;;
+  *":$BINDIR:"*) say "$BINDIR is on your PATH." ;;
+  *) warn "$BINDIR is not on your PATH — add it so you can run \`rmd\`/\`rmdd\` directly:
+      export PATH=\"$BINDIR:\$PATH\"   (add to ~/.zshrc or ~/.bashrc to persist)" ;;
 esac
 
 if [ "$PLAT" = macos ]; then
-  warn "Unsigned build: if macOS blocks a binary, run:  xattr -d com.apple.quarantine $BINDIR/rmd-viewer"
+  warn "Unsigned build: if macOS blocks a binary, run:  xattr -d com.apple.quarantine $BINDIR/rmd $BINDIR/rmdd"
 fi
-say "Done. Try:  rmd-viewer   (or rmd-host on the machine to control)"
+say "Done. Run  rmd  to view a device — or  rmdd  on the machine you want to control."

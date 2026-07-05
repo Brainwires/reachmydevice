@@ -23,7 +23,7 @@ Type=simple
 EnvironmentFile=%h/.config/rmd/host.env
 # DISPLAY must point at the user's X server for capture + input injection.
 Environment=DISPLAY=:0
-ExecStart=%h/.local/bin/rmd-host
+ExecStart=%h/.local/bin/rmdd
 Restart=on-failure
 RestartSec=3
 # Hardening (relaxed enough to allow X access):

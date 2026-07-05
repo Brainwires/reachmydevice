@@ -36,7 +36,9 @@ case "$ARCH" in
   *) die "unsupported RMD_MAC_ARCH: $ARCH (use arm64 or x86_64)" ;;
 esac
 VERSION="$(resolve_version "${1:-}")"
-BINS=(rmd-host rmd-viewer)
+BINS=(rmd-host rmd-viewer)   # cargo package names
+# Unix-style command name each package's binary is built + shipped as.
+binname() { case "$1" in rmd-host) echo rmdd ;; rmd-viewer) echo rmd ;; *) echo "$1" ;; esac; }
 
 log "ReachMyDevice macOS release build — version $VERSION, target $TARGET"
 cd "$REPO_ROOT"
@@ -56,15 +58,16 @@ BINDIR="target/$TARGET/release"
 
 # --- 2. Raw binaries -------------------------------------------------------
 for b in "${BINS[@]}"; do
-  [[ -x "$BINDIR/$b" ]] || die "missing built binary: $BINDIR/$b"
-  cp "$BINDIR/$b" "$DIST_DIR/$b-macos-$ARCH"
+  bn="$(binname "$b")"
+  [[ -x "$BINDIR/$bn" ]] || die "missing built binary: $BINDIR/$bn"
+  cp "$BINDIR/$bn" "$DIST_DIR/$bn-macos-$ARCH"
 done
 
 # --- 3. Tarball ------------------------------------------------------------
 STAGE="$(mktemp -d)"
 PKG="rmd-$VERSION-macos-$ARCH"
 mkdir -p "$STAGE/$PKG/bin"
-for b in "${BINS[@]}"; do install -m 0755 "$BINDIR/$b" "$STAGE/$PKG/bin/$b"; done
+for b in "${BINS[@]}"; do bn="$(binname "$b")"; install -m 0755 "$BINDIR/$bn" "$STAGE/$PKG/bin/$bn"; done
 install -m 0755 deploy/install-host.sh "$STAGE/$PKG/install-host.sh"
 for f in README.md LICENSE-MIT LICENSE-APACHE CHANGELOG.md; do
   [[ -f "$f" ]] && cp "$f" "$STAGE/$PKG/" || true
@@ -77,7 +80,7 @@ log "Tarball: $PKG.tar.gz"
 APPNAME="ReachMyDevice Viewer"
 APPDIR="$(mktemp -d)/$APPNAME.app"
 mkdir -p "$APPDIR/Contents/MacOS" "$APPDIR/Contents/Resources"
-install -m 0755 "$BINDIR/rmd-viewer" "$APPDIR/Contents/MacOS/rmd-viewer"
+install -m 0755 "$BINDIR/rmd" "$APPDIR/Contents/MacOS/rmd"
 
 ICON_TAG=""
 if [[ -f "$REL_DIR/assets/ReachMyDevice.icns" ]]; then
@@ -93,7 +96,7 @@ cat > "$APPDIR/Contents/Info.plist" <<PLIST
   <key>CFBundleName</key><string>ReachMyDevice Viewer</string>
   <key>CFBundleDisplayName</key><string>ReachMyDevice Viewer</string>
   <key>CFBundleIdentifier</key><string>dev.reachmy.viewer</string>
-  <key>CFBundleExecutable</key><string>rmd-viewer</string>
+  <key>CFBundleExecutable</key><string>rmd</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundlePackageType</key><string>APPL</string>

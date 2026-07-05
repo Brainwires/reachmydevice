@@ -92,10 +92,10 @@ curl -fsSL https://raw.githubusercontent.com/Brainwires/reachmydevice/main/deplo
 ```
 
 Detects your OS/arch, downloads the latest **signed** release, verifies it
-(minisign if installed, otherwise SHA-256), and installs `rmd-viewer` +
-`rmd-host` into `~/.local/bin`. macOS builds are **unsigned** (no Apple
-Developer ID yet) — on first launch right-click → *Open*, or
-`xattr -d com.apple.quarantine ~/.local/bin/rmd-viewer`.
+(minisign if installed, otherwise SHA-256), and installs the client **`rmd`** +
+the host daemon **`rmdd`** into `~/.local/bin` (add it to your `PATH`). macOS
+builds are **unsigned** (no Apple Developer ID yet) — on first launch right-click →
+*Open*, or `xattr -d com.apple.quarantine ~/.local/bin/rmd`.
 
 Other download options on the [Releases](https://github.com/Brainwires/reachmydevice/releases)
 page: a `.dmg` (viewer `.app`) for macOS, `.deb` packages (host + rendezvous) for
@@ -111,12 +111,13 @@ Debian/Ubuntu, and plain `.tar.gz` archives — each with a minisign `.minisig`.
    console at `https://<your-domain>/`.
 2. **Create an account** in the console (or `POST /api/register`), then register your host + viewer devices
    to get bearer tokens.
-3. **Run the host** on the machine to control:
+3. **Run the host daemon** (`rmdd`) on the machine to control:
    ```sh
    RMD_RENDEZVOUS_URL=wss://<domain>/ws RMD_TOKEN=<host-token> \
-     RMD_ICE=stun:stun.l.google.com:19302  cargo run --release -p rmd-host
+     RMD_ICE=stun:stun.l.google.com:19302  rmdd
    ```
-4. **Run the viewer** anywhere and pick the host from the device list, or **pair directly with no account**
+   (From a source checkout instead: `cargo run --release -p rmd-host`.)
+4. **Run the viewer** (`rmd`) anywhere and pick the host from the device list, or **pair directly with no account**
    from the viewer's *Pair a device* screen (share a one-time code — QR/PAKE). The env-var path also works
    for scripted/headless viewers.
 

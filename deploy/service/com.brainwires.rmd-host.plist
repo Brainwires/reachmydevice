@@ -13,7 +13,7 @@
 <dict>
   <key>Label</key><string>com.brainwires.rmd-host</string>
   <key>ProgramArguments</key>
-  <array><string>/usr/local/bin/rmd-host</string></array>
+  <array><string>/usr/local/bin/rmdd</string></array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>RMD_RENDEZVOUS_URL</key><string>wss://app.reachmy.dev/ws</string>

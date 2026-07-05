@@ -20,8 +20,9 @@ system. This package installs the host agent (the machine you connect to). After
 install, run `rmd-host` or set up the per-user service with \
 deploy/install-host.sh."""
 
+# The host agent is a daemon → Unix-style name `rmdd`. (Package stays rmd-host.)
 [[bin]]
-name = "rmd-host"
+name = "rmdd"
 path = "src/main.rs"
 
 [dependencies]
