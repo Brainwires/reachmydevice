@@ -4,9 +4,11 @@ name: Release
 # to a GitHub Release. Packaging into native installers (deb/rpm/AppImage/DMG/MSI)
 # and code signing are left as clearly-marked hooks (signing is out of scope for
 # v1 but the steps exist so they can be enabled with secrets later).
+# Manual-dispatch only. The authoritative release artifacts are built + SIGNED by
+# the local pipeline (deploy/release/build-{macos,linux}.sh on a Mac + the Linux
+# build host); this CI job is an unsigned fallback builder and must NOT race the
+# signed uploads on a tag push (doing so clobbered signed macOS binaries).
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
