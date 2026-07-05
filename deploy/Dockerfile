@@ -13,11 +13,14 @@ RUN apt-get update \
 # Use the prebuilt `trunk` binary (compiling it from source takes ~20 min);
 # trunk auto-fetches the matching wasm-bindgen + wasm-opt at build time.
 ARG TRUNK_VERSION=v0.21.14
-RUN rustup target add wasm32-unknown-unknown \
-    && curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+RUN curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
        | tar -xz -C /usr/local/bin trunk
 COPY . .
+# Add the wasm target AFTER the source is present, so it lands on the toolchain
+# pinned by rust-toolchain.toml (which rustup auto-installs) rather than the
+# image default — otherwise the build can't find `std` for wasm32.
 RUN cd apps/web-viewer \
+    && rustup target add wasm32-unknown-unknown \
     && trunk build --release --public-url /app/ --dist /build/web-viewer-dist
 
 # --- Rendezvous server -----------------------------------------------------
