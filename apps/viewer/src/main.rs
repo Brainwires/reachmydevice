@@ -54,7 +54,7 @@ const PING_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Default rendezvous server shown in the login form (overridable in the field
 /// or via `RMD_RENDEZVOUS_URL`).
-const DEFAULT_SERVER: &str = "https://openreach.brainwires.dev";
+const DEFAULT_SERVER: &str = "https://app.reachmy.dev";
 
 fn main() {
     tracing_subscriber::fmt()
@@ -1437,7 +1437,7 @@ fn quick_connect_signaling() -> Option<anyhow::Result<Box<dyn Signaling>>> {
         std::env::var("RMD_PEER_DEVICE_ID"),
     ) {
         let ws = std::env::var("RMD_RENDEZVOUS_URL")
-            .unwrap_or_else(|_| "wss://openreach.brainwires.dev/ws".into());
+            .unwrap_or_else(|_| "wss://app.reachmy.dev/ws".into());
         tracing::info!(%ws, %peer, "quick-connect via rendezvous");
         return Some(
             RendezvousClient::connect(&ws, &token, Some(peer))

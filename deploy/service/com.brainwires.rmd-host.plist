@@ -16,7 +16,7 @@
   <array><string>/usr/local/bin/rmd-host</string></array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>RMD_RENDEZVOUS_URL</key><string>wss://openreach.brainwires.dev/ws</string>
+    <key>RMD_RENDEZVOUS_URL</key><string>wss://app.reachmy.dev/ws</string>
     <key>RMD_TOKEN</key><string>replace-with-device-token</string>
     <key>RMD_ICE</key><string>stun:stun.l.google.com:19302</string>
     <key>RMD_NAME</key><string>my-mac</string>

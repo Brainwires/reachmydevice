@@ -58,7 +58,7 @@ pub struct AccountClient {
 
 impl AccountClient {
     /// Build a client for a rendezvous server at `base_url`
-    /// (e.g. `https://openreach.brainwires.dev`). The scheme is preserved; a
+    /// (e.g. `https://app.reachmy.dev`). The scheme is preserved; a
     /// trailing slash, if present, is trimmed.
     pub fn new(base_url: &str) -> Self {
         Self {

@@ -4,7 +4,7 @@
 //! a signaling message addressed to the other, and confirms it is relayed.
 //! Proves the WSS path (incl. any proxy) and the server's relay end-to-end.
 //!
-//! Env: `RMD_RZV_URL` (e.g. `wss://openreach.brainwires.dev/ws`),
+//! Env: `RMD_RZV_URL` (e.g. `wss://app.reachmy.dev/ws`),
 //! `RMD_TOK_A`, `RMD_TOK_B`, `RMD_DEV_B` (device id of B).
 
 use rmd_session::rendezvous::RendezvousClient;
