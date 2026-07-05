@@ -46,3 +46,6 @@ winit = { version = "0.30", optional = true }
 [features]
 # Build the desktop tray companion (`RMD_TRAY=1` then activates it).
 tray = ["dep:tray-icon", "dep:winit"]
+# Host->viewer Opus audio (pulls the C libopus codec). Off by default so the
+# stock build is pure Rust; `RMD_AUDIO=1` then activates it at runtime.
+audio = ["rmd-session/audio"]

@@ -38,3 +38,9 @@ bytemuck = { version = "1", features = ["derive"] }
 egui = "0.35"
 egui-winit = "0.35"
 egui-wgpu = "0.35"
+
+[features]
+default = []
+# Play host audio (pulls the C libopus codec via rmd-session). Off by default so
+# the stock build is pure Rust; `RMD_AUDIO=1` then activates it at runtime.
+audio = ["rmd-session/audio"]

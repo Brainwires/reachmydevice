@@ -43,7 +43,11 @@ pub async fn pair_pake(
     device_name: &str,
 ) -> anyhow::Result<PairedPeer> {
     let (channel, secret) = pairing::split_code(code)?;
-    let url = format!("{}/pair?code={}", relay_ws_base.trim_end_matches('/'), channel);
+    let url = format!(
+        "{}/pair?code={}",
+        relay_ws_base.trim_end_matches('/'),
+        channel
+    );
     let (ws, _) = tokio_tungstenite::connect_async(&url).await?;
     let (mut sink, mut stream) = ws.split();
 

@@ -34,8 +34,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let addr =
-        std::env::var("RMD_SIGNAL_ADDR").unwrap_or_else(|_| "0.0.0.0:9000".to_string());
+    let addr = std::env::var("RMD_SIGNAL_ADDR").unwrap_or_else(|_| "0.0.0.0:9000".to_string());
     let listener = TcpListener::bind(&addr).await?;
     tracing::info!(%addr, "signal-dev relay listening");
 

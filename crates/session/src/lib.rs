@@ -9,6 +9,7 @@
 //! - [`identity`] — device keypair identity + TOFU trust store.
 
 pub mod account;
+#[cfg(feature = "audio")]
 pub mod audio;
 pub mod clipboard;
 pub mod filexfer;

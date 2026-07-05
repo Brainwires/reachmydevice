@@ -73,10 +73,7 @@ pub enum FileEvent {
         path: Option<PathBuf>,
     },
     /// A transfer failed or was cancelled.
-    Failed {
-        transfer_id: String,
-        reason: String,
-    },
+    Failed { transfer_id: String, reason: String },
 }
 
 /// Shared state between the manager and an outbound send thread.
@@ -503,7 +500,9 @@ mod tests {
     use std::sync::mpsc;
 
     fn payload(len: usize) -> Vec<u8> {
-        (0..len as u32).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8).collect()
+        (0..len as u32)
+            .map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8)
+            .collect()
     }
 
     /// Drive a full send→receive between two managers wired to each other by a
@@ -663,7 +662,11 @@ mod tests {
             }
         }
         let path = final_path.expect("resume did not complete");
-        assert_eq!(std::fs::read(&path).unwrap(), content, "resumed content mismatch");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            content,
+            "resumed content mismatch"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

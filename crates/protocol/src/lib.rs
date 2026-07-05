@@ -245,7 +245,6 @@ pub fn file_cancel(transfer_id: impl Into<String>, reason: impl Into<String>) ->
     }))
 }
 
-
 /// Request an IDR/keyframe from the host.
 pub fn request_keyframe() -> Envelope {
     envelope(pb::envelope::Payload::RequestKeyframe(RequestKeyframe {}))

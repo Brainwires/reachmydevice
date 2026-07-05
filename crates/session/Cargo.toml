@@ -5,6 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Optional host->viewer Opus audio: pulls the C libopus codec (rmd-codec/audio)
+# plus cpal for device capture/playback. Default build is pure Rust.
+audio = ["dep:cpal", "rmd-codec/audio"]
+
 [dependencies]
 rmd-protocol.workspace = true
 rmd-transport.workspace = true
@@ -40,8 +46,9 @@ qrcode = { version = "0.14", default-features = false }
 arboard = "3"
 
 # Cross-platform audio capture + playback (CoreAudio / ALSA) for the optional
-# host -> viewer Opus stream. Opt-in (default off); see audio.rs.
-cpal = "0.15"
+# host -> viewer Opus stream. Behind the `audio` feature (default off) since it
+# pairs with the C libopus codec; see audio.rs.
+cpal = { version = "0.15", optional = true }
 
 # Rendezvous WebSocket signaling client (runs on its own current-thread runtime).
 tokio = { workspace = true }
@@ -52,6 +59,11 @@ futures = { workspace = true }
 # light: ureq is a small synchronous HTTP client; base64 is only for Basic auth.
 ureq = { version = "2", features = ["json", "tls"] }
 base64 = "0.22"
+
+[[example]]
+name = "audio_e2e"
+path = "examples/audio_e2e.rs"
+required-features = ["audio"]
 
 [[example]]
 name = "headless_viewer"

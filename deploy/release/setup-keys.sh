@@ -14,7 +14,9 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-require_cmd minisign "brew install minisign  |  cargo install minisign  |  apt-get install minisign"
+# rsign2 (pure Rust) is preferred so key generation + signing need no C tooling.
+# The minisign C CLI still works as a fallback if that's what's installed.
+require_cmd rsign "cargo install rsign2   (pure-Rust; or: brew/apt install minisign)"
 
 if [[ -f "$MINISIGN_KEY" ]]; then
   die "secret key already exists at $MINISIGN_KEY — refusing to overwrite.
@@ -22,9 +24,11 @@ if [[ -f "$MINISIGN_KEY" ]]; then
 fi
 
 mkdir -p "$(dirname "$MINISIGN_KEY")"; chmod 700 "$(dirname "$MINISIGN_KEY")"
-log "Generating password-less minisign keypair"
+log "Generating password-less signing keypair (rsign2, minisign-compatible)"
 # -W: password-less secret key (non-interactive signing on the webhook host).
-minisign -G -W -s "$MINISIGN_KEY" -p "$MINISIGN_PUB"
+# rsign2's -W uses an empty-password KDF, which rsign2 can then sign with (unlike
+# minisign's -W kdf=0 keys, which rsign2 refuses to sign).
+rsign generate -W -f -s "$MINISIGN_KEY" -p "$MINISIGN_PUB" -c "ReachMyDevice release signing key"
 chmod 600 "$MINISIGN_KEY"
 
 # Extract the base64 public-key line (2nd line of the .pub file) and pin it.

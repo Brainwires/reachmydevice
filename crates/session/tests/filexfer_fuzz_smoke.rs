@@ -47,7 +47,12 @@ fn filexfer_handle_never_panics_on_hostile_messages() {
         let env = match xorshift(&mut s) % 6 {
             0 => {
                 let name = names[(xorshift(&mut s) as usize) % names.len()];
-                proto::file_offer(&tid, name, xorshift(&mut s) % 1_000_000, "application/octet-stream")
+                proto::file_offer(
+                    &tid,
+                    name,
+                    xorshift(&mut s) % 1_000_000,
+                    "application/octet-stream",
+                )
             }
             1 => {
                 let len = (xorshift(&mut s) % 64) as usize;

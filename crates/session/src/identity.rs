@@ -427,7 +427,11 @@ mod tests {
         let seed = id.signing.to_bytes();
         let blob = wrap_seed(&seed, b"correct horse battery").unwrap();
         assert_eq!(&blob[..4], WRAP_MAGIC);
-        assert_ne!(&blob[4..], &seed[..], "seed must not appear in the wrapped blob");
+        assert_ne!(
+            &blob[4..],
+            &seed[..],
+            "seed must not appear in the wrapped blob"
+        );
         // Correct passphrase recovers the exact seed.
         assert_eq!(*unwrap_seed(&blob, b"correct horse battery").unwrap(), seed);
         // Wrong passphrase → AEAD failure.

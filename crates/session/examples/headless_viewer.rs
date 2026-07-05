@@ -24,8 +24,7 @@ fn build_signaling() -> anyhow::Result<Box<dyn Signaling>> {
             Some(peer),
         )?))
     } else {
-        let addr =
-            std::env::var("RMD_SIGNAL_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".into());
+        let addr = std::env::var("RMD_SIGNAL_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".into());
         Ok(Box::new(SignalClient::connect(&addr)?))
     }
 }
@@ -88,7 +87,9 @@ fn main() -> anyhow::Result<()> {
                     device_id,
                     verified,
                     ..
-                } => eprintln!("[headless] host_identity device_id={device_id} verified={verified}"),
+                } => {
+                    eprintln!("[headless] host_identity device_id={device_id} verified={verified}")
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(5));

@@ -30,7 +30,8 @@ use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass};
 use objc2_core_audio_types::AudioBufferList;
 use objc2_core_media::{
-    kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment, CMBlockBuffer, CMSampleBuffer, CMTime,
+    kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment, CMBlockBuffer, CMSampleBuffer,
+    CMTime,
 };
 use objc2_core_video::{
     kCVPixelFormatType_32BGRA, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
@@ -176,7 +177,12 @@ impl StreamOutput {
                 })
             }
             _ => {
-                tracing::debug!(width, height, bytes_per_row, "implausible frame geometry; dropped");
+                tracing::debug!(
+                    width,
+                    height,
+                    bytes_per_row,
+                    "implausible frame geometry; dropped"
+                );
                 None
             }
         };
@@ -566,13 +572,19 @@ pub fn start_audio_capture(
 
     let start_handler = RcBlock::new(move |error: *mut NSError| {
         if let Some(error) = unsafe { error.as_ref() } {
-            tracing::warn!("audio SCStream start failed: {}", error.localizedDescription());
+            tracing::warn!(
+                "audio SCStream start failed: {}",
+                error.localizedDescription()
+            );
         }
     });
     // SAFETY: FFI; handler retained for the call.
     unsafe { stream.startCaptureWithCompletionHandler(Some(&start_handler)) };
 
-    tracing::info!(display_index, "ScreenCaptureKit desktop-audio capture started");
+    tracing::info!(
+        display_index,
+        "ScreenCaptureKit desktop-audio capture started"
+    );
 
     Ok(Box::new(MacAudioSession {
         stream,

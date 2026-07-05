@@ -16,9 +16,11 @@
 
 use bytes::Bytes;
 
+#[cfg(feature = "audio")]
 pub mod audio;
 pub mod software;
 
+#[cfg(feature = "audio")]
 pub use audio::{
     AudioDecoder, AudioEncoder, AUDIO_CHANNELS, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE,
 };

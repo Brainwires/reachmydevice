@@ -81,11 +81,7 @@ impl AudioDecoder {
         };
         let signals = self
             .inner
-            .decode(
-                input,
-                MutSignals::try_from(&mut out[..]).unwrap(),
-                fec,
-            )
+            .decode(input, MutSignals::try_from(&mut out[..]).unwrap(), fec)
             .context("opus decode")?;
         out.truncate(signals);
         Ok(out)
@@ -111,7 +107,7 @@ mod tests {
         let pcm: Vec<i16> = (0..AUDIO_FRAME_SAMPLES)
             .map(|i| {
                 let t = i as f32 / AUDIO_SAMPLE_RATE as f32;
-                (( 2.0 * std::f32::consts::PI * 440.0 * t).sin() * 12000.0) as i16
+                ((2.0 * std::f32::consts::PI * 440.0 * t).sin() * 12000.0) as i16
             })
             .collect();
 

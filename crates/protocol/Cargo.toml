@@ -12,3 +12,6 @@ thiserror.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true
+# Pure-Rust protobuf compiler — replaces the `protoc` C++ binary so the default
+# build needs no system toolchain (part of the v0.2 de-C effort).
+protox.workspace = true

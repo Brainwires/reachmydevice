@@ -52,18 +52,24 @@ resolve_version() {
 # produces artifacts — but a real release must have the key present.
 sign_file() {
   local f="$1"
-  if ! command -v minisign >/dev/null 2>&1; then
-    warn "minisign not installed — skipping signature for $(basename "$f")"
-    return 0
-  fi
   if [[ ! -f "$MINISIGN_KEY" ]]; then
-    warn "no minisign key at $MINISIGN_KEY — skipping signature for $(basename "$f")"
+    warn "no signing key at $MINISIGN_KEY — skipping signature for $(basename "$f")"
     return 0
   fi
-  # -W keys are password-less (created with `minisign -G -W`), so this is
-  # non-interactive on the webhook build host. A password-protected key would
-  # prompt here; feed it via a here-string if you use one.
-  minisign -S -s "$MINISIGN_KEY" -m "$f" -c "ReachMyDevice release" >/dev/null
+  # Prefer rsign2 (pure Rust — keeps the release toolchain C-free); fall back to
+  # the minisign C CLI. Both emit the identical minisign signature format, so a
+  # signature made by either verifies against the pinned pubkey / install.sh.
+  # Password-less keys make this non-interactive on the webhook build host.
+  if command -v rsign >/dev/null 2>&1 &&
+     rsign sign -W -s "$MINISIGN_KEY" -x "$f.minisig" \
+       -c "ReachMyDevice release" "$f" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v minisign >/dev/null 2>&1; then
+    minisign -S -s "$MINISIGN_KEY" -m "$f" -c "ReachMyDevice release" >/dev/null
+    return 0
+  fi
+  warn "neither rsign (rsign2) nor minisign available — skipping signature for $(basename "$f")"
 }
 
 # SHA256SUMS over every file currently in $DIST_DIR (portable across GNU/BSD).

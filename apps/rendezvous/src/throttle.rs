@@ -59,7 +59,11 @@ impl LoginThrottle {
             a.locked_until = Some(now + Duration::from_secs(secs));
         }
         // Opportunistic housekeeping.
-        m.retain(|_, v| v.last.map(|t| now.duration_since(t) < IDLE_TTL).unwrap_or(false));
+        m.retain(|_, v| {
+            v.last
+                .map(|t| now.duration_since(t) < IDLE_TTL)
+                .unwrap_or(false)
+        });
     }
 
     /// Clear a user's failures after a successful login.

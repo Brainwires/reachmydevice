@@ -10,6 +10,10 @@
 //! everything between them — encode, real network transport, decode — is proven
 //! here).
 
+// The whole test needs the C Opus codec; it compiles to nothing in the default
+// (pure-Rust) build. Run with `cargo test -p rmd-session --features audio`.
+#![cfg(feature = "audio")]
+
 use bytes::Bytes;
 use rmd_codec::{AudioDecoder, AudioEncoder, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE};
 use rmd_protocol as proto;
@@ -81,8 +85,7 @@ fn audio_survives_encode_transport_decode() {
                         if let Some(proto::pb::envelope::Payload::Audio(a)) = env.payload {
                             if let Ok(pcm) = decoder.decode(Some(&a.opus), false) {
                                 recv_frames += 1;
-                                recv_energy +=
-                                    pcm.iter().map(|&s| (s as f64).powi(2)).sum::<f64>();
+                                recv_energy += pcm.iter().map(|&s| (s as f64).powi(2)).sum::<f64>();
                             }
                         }
                     }
@@ -113,5 +116,8 @@ fn audio_survives_encode_transport_decode() {
     // The delivered, decoded audio must carry real signal energy (the tone
     // survived the real transport), not silence.
     let avg = recv_energy / (recv_frames * AUDIO_FRAME_SAMPLES as u64) as f64;
-    assert!(avg > 1_000_000.0, "delivered audio was silent/degraded (avg={avg:.0})");
+    assert!(
+        avg > 1_000_000.0,
+        "delivered audio was silent/degraded (avg={avg:.0})"
+    );
 }

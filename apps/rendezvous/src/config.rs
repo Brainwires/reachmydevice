@@ -26,8 +26,8 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| "0.0.0.0:8080".parse().unwrap());
-        let database_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "sqlite:rmd.db?mode=rwc".to_string());
+        let database_url =
+            std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:rmd.db?mode=rwc".to_string());
         // Closed by default: an operator must explicitly opt into open signup.
         // (Provision the first account with the CLI / RMD_RZ_OPEN_REGISTRATION=1.)
         let allow_open_registration = std::env::var("RMD_RZ_OPEN_REGISTRATION")

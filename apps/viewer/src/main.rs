@@ -28,14 +28,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rmd_protocol as proto;
 use rmd_protocol::input_event::Event as InputEvent;
+use rmd_protocol::DisplayDescriptor;
 use rmd_protocol::{KeyEvent, MouseButton, MouseMove, MouseScroll};
 use rmd_session::rendezvous::RendezvousClient;
 use rmd_session::{
-    identity::known_peers, pairing::generate_pairing_code, pairing_client::pair_pake, AccountClient,
-    DeviceIdentity, DeviceInfo, FileEvent, SignalClient, Signaling, ViewerConfig, ViewerSession,
-    ViewerUpdate,
+    identity::known_peers, pairing::generate_pairing_code, pairing_client::pair_pake,
+    AccountClient, DeviceIdentity, DeviceInfo, FileEvent, SignalClient, Signaling, ViewerConfig,
+    ViewerSession, ViewerUpdate,
 };
-use rmd_protocol::DisplayDescriptor;
 
 use egui_wgpu::ScreenDescriptor;
 use winit::application::ApplicationHandler;
@@ -224,8 +224,7 @@ impl App {
         };
         let this_device_id = identity.device_id();
 
-        let device_name =
-            std::env::var("RMD_NAME").unwrap_or_else(|_| "rmd-viewer".into());
+        let device_name = std::env::var("RMD_NAME").unwrap_or_else(|_| "rmd-viewer".into());
         let ice_servers = std::env::var("RMD_ICE")
             .map(|s| {
                 s.split(',')
@@ -412,8 +411,9 @@ impl App {
                     } else {
                         "key does not match the one pinned for this host"
                     };
-                    self.error =
-                        Some(format!("host verification failed ({why}) — refusing (possible MITM)"));
+                    self.error = Some(format!(
+                        "host verification failed ({why}) — refusing (possible MITM)"
+                    ));
                     self.leave_session();
                 }
             }
@@ -612,10 +612,7 @@ impl App {
 
             ui.add_space(12.0);
             let busy = self.busy.is_some();
-            if ui
-                .add_enabled(!busy, egui::Button::new("Pair"))
-                .clicked()
-            {
+            if ui.add_enabled(!busy, egui::Button::new("Pair")).clicked() {
                 self.start_pairing();
             }
             if busy {
@@ -1169,9 +1166,7 @@ impl App {
                         .show_ui(ui, |ui| {
                             for d in &self.displays {
                                 let text = format!("{} ({}×{})", d.name, d.width, d.height);
-                                if ui
-                                    .selectable_label(d.id == current, text)
-                                    .clicked()
+                                if ui.selectable_label(d.id == current, text).clicked()
                                     && d.id != current
                                 {
                                     self.active_display = d.id;

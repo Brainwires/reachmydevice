@@ -161,6 +161,8 @@ impl ViewerSession {
                 .name("rmd-viewer-pump".into())
                 .spawn(move || {
                     // Audio playback lives on this thread (cpal stream is !Send).
+                    // Only compiled into builds with the `audio` feature.
+                    #[cfg(feature = "audio")]
                     let mut audio = if enable_audio {
                         match crate::audio::AudioPlayback::start() {
                             Ok(p) => {
@@ -175,6 +177,13 @@ impl ViewerSession {
                     } else {
                         None
                     };
+                    #[cfg(not(feature = "audio"))]
+                    if enable_audio {
+                        tracing::warn!(
+                            "audio requested but this build has no `audio` feature; \
+                             rebuild with `--features audio` to hear host audio"
+                        );
+                    }
                     // Our own DTLS fingerprint, learned from the answer we emit;
                     // signed into the access proof to bind it to this session.
                     let mut local_fingerprint: Option<String> = None;
@@ -301,9 +310,12 @@ impl ViewerSession {
                                                 1,
                                                 std::sync::atomic::Ordering::Relaxed,
                                             );
+                                            #[cfg(feature = "audio")]
                                             if let Some(a) = audio.as_mut() {
                                                 a.push_packet(&frame.opus, frame.seq);
                                             }
+                                            #[cfg(not(feature = "audio"))]
+                                            let _ = &frame;
                                         }
                                         Some(p) => {
                                             // File-transfer payloads route to the manager.

@@ -213,8 +213,8 @@ pub fn hid_to_x_keycode(hid: u32) -> Option<u8> {
         0x41 => 66,
         0x42 => 67,
         0x43 => 68,
-        0x44 => 87,  // F11
-        0x45 => 88,  // F12
+        0x44 => 87, // F11
+        0x45 => 88, // F12
         // Special / system keys (Linux evdev codes).
         0x46 => 99,  // PrintScreen (SYSRQ)
         0x47 => 70,  // ScrollLock

@@ -41,7 +41,8 @@ BINS=(rmd-host rmd-viewer)
 log "ReachMyDevice macOS release build — version $VERSION, target $TARGET"
 cd "$REPO_ROOT"
 require_cmd cargo "install Rust via rustup"
-require_cmd protoc "brew install protobuf"
+# protoc is no longer needed — the protocol crate compiles its schema with the
+# pure-Rust `protox` at build time.
 require_cmd hdiutil "part of macOS"
 
 git submodule update --init --recursive >/dev/null 2>&1 || true

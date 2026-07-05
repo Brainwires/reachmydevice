@@ -120,7 +120,8 @@ fn kdf(ikm: &[u8], pubkey_a: &[u8; 32], pubkey_b: &[u8; 32]) -> Zeroizing<[u8; 3
     info.extend_from_slice(keys[1]);
     let hk = Hkdf::<Sha256>::new(Some(PAIR_TAG), ikm);
     let mut okm = Zeroizing::new([0u8; 32]);
-    hk.expand(&info, okm.as_mut()).expect("32 is a valid HKDF length");
+    hk.expand(&info, okm.as_mut())
+        .expect("32 is a valid HKDF length");
     okm
 }
 
@@ -149,7 +150,10 @@ pub fn confirmation(key: &[u8; 32], role: &[u8]) -> [u8; 16] {
 
 /// Deterministic role labels `(ours, peers)` from the two public keys: the
 /// smaller key is the "initiator". Both sides compute the same split.
-pub fn role_labels(our_pubkey: &[u8; 32], peer_pubkey: &[u8; 32]) -> (&'static [u8], &'static [u8]) {
+pub fn role_labels(
+    our_pubkey: &[u8; 32],
+    peer_pubkey: &[u8; 32],
+) -> (&'static [u8], &'static [u8]) {
     if our_pubkey < peer_pubkey {
         (b"initiator", b"responder")
     } else {
@@ -176,10 +180,7 @@ pub fn render_qr_terminal(ticket: &PairingTicket) -> anyhow::Result<String> {
     use qrcode::render::unicode;
     let qr = qrcode::QrCode::new(ticket.to_code().as_bytes())
         .map_err(|e| anyhow::anyhow!("qr encode: {e}"))?;
-    Ok(qr
-        .render::<unicode::Dense1x2>()
-        .quiet_zone(true)
-        .build())
+    Ok(qr.render::<unicode::Dense1x2>().quiet_zone(true).build())
 }
 
 /// Alphabet for the pairing-code secret: lowercase minus ambiguous letters
@@ -282,8 +283,14 @@ mod tests {
         assert_eq!(*ka, *kb);
         // Same key + same role label → same tag; different roles → different tags
         // (this directionality is what defeats a reflection attack).
-        assert_eq!(confirmation(&ka, b"initiator"), confirmation(&kb, b"initiator"));
-        assert_ne!(confirmation(&ka, b"initiator"), confirmation(&ka, b"responder"));
+        assert_eq!(
+            confirmation(&ka, b"initiator"),
+            confirmation(&kb, b"initiator")
+        );
+        assert_ne!(
+            confirmation(&ka, b"initiator"),
+            confirmation(&ka, b"responder")
+        );
         // A different seed yields a different key.
         let kc = derive_key_from_seed(&[43u8; 32], &pa, &pb);
         assert_ne!(*ka, *kc);
@@ -296,7 +303,10 @@ mod tests {
         assert!(channel.chars().all(|c| c.is_ascii_digit()));
         assert!(secret.len() >= 6);
         // Two codes differ.
-        assert_ne!(generate_pairing_code().unwrap(), generate_pairing_code().unwrap());
+        assert_ne!(
+            generate_pairing_code().unwrap(),
+            generate_pairing_code().unwrap()
+        );
         // Malformed input rejected.
         assert!(split_code("nodash").is_err());
         assert!(split_code("-secret").is_err());
@@ -317,7 +327,10 @@ mod tests {
         // expected peer-role tag.
         let (a_role, _b_role) = role_labels(&pa, &pb);
         assert_eq!(confirmation(&ka, a_role), confirmation(&kb, a_role));
-        assert!(tags_equal(&confirmation(&ka, a_role), &confirmation(&kb, a_role)));
+        assert!(tags_equal(
+            &confirmation(&ka, a_role),
+            &confirmation(&kb, a_role)
+        ));
 
         // Mismatched code → keys differ (confirmation tags won't match).
         let (sc, mc) = pake_start("right-code");
@@ -339,6 +352,9 @@ mod tests {
         let key = [5u8; 32];
         let our_tag = confirmation(&key, b"initiator");
         let expected_peer = confirmation(&key, b"responder");
-        assert!(!tags_equal(&our_tag, &expected_peer), "reflection must not pass");
+        assert!(
+            !tags_equal(&our_tag, &expected_peer),
+            "reflection must not pass"
+        );
     }
 }

@@ -31,15 +31,17 @@ jobs:
         with:
           submodules: recursive   # the webrtc-rs-rtc fork is a submodule
 
-      - name: Install protoc + deps (macOS)
+      # No protoc — the protocol crate compiles its schema with pure-Rust protox.
+      # nasm powers the rav1e/rav1d (AV1) SIMD paths.
+      - name: Install deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf
+        run: brew install nasm
 
-      - name: Install protoc + deps (Linux)
+      - name: Install deps (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler nasm pkg-config \
+          sudo apt-get install -y nasm pkg-config \
             libx11-dev libxext-dev libxtst-dev libxdamage-dev libxcb1-dev \
             libxkbcommon-dev libwayland-dev
 
@@ -85,17 +87,19 @@ jobs:
           (cd dist && ls -la && shasum -a 256 * > SHA256SUMS || sha256sum * > SHA256SUMS)
 
       # Detached signatures over every artifact (incl. SHA256SUMS + SBOM) with
-      # minisign — verifiable with the published public key. No-op without the
-      # MINISIGN_SECRET secret. Verify: `minisign -Vm <file> -P <pubkey>`.
-      - name: Sign artifacts (minisign)
+      # rsign2 (pure Rust, minisign signature format) — verifiable with the
+      # published public key. No-op without the MINISIGN_SECRET secret.
+      # Verify: `minisign -Vm <file> -P <pubkey>` or `rsign verify -P <pubkey> <file>`.
+      - name: Sign artifacts (rsign2)
         if: env.MINISIGN_SECRET != ''
         env:
           MINISIGN_SECRET: ${{ secrets.MINISIGN_SECRET }}
         run: |
-          cargo install minisign || true
+          cargo install rsign2 || true
           printf '%s' "$MINISIGN_SECRET" > /tmp/minisign.key
           for f in dist/*; do
-            [ -f "$f" ] && minisign -S -s /tmp/minisign.key -m "$f" || true
+            [ -f "$f" ] && rsign sign -W -s /tmp/minisign.key -x "$f.minisig" \
+              -c "ReachMyDevice release" "$f" || true
           done
           rm -f /tmp/minisign.key
 

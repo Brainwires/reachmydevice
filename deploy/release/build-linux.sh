@@ -13,9 +13,10 @@
 #   deploy/release/build-linux.sh [VERSION]        # VERSION defaults to workspace version
 #   RMD_NO_UPLOAD=1 deploy/release/build-linux.sh   # build only, no gh upload
 #
-# Build deps (Debian/Ubuntu): rustup toolchain, protobuf-compiler, nasm,
+# Build deps (Debian/Ubuntu): rustup toolchain, nasm (rav1e/rav1d SIMD),
 # pkg-config, libx11-dev libxext-dev libxtst-dev libxdamage-dev libxcb1-dev
-# libxkbcommon-dev libwayland-dev. cargo-deb is auto-installed if missing.
+# libxkbcommon-dev libwayland-dev. No protobuf-compiler (protox is pure Rust).
+# cargo-deb is auto-installed if missing.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
@@ -27,7 +28,8 @@ BINS=(rmd-host rmd-viewer rmd-rendezvous)
 log "ReachMyDevice Linux release build — version $VERSION, target $TARGET"
 cd "$REPO_ROOT"
 require_cmd cargo "install Rust via rustup"
-require_cmd protoc "apt-get install protobuf-compiler"
+# protoc is no longer needed — the protocol crate compiles its schema with the
+# pure-Rust `protox` at build time.
 
 # The vendored WebRTC fork is a submodule — make sure it's present.
 git submodule update --init --recursive >/dev/null 2>&1 || true

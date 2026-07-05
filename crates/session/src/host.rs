@@ -5,12 +5,12 @@
 //! the WebRTC offerer and the video sender; it validates the viewer's protocol
 //! version, injects the viewer's input, and answers Ping with Pong.
 
+#[cfg(feature = "audio")]
 use crate::audio::AudioCapture;
 use crate::clipboard::ClipboardSync;
 use crate::filexfer::{FileEvent, FileTransferConfig, FileTransfers};
 use crate::signal::Signaling;
 use bytes::Bytes;
-use std::sync::atomic::AtomicU64;
 use rmd_capture as capture;
 use rmd_codec as codec;
 use rmd_input as input;
@@ -19,6 +19,8 @@ use rmd_protocol::pb::envelope::Payload;
 use rmd_transport::{
     SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole, TransportSender,
 };
+#[cfg(feature = "audio")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -178,7 +180,9 @@ where
         (std::env::var("RMD_NO_KEEPAWAKE").is_err())
             .then(|| crate::power::prevent_sleep("ReachMyDevice unattended host"))
     } else {
-        tracing::warn!("unattended access gate OFF: any viewer completing the handshake is accepted");
+        tracing::warn!(
+            "unattended access gate OFF: any viewer completing the handshake is accepted"
+        );
         None
     };
 
@@ -218,8 +222,10 @@ where
         FileTransfers::new(out, file_ev_tx, FileTransferConfig::default())
     };
 
-    // Optional audio capture (default off). Held alive for the session; the
-    // callback sends Opus frames only while a viewer is connected.
+    // Optional audio capture (default off, and only in builds compiled with the
+    // `audio` feature). Held alive for the session; the callback sends Opus frames
+    // only while a viewer is connected.
+    #[cfg(feature = "audio")]
     let _audio = if cfg.enable_audio {
         let sender = transport.sender();
         let connected = connected.clone();
@@ -242,6 +248,13 @@ where
     } else {
         None
     };
+    #[cfg(not(feature = "audio"))]
+    if cfg.enable_audio {
+        tracing::warn!(
+            "audio requested but this build has no `audio` feature; \
+             rebuild with `--features audio` to enable host->viewer Opus audio"
+        );
+    }
 
     tracing::info!(device = %cfg.device_name, "host ready; waiting for a viewer to connect");
     on_status(HostStatus::Waiting);
