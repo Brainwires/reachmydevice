@@ -1,0 +1,431 @@
+//! ReachMyDevice browser viewer (WASM).
+//!
+//! A no-install viewer: it authenticates to the rendezvous over WebSocket, acts
+//! as the WebRTC **answerer** to a native host, receives the host's H.264 video
+//! track (decoded by the browser), and sends mouse/keyboard input back over the
+//! host's `control` data channel as `rmd-protocol` protobufs.
+//!
+//! Video is shown in a `<video>` element (the browser decodes H.264 and composites
+//! it on the GPU). A wgpu-canvas render path (for overlays/scaling effects) is a
+//! planned follow-up; the transport, signaling, and input here are codec-agnostic.
+//!
+//! ## Wire compatibility
+//! The `/ws` relay envelope (`{to,payload}` / `{from,payload}` with
+//! `kind: "hello" | "signal"`) and the `SignalMsg` JSON
+//! (`{"type":"offer|answer|candidate","data":…}`) exactly mirror the native
+//! `RendezvousClient`, so the rendezvous server is unchanged.
+
+mod input;
+mod signaling;
+
+use signaling::Relay;
+use std::cell::RefCell;
+use std::rc::Rc;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::{spawn_local, JsFuture};
+use web_sys::{
+    HtmlCanvasElement, HtmlVideoElement, MediaStream, MessageEvent, MouseEvent, RtcConfiguration,
+    RtcDataChannel, RtcDataChannelEvent, RtcIceCandidateInit, RtcPeerConnection,
+    RtcPeerConnectionIceEvent, RtcSdpType, RtcSessionDescriptionInit, RtcTrackEvent, WheelEvent,
+};
+
+/// Runtime configuration, from URL query params on the page:
+/// `?server=wss://app.reachmy.dev&token=…&host=<device_id>`.
+struct Config {
+    /// WebSocket base, e.g. `wss://app.reachmy.dev` (no trailing `/ws`).
+    server: String,
+    /// Device bearer token for the rendezvous `/ws` auth.
+    token: String,
+    /// The host device_id to connect to.
+    host_id: String,
+}
+
+impl Config {
+    fn from_url() -> Result<Config, String> {
+        let window = web_sys::window().ok_or("no window")?;
+        let search = window.location().search().map_err(|_| "no search")?;
+        let params = web_sys::UrlSearchParams::new_with_str(&search)
+            .map_err(|_| "bad query string".to_string())?;
+        let server = params
+            .get("server")
+            .filter(|s| !s.is_empty())
+            .or_else(|| default_ws_base(&window))
+            .ok_or("missing ?server=")?;
+        let token = params.get("token").unwrap_or_default();
+        let host_id = params.get("host").unwrap_or_default();
+        if token.is_empty() {
+            return Err("missing ?token=".into());
+        }
+        if host_id.is_empty() {
+            return Err("missing ?host= (the host device id)".into());
+        }
+        Ok(Config {
+            server,
+            token,
+            host_id,
+        })
+    }
+}
+
+/// Default the WebSocket base to this page's origin (so the console-hosted viewer
+/// talks to the same rendezvous), upgrading http→ws / https→wss.
+fn default_ws_base(window: &web_sys::Window) -> Option<String> {
+    let loc = window.location();
+    let proto = loc.protocol().ok()?;
+    let host = loc.host().ok()?;
+    let ws = if proto == "https:" { "wss" } else { "ws" };
+    Some(format!("{ws}://{host}"))
+}
+
+/// Shared session state across the many web-sys callbacks.
+struct Session {
+    pc: RtcPeerConnection,
+    relay: Relay,
+    host_id: String,
+    /// The host-created `control` data channel, once it arrives + opens.
+    control: RefCell<Option<RtcDataChannel>>,
+    /// The `<video>` element showing the decoded stream (also the input surface).
+    video: HtmlVideoElement,
+    /// Whether we've already sent our protocol `Hello` over the control channel.
+    hello_sent: RefCell<bool>,
+}
+
+#[wasm_bindgen(start)]
+pub fn start() {
+    console_error_panic_hook::set_once();
+    let _ = tracing_wasm::try_set_as_global_default();
+    spawn_local(async {
+        if let Err(e) = run().await {
+            web_sys::console::error_1(&format!("[rmd-web-viewer] fatal: {e}").into());
+            show_error(&e);
+        }
+    });
+}
+
+async fn run() -> Result<(), String> {
+    let cfg = Config::from_url()?;
+    let window = web_sys::window().ok_or("no window")?;
+    let document = window.document().ok_or("no document")?;
+
+    // The <video> element that displays the decoded H.264 track + captures input.
+    let video: HtmlVideoElement = document
+        .get_element_by_id("screen")
+        .and_then(|e| e.dyn_into::<HtmlVideoElement>().ok())
+        .ok_or("no <video id=screen> in page")?;
+    video.set_autoplay(true);
+    video.set_muted(true);
+    let _ = video.set_attribute("playsinline", "true");
+
+    // --- WebRTC peer connection (answerer) --------------------------------
+    let rtc_cfg = RtcConfiguration::new();
+    let ice = js_sys::Array::new();
+    let stun = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &stun,
+        &"urls".into(),
+        &"stun:stun.l.google.com:19302".into(),
+    )
+    .ok();
+    ice.push(&stun);
+    rtc_cfg.set_ice_servers(&ice);
+    let pc =
+        RtcPeerConnection::new_with_configuration(&rtc_cfg).map_err(|e| format!("pc: {e:?}"))?;
+
+    let relay = Relay::connect(&cfg.server, &cfg.token).map_err(|e| format!("ws: {e}"))?;
+
+    let session = Rc::new(Session {
+        pc: pc.clone(),
+        relay: relay.clone(),
+        host_id: cfg.host_id.clone(),
+        control: RefCell::new(None),
+        video: video.clone(),
+        hello_sent: RefCell::new(false),
+    });
+
+    wire_pc_callbacks(&session);
+    wire_relay_callbacks(&session);
+
+    // Announce presence so the host learns our device id and sends its offer.
+    relay.send_hello(&cfg.host_id);
+    set_status("connecting…");
+    Ok(())
+}
+
+/// Attach ontrack / onicecandidate / ondatachannel / connectionstatechange.
+fn wire_pc_callbacks(session: &Rc<Session>) {
+    let pc = &session.pc;
+
+    // Inbound video track → attach the MediaStream to the <video> element.
+    {
+        let video = session.video.clone();
+        let cb = Closure::<dyn FnMut(RtcTrackEvent)>::new(move |ev: RtcTrackEvent| {
+            let streams = ev.streams();
+            if let Some(stream) = streams.get(0).dyn_ref::<MediaStream>() {
+                video.set_src_object(Some(stream));
+                let _ = video.play();
+                set_status("connected");
+            }
+        });
+        pc.set_ontrack(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+
+    // Our ICE candidates → trickle to the host over the relay.
+    {
+        let s = session.clone();
+        let cb = Closure::<dyn FnMut(RtcPeerConnectionIceEvent)>::new(
+            move |ev: RtcPeerConnectionIceEvent| {
+                if let Some(cand) = ev.candidate() {
+                    s.relay
+                        .send_signal(&s.host_id, &SignalMsg::Candidate(cand.candidate()));
+                }
+            },
+        );
+        pc.set_onicecandidate(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+
+    // The host creates the `control` data channel; capture it when it arrives.
+    {
+        let s = session.clone();
+        let cb = Closure::<dyn FnMut(RtcDataChannelEvent)>::new(move |ev: RtcDataChannelEvent| {
+            let dc = ev.channel();
+            wire_data_channel(&s, &dc);
+            *s.control.borrow_mut() = Some(dc);
+        });
+        pc.set_ondatachannel(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+
+    // Surface connection-state changes.
+    {
+        let pc2 = pc.clone();
+        let cb = Closure::<dyn FnMut()>::new(move || {
+            let st = pc2.connection_state();
+            web_sys::console::log_1(&format!("[rmd] pc state: {st:?}").into());
+            if matches!(
+                st,
+                web_sys::RtcPeerConnectionState::Failed
+                    | web_sys::RtcPeerConnectionState::Disconnected
+            ) {
+                set_status("disconnected");
+            }
+        });
+        pc.set_onconnectionstatechange(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+}
+
+/// On the control channel: send our `Hello` once open, then attach input, and
+/// log inbound control (HelloAck/pong/etc.).
+fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
+    // Once open, send the protocol Hello (role=Viewer, supports H.264).
+    {
+        let s = session.clone();
+        let dc_open = dc.clone();
+        let cb = Closure::<dyn FnMut()>::new(move || {
+            if !*s.hello_sent.borrow() {
+                let hello = rmd_protocol::hello("web-viewer", rmd_protocol::Role::Viewer, 0);
+                let bytes = rmd_protocol::encode(&hello);
+                let _ = dc_open.send_with_u8_array(&bytes);
+                *s.hello_sent.borrow_mut() = true;
+                attach_input(&s, &dc_open);
+                set_status("session ready");
+            }
+        });
+        dc.set_onopen(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+
+    // Inbound control (HelloAck, DisplayList, Pong…) — logged for now.
+    {
+        let cb = Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| {
+            if let Ok(buf) = ev.data().dyn_into::<js_sys::ArrayBuffer>() {
+                let bytes = js_sys::Uint8Array::new(&buf).to_vec();
+                if let Ok(env) = rmd_protocol::decode(&bytes) {
+                    if let Some(rmd_protocol::pb::envelope::Payload::HelloAck(ack)) = env.payload {
+                        if !ack.accepted {
+                            set_status(&format!("rejected: {}", ack.reason));
+                        }
+                    }
+                }
+            }
+        });
+        dc.set_binary_type(web_sys::RtcDataChannelType::Arraybuffer);
+        dc.set_onmessage(Some(cb.as_ref().unchecked_ref()));
+        cb.forget();
+    }
+}
+
+/// Attach mouse + keyboard listeners on the video surface; encode to protobuf and
+/// send over the control channel.
+fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
+    let video = session.video.clone();
+
+    // Normalized pointer position helper.
+    let rect_norm = {
+        let video = video.clone();
+        move |ev: &MouseEvent| -> (f64, f64) {
+            let rect = video.get_bounding_client_rect();
+            let w = rect.width().max(1.0);
+            let h = rect.height().max(1.0);
+            let x = (ev.client_x() as f64 - rect.left()) / w;
+            let y = (ev.client_y() as f64 - rect.top()) / h;
+            (x, y)
+        }
+    };
+
+    // mousemove
+    {
+        let dc = dc.clone();
+        let rect_norm = rect_norm.clone();
+        let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |ev: MouseEvent| {
+            let (x, y) = rect_norm(&ev);
+            let _ = dc.send_with_u8_array(&input::mouse_move(x, y));
+        });
+        video
+            .add_event_listener_with_callback("mousemove", cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+    }
+    // mousedown / mouseup
+    for (event, pressed) in [("mousedown", true), ("mouseup", false)] {
+        let dc = dc.clone();
+        let rect_norm = rect_norm.clone();
+        let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |ev: MouseEvent| {
+            ev.prevent_default();
+            let (x, y) = rect_norm(&ev);
+            let btn = input::dom_button_to_proto(ev.button());
+            let _ = dc.send_with_u8_array(&input::mouse_button(btn, pressed, x, y));
+        });
+        video
+            .add_event_listener_with_callback(event, cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+    }
+    // contextmenu → suppress (right-click is sent as an input event instead)
+    {
+        let cb = Closure::<dyn FnMut(MouseEvent)>::new(move |ev: MouseEvent| ev.prevent_default());
+        video
+            .add_event_listener_with_callback("contextmenu", cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+    }
+    // wheel
+    {
+        let dc = dc.clone();
+        let cb = Closure::<dyn FnMut(WheelEvent)>::new(move |ev: WheelEvent| {
+            ev.prevent_default();
+            let _ = dc.send_with_u8_array(&input::mouse_scroll(-ev.delta_x(), -ev.delta_y()));
+        });
+        video
+            .add_event_listener_with_callback("wheel", cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+    }
+    // key down / up on the document (video isn't focusable by default)
+    if let Some(win) = web_sys::window() {
+        for (event, pressed) in [("keydown", true), ("keyup", false)] {
+            let dc = dc.clone();
+            let cb = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+                move |ev: web_sys::KeyboardEvent| {
+                    if let Some(hid) = input::code_to_hid(&ev.code()) {
+                        ev.prevent_default();
+                        let mods = input::modifier_mask(
+                            ev.shift_key(),
+                            ev.ctrl_key(),
+                            ev.alt_key(),
+                            ev.meta_key(),
+                            ev.get_modifier_state("CapsLock"),
+                        );
+                        let _ = dc.send_with_u8_array(&input::key(hid, pressed, mods));
+                    }
+                },
+            );
+            win.add_event_listener_with_callback(event, cb.as_ref().unchecked_ref())
+                .ok();
+            cb.forget();
+        }
+    }
+}
+
+/// A signaling message, identical JSON to the native `rmd_transport::SignalMsg`.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[serde(tag = "type", content = "data", rename_all = "lowercase")]
+pub enum SignalMsg {
+    Offer(String),
+    Answer(String),
+    Candidate(String),
+}
+
+/// Handle a `SignalMsg` from the host: apply the offer + answer it, or add a
+/// trickled ICE candidate.
+fn wire_relay_callbacks(session: &Rc<Session>) {
+    let s = session.clone();
+    session.relay.on_signal(move |msg: SignalMsg| {
+        let s = s.clone();
+        spawn_local(async move {
+            if let Err(e) = handle_signal(&s, msg).await {
+                web_sys::console::error_1(&format!("[rmd] signal error: {e}").into());
+            }
+        });
+    });
+}
+
+async fn handle_signal(session: &Rc<Session>, msg: SignalMsg) -> Result<(), String> {
+    match msg {
+        SignalMsg::Offer(sdp) => {
+            let desc = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
+            desc.set_sdp(&sdp);
+            JsFuture::from(session.pc.set_remote_description(&desc))
+                .await
+                .map_err(|e| format!("set_remote(offer): {e:?}"))?;
+            let answer = JsFuture::from(session.pc.create_answer())
+                .await
+                .map_err(|e| format!("create_answer: {e:?}"))?;
+            let answer_sdp = js_sys::Reflect::get(&answer, &"sdp".into())
+                .ok()
+                .and_then(|v| v.as_string())
+                .ok_or("answer has no sdp")?;
+            let adesc = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
+            adesc.set_sdp(&answer_sdp);
+            JsFuture::from(session.pc.set_local_description(&adesc))
+                .await
+                .map_err(|e| format!("set_local(answer): {e:?}"))?;
+            session
+                .relay
+                .send_signal(&session.host_id, &SignalMsg::Answer(answer_sdp));
+        }
+        SignalMsg::Answer(_) => { /* viewer is the answerer; ignore */ }
+        SignalMsg::Candidate(cand) => {
+            let init = RtcIceCandidateInit::new(&cand);
+            // The host trickles bare candidate strings; media is a single m-line,
+            // so index 0 / mid "0" is correct for our single-track session.
+            init.set_sdp_m_line_index(Some(0));
+            init.set_sdp_mid(Some("0"));
+            let promise = session
+                .pc
+                .add_ice_candidate_with_opt_rtc_ice_candidate_init(Some(&init));
+            let _ = JsFuture::from(promise).await;
+        }
+    }
+    Ok(())
+}
+
+fn set_status(text: &str) {
+    if let Some(el) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("status"))
+    {
+        el.set_text_content(Some(text));
+    }
+}
+
+fn show_error(msg: &str) {
+    set_status(&format!("error: {msg}"));
+}
+
+// Silence "unused" for the canvas import kept for the planned wgpu path.
+#[allow(dead_code)]
+fn _canvas_marker(_c: HtmlCanvasElement) {}

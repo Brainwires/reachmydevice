@@ -16,7 +16,9 @@ members = [
 ]
 # The vendored webrtc-rs-rtc fork (git submodule) is its own workspace; keep it
 # out of ours so Cargo treats it as a path dependency, not a member.
-exclude = ["third_party"]
+# apps/web-viewer is a wasm-only cdylib (web-sys/wgpu) built with `trunk`, not the
+# native `cargo build`, so it is excluded from this workspace too.
+exclude = ["third_party", "apps/web-viewer"]
 
 [workspace.package]
 version = "0.1.0"

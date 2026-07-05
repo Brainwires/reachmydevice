@@ -1,7 +1,11 @@
 # Automatic HTTPS via Let's Encrypt for the rendezvous API + WebSocket.
-# Set RMD_DOMAIN in .env; Caddy provisions and renews the certificate.
-{$RMD_DOMAIN} {
+# Set RMD_DOMAIN in .env; Caddy provisions and renews the certificates.
+#
+# Both the apex (landing page + web viewer at /app) and the `app.` console
+# subdomain proxy to the rendezvous, which routes by the Host header (Caddy
+# forwards the original Host upstream by default).
+{$RMD_DOMAIN}, app.{$RMD_DOMAIN} {
 	encode gzip
-	# WebSocket upgrade + REST both proxy to the rendezvous service.
+	# WebSocket upgrade + REST + static assets all proxy to the rendezvous.
 	reverse_proxy rendezvous:8080
 }
