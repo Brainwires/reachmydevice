@@ -71,9 +71,9 @@ pub fn router(state: AppState) -> Router {
     let webviewer_dir =
         std::env::var("RMD_WEBVIEWER_DIR").unwrap_or_else(|_| "web-viewer-dist".to_string());
     app = if std::path::Path::new(&webviewer_dir).is_dir() {
+        // One nest_service serves `/app` and everything under `/app/…`.
         let serve = ServeDir::new(&webviewer_dir).append_index_html_on_directories(true);
-        app.nest_service("/app", serve.clone())
-            .nest_service("/app/", serve)
+        app.nest_service("/app", serve)
     } else {
         app.route("/app", get(webviewer_unavailable))
             .route("/app/", get(webviewer_unavailable))
