@@ -24,7 +24,7 @@ BINDIR="$PREFIX/bin"
 # --- OpenReach minisign public key (pinned) --------------------------------
 # Filled in by deploy/release/setup-keys.sh at release-signing setup time.
 # Until then it stays the sentinel and install falls back to checksum-only.
-MINISIGN_PUB="RWQ_OPENREACH_PUBKEY_PLACEHOLDER"
+MINISIGN_PUB="RWQnk2aLGipco6JBuLuYSY8TCxq9PCnKfwJqXyWRWEGrsW71VOB47bxl"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
