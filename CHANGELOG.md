@@ -2,7 +2,57 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
-## [Unreleased]
+## [0.2.0] - 2026-07-05
+
+Pure-Rust default build, a browser viewer, and a public landing page.
+
+### Pure-Rust toolchain (C removed from the default build)
+- **protoc → `protox`.** The protobuf schema now compiles with the pure-Rust
+  `protox` at build time; no `protoc` binary is required anywhere (dropped from the
+  build scripts, CI, and the release workflow / Docker image).
+- **Audio is opt-in.** Opus (`audiopus`, C libopus via CMake) + `cpal` moved behind
+  `--features audio` in `rmd-codec`/`rmd-session` (forwarded by `rmd-host`/
+  `rmd-viewer`). Runtime behaviour is unchanged (audio was already off by default);
+  the default build no longer needs CMake/libopus. `RMD_AUDIO=1` on a feature-built
+  binary still enables host→viewer Opus.
+- **minisign CLI → `rsign2`.** Release signing prefers the pure-Rust `rsign2`
+  (identical minisign signature format), falling back to the `minisign` C CLI. The
+  pinned public key and users' verification are unchanged.
+- **Payoff: universal macOS builds.** With the C bits gated off, **Apple-Silicon
+  (arm64) macOS cross-builds now succeed** (previously blocked by the audiopus
+  CMake step) — the release ships both Intel and Apple-Silicon macOS binaries.
+
+### Video codecs
+- **Codec abstraction.** `VideoCodec { H264 (default), Av1 }` behind the existing
+  `Encoder`/`Decoder` traits with a single dispatch chokepoint. H.264 remains the
+  symmetric default (native encode+decode, browser-decodable).
+- **Pure-Rust AV1 encoder (`rav1e`), opt-in via `--features av1`** and `RMD_CODEC=av1`.
+  Encode-only: there is no pure-Rust AV1 *decoder* with a library API, so AV1 is for
+  browser viewers (which decode it themselves); native viewers always use H.264.
+  **Caveat:** `rav1e` (speed preset 10) is **not real-time** for full-motion desktop
+  on typical CPUs (≈366 ms/frame at 720p on an Intel Mac) — it's for low-motion
+  content or strong hardware, not a real-time default. See `examples/av1_bench.rs`.
+- **In-band codec negotiation** (protocol MINOR 5): `Hello.supported_video_codecs`
+  + `HelloAck.video_codec`. The host announces its codec and cleanly rejects a
+  viewer that can't decode it (legacy peers are treated as H.264-only).
+
+### Browser viewer (`apps/web-viewer`, WASM)
+- A **no-install browser viewer**: authenticates to the rendezvous over WebSocket
+  (the exact native `/ws` relay protocol), acts as the WebRTC answerer to a native
+  host, shows the browser-decoded H.264 in a `<video>` element, and sends mouse/
+  keyboard input over the control data channel as `rmd-protocol` protobufs. Built
+  with `trunk` (~245 KB wasm). _Preview: live browser↔host WebRTC interop is not yet
+  validated end-to-end; a wgpu-canvas render path is a planned follow-up._
+
+### Landing page + hosting
+- **Host-based routing** in the rendezvous: the apex `reachmy.dev` serves a public
+  **landing page** (explains the app, links downloads + the console + the web
+  viewer); `app.reachmy.dev` serves the existing console. `/install.sh` serves the
+  `curl | sh` installer; `/app` serves the web-viewer bundle (`tower-http` ServeDir,
+  `.wasm` as `application/wasm`). The Docker image builds + bundles the viewer; the
+  reference Caddy deploy serves both hostnames.
+
+## [0.1.0] - 2026-07-05
 
 ### Security hardening (branch `security-hardening`)
 Seven workstreams (A–G). Every change is build-, clippy-, and test-clean; the

@@ -13,12 +13,15 @@ else, point both at your own rendezvous server on a cheap VPS, and get a low-lat
 
 ## Components
 
-- **Host agent** (`apps/host`) — captures the screen, hardware/software H.264-encodes it, streams it over
-  WebRTC, and injects the viewer's keyboard/mouse. Headless; runs unattended.
-- **Viewer** (`apps/viewer`) — GPU-accelerated (winit + wgpu) display of the remote desktop; sends input.
-- **Rendezvous** (`apps/rendezvous`) — self-hostable signaling + device registry + **web console**
-  (axum + SQLite), paired with **coturn** for STUN/TURN. Ships as Docker + a Cloudflare-tunnel or
-  Caddy/ACME deployment.
+- **Host agent** (`apps/host`) — captures the screen, **pure-Rust** encodes it (H.264 by default; optional
+  AV1 via `rav1e`, `--features av1`), streams it over WebRTC, and injects the viewer's keyboard/mouse.
+  Headless; runs unattended. Ships for macOS (Intel + Apple Silicon) and Linux.
+- **Viewer** (`apps/viewer`) — GPU-accelerated (winit + wgpu) native display of the remote desktop; sends input.
+- **Web viewer** (`apps/web-viewer`) — a **no-install browser viewer** (WASM): connects over WebRTC and
+  decodes H.264 in the browser. Served at `/app` by the rendezvous. _Preview in 0.2.0._
+- **Rendezvous** (`apps/rendezvous`) — self-hostable signaling + device registry + **web console** +
+  **public landing page** (axum + SQLite), paired with **coturn** for STUN/TURN. Ships as Docker + a
+  Cloudflare-tunnel or Caddy/ACME deployment.
 
 ## How it fits together
 
