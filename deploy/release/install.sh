@@ -1,27 +1,27 @@
 #!/bin/sh
-# OpenReach installer — downloads the latest signed release for your OS/arch,
+# ReachMyDevice installer — downloads the latest signed release for your OS/arch,
 # verifies it, and installs the binaries into ~/.local/bin (override with
-# OPENREACH_PREFIX). POSIX sh; safe to pipe:
+# RMD_PREFIX). POSIX sh; safe to pipe:
 #
-#   curl -fsSL https://raw.githubusercontent.com/Brainwires/openreach/main/deploy/release/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Brainwires/reachmydevice/main/deploy/release/install.sh | sh
 #
 # Env overrides:
-#   OPENREACH_PREFIX=/usr/local     install prefix (binaries go in $PREFIX/bin)
-#   OPENREACH_VERSION=v0.1.0        pin a specific release (default: latest)
-#   OPENREACH_GH_REPO=owner/repo    source repo (default: Brainwires/openreach)
+#   RMD_PREFIX=/usr/local     install prefix (binaries go in $PREFIX/bin)
+#   RMD_VERSION=v0.1.0        pin a specific release (default: latest)
+#   RMD_GH_REPO=owner/repo    source repo (default: Brainwires/reachmydevice)
 #
 # Verification: if `minisign` is installed the release signature is checked
-# against OpenReach's pinned public key (below). Otherwise the SHA-256 checksum
+# against ReachMyDevice's pinned public key (below). Otherwise the SHA-256 checksum
 # is verified (integrity, via HTTPS transport authenticity) and a note is printed
 # on how to get full signature verification.
 
 set -eu
 
-GH_REPO="${OPENREACH_GH_REPO:-Brainwires/openreach}"
-PREFIX="${OPENREACH_PREFIX:-$HOME/.local}"
+GH_REPO="${RMD_GH_REPO:-Brainwires/reachmydevice}"
+PREFIX="${RMD_PREFIX:-$HOME/.local}"
 BINDIR="$PREFIX/bin"
 
-# --- OpenReach minisign public key (pinned) --------------------------------
+# --- ReachMyDevice minisign public key (pinned) --------------------------------
 # Filled in by deploy/release/setup-keys.sh at release-signing setup time.
 # Until then it stays the sentinel and install falls back to checksum-only.
 MINISIGN_PUB="RWQnk2aLGipco6JBuLuYSY8TCxq9PCnKfwJqXyWRWEGrsW71VOB47bxl"
@@ -44,7 +44,7 @@ case "$OS" in
     die "Windows is build-from-source only (no prebuilt binaries).
     Install Rust + protoc, then:
       git clone --recurse-submodules https://github.com/$GH_REPO
-      cd openreach && cargo build --release -p openreach-host -p openreach-viewer
+      cd rmd && cargo build --release -p rmd-host -p rmd-viewer
     See https://github.com/$GH_REPO#build" ;;
   *) die "unsupported OS: $OS" ;;
 esac
@@ -61,23 +61,23 @@ case "$SLUG" in
   linux-x86_64|macos-x86_64|macos-arm64) : ;;
   *) die "no prebuilt binary for $SLUG. Build from source:
       git clone --recurse-submodules https://github.com/$GH_REPO
-      cd openreach && cargo build --release -p openreach-host -p openreach-viewer
+      cd rmd && cargo build --release -p rmd-host -p rmd-viewer
     See https://github.com/$GH_REPO#build" ;;
 esac
 
 # --- Resolve version -------------------------------------------------------
 API="https://api.github.com/repos/$GH_REPO"
-if [ -n "${OPENREACH_VERSION:-}" ]; then
-  TAG="$OPENREACH_VERSION"; case "$TAG" in v*) : ;; *) TAG="v$TAG" ;; esac
+if [ -n "${RMD_VERSION:-}" ]; then
+  TAG="$RMD_VERSION"; case "$TAG" in v*) : ;; *) TAG="v$TAG" ;; esac
 else
   say "Resolving latest release of $GH_REPO"
   TAG="$($DL "$API/releases/latest" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/')"
   [ -n "$TAG" ] || die "could not resolve latest release (is one published yet?)"
 fi
 VER="${TAG#v}"
-say "Installing OpenReach $TAG ($SLUG)"
+say "Installing ReachMyDevice $TAG ($SLUG)"
 
-TARBALL="openreach-$VER-$SLUG.tar.gz"
+TARBALL="rmd-$VER-$SLUG.tar.gz"
 BASE="https://github.com/$GH_REPO/releases/download/$TAG"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 cd "$TMP"
@@ -90,13 +90,13 @@ say "Downloading $TARBALL"
 fetch "$BASE/$TARBALL" "$TARBALL" || die "no $SLUG build in release $TAG.
     This platform may not have a prebuilt binary yet — build from source:
       git clone --recurse-submodules https://github.com/$GH_REPO
-      cd openreach && cargo build --release -p openreach-host -p openreach-viewer
+      cd rmd && cargo build --release -p rmd-host -p rmd-viewer
     See https://github.com/$GH_REPO#build"
 
 # --- Verify ----------------------------------------------------------------
 verified=""
 case "$MINISIGN_PUB" in
-  RWQ_OPENREACH_PUBKEY_PLACEHOLDER) : ;;   # not yet configured
+  RWQ_RMD_PUBKEY_PLACEHOLDER) : ;;   # not yet configured
   *)
     if command -v minisign >/dev/null 2>&1; then
       fetch "$BASE/$TARBALL.minisig" "$TARBALL.minisig" || die "signature download failed"
@@ -121,11 +121,11 @@ fi
 
 # --- Install ---------------------------------------------------------------
 tar xzf "$TARBALL"
-SRC="openreach-$VER-$SLUG/bin"
+SRC="rmd-$VER-$SLUG/bin"
 [ -d "$SRC" ] || die "unexpected archive layout"
 mkdir -p "$BINDIR"
 installed=""
-for b in openreach-host openreach-viewer openreach-rendezvous; do
+for b in rmd-host rmd-viewer rmd-rendezvous; do
   if [ -f "$SRC/$b" ]; then install -m 0755 "$SRC/$b" "$BINDIR/$b"; installed="$installed $b"; fi
 done
 say "Installed:$installed -> $BINDIR"
@@ -136,6 +136,6 @@ case ":$PATH:" in
 esac
 
 if [ "$PLAT" = macos ]; then
-  warn "Unsigned build: if macOS blocks a binary, run:  xattr -d com.apple.quarantine $BINDIR/openreach-viewer"
+  warn "Unsigned build: if macOS blocks a binary, run:  xattr -d com.apple.quarantine $BINDIR/rmd-viewer"
 fi
-say "Done. Try:  openreach-viewer   (or openreach-host on the machine to control)"
+say "Done. Try:  rmd-viewer   (or rmd-host on the machine to control)"

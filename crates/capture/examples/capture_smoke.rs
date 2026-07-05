@@ -5,13 +5,13 @@
 //! (System Settings → Privacy & Security → Screen & System Audio Recording):
 //!
 //! ```sh
-//! cargo run -p openreach-capture --example capture_smoke
+//! cargo run -p rmd-capture --example capture_smoke
 //! ```
 //!
 //! Zero frames almost always means the permission has not been granted (or the
 //! binary needs to be restarted after granting).
 
-use openreach_capture::{list_displays, start_capture, CaptureConfig};
+use rmd_capture::{list_displays, start_capture, CaptureConfig};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 

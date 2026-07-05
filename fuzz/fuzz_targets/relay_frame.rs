@@ -2,7 +2,7 @@
 //! signaling socket. Must never panic on arbitrary UTF-8.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use openreach_rendezvous::signaling::RelayFrame;
+use rmd_rendezvous::signaling::RelayFrame;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {

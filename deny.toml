@@ -1,4 +1,4 @@
-# cargo-deny configuration — supply-chain policy for OpenReach.
+# cargo-deny configuration — supply-chain policy for ReachMyDevice.
 # Run: `cargo deny check` (advisories, licenses, bans, sources). Enforced in CI.
 
 [graph]

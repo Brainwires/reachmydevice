@@ -1,4 +1,4 @@
-# OpenReach
+# ReachMyDevice
 
 **Self-hostable, end-to-end-encrypted remote desktop / KVM-over-IP.** A clean, ownable replacement for
 RealVNC's departed cloud tier: install a host agent on the machine you want to reach, a viewer anywhere
@@ -33,7 +33,7 @@ Platform backends: macOS (ScreenCaptureKit + CGEvent), Linux/X11 (XGetImage + XT
 
 ## Security
 
-OpenReach is built so the machine that introduces your devices — the rendezvous — is **untrusted for
+ReachMyDevice is built so the machine that introduces your devices — the rendezvous — is **untrusted for
 session content**. Everything below is implemented; see [`docs/threat-model.md`](docs/threat-model.md) for
 the adversary model and residual risks.
 
@@ -85,16 +85,16 @@ the adversary model and residual risks.
 **Prebuilt (macOS Apple Silicon, Linux x86_64):**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Brainwires/openreach/main/deploy/release/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Brainwires/reachmydevice/main/deploy/release/install.sh | sh
 ```
 
 Detects your OS/arch, downloads the latest **signed** release, verifies it
-(minisign if installed, otherwise SHA-256), and installs `openreach-viewer` +
-`openreach-host` into `~/.local/bin`. macOS builds are **unsigned** (no Apple
+(minisign if installed, otherwise SHA-256), and installs `rmd-viewer` +
+`rmd-host` into `~/.local/bin`. macOS builds are **unsigned** (no Apple
 Developer ID yet) — on first launch right-click → *Open*, or
-`xattr -d com.apple.quarantine ~/.local/bin/openreach-viewer`.
+`xattr -d com.apple.quarantine ~/.local/bin/rmd-viewer`.
 
-Other download options on the [Releases](https://github.com/Brainwires/openreach/releases)
+Other download options on the [Releases](https://github.com/Brainwires/reachmydevice/releases)
 page: a `.dmg` (viewer `.app`) for macOS, `.deb` packages (host + rendezvous) for
 Debian/Ubuntu, and plain `.tar.gz` archives — each with a minisign `.minisig`.
 
@@ -110,8 +110,8 @@ Debian/Ubuntu, and plain `.tar.gz` archives — each with a minisign `.minisig`.
    to get bearer tokens.
 3. **Run the host** on the machine to control:
    ```sh
-   OPENREACH_RENDEZVOUS_URL=wss://<domain>/ws OPENREACH_TOKEN=<host-token> \
-     OPENREACH_ICE=stun:stun.l.google.com:19302  cargo run --release -p openreach-host
+   RMD_RENDEZVOUS_URL=wss://<domain>/ws RMD_TOKEN=<host-token> \
+     RMD_ICE=stun:stun.l.google.com:19302  cargo run --release -p rmd-host
    ```
 4. **Run the viewer** anywhere and pick the host from the device list, or **pair directly with no account**
    from the viewer's *Pair a device* screen (share a one-time code — QR/PAKE). The env-var path also works

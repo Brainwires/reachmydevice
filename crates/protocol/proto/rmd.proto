@@ -1,13 +1,13 @@
 syntax = "proto3";
 
-// OpenReach control/data-channel wire schema.
+// ReachMyDevice control/data-channel wire schema.
 //
 // Versioning contract (see crate root): every message travels inside an `Envelope`
 // that carries the SENDER's protocol version. A receiver whose MAJOR differs must
 // reject the peer (a v1 viewer cleanly refuses an incompatible host, and vice
 // versa). Fields are only ever *added* with new tag numbers within a MAJOR line;
 // tags are never reused or repurposed, so MINOR bumps stay backward-compatible.
-package openreach.v1;
+package rmd.v1;
 
 // Top-level frame. One encoded Envelope == one data-channel message.
 message Envelope {
@@ -51,7 +51,7 @@ message Hello {
   // Reserved feature bitmask for Phase-4 negotiation (clipboard/files/audio).
   uint64 features = 3;
   // Unattended-access proof (optional). `public_key` is the 32-byte ed25519 key;
-  // `signature` is over `"openreach-access-proof-v1" || public_key`. A host with
+  // `signature` is over `"rmd-access-proof-v1" || public_key`. A host with
   // authorization enabled verifies this and checks the derived device_id against
   // its authorized list. Empty when the viewer has no identity (LAN/dev flows).
   bytes public_key = 4;
@@ -67,7 +67,7 @@ message HelloAck {
   uint64 features = 4;
   // Host's proof of identity, bound to this DTLS session (closes first-connect
   // MITM). `host_public_key` is the 32-byte ed25519 key; `host_proof` is a
-  // signature over `"openreach-access-proof-v2" || host_public_key || 0x00 ||
+  // signature over `"rmd-access-proof-v2" || host_public_key || 0x00 ||
   // dtls_fingerprint`. The viewer verifies it against the host's fingerprint from
   // the offer, then authenticates/TOFU-pins this key. Empty when the host has no
   // identity (LAN/dev).

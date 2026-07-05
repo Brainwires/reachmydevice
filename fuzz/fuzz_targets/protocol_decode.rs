@@ -5,5 +5,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = openreach_protocol::decode(data);
+    let _ = rmd_protocol::decode(data);
 });

@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use openreach_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
+use rmd_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
 
 /// Build a synthetic but structurally-valid Annex-B H.264 access unit: an SPS,
 /// a PPS, and a large IDR slice. The IDR is deliberately > MTU so it exercises

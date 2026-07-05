@@ -1,16 +1,16 @@
 //! End-to-end signaling test through the real rendezvous server.
 //!
-//! Starts the actual `openreach-rendezvous` axum server in-process, registers a
+//! Starts the actual `rmd-rendezvous` axum server in-process, registers a
 //! user + two devices over HTTP (getting real bearer tokens), then drives two
 //! `Transport`s whose signaling flows entirely through the real
 //! `RendezvousClient` → WebSocket → server relay → other `RendezvousClient`.
 //! Asserts both peers connect and a data-channel message is delivered — proving
 //! the whole Phase-2 signaling path, not just an in-process bridge.
 
-use openreach_rendezvous::{init_state, serve, Config};
-use openreach_session::rendezvous::RendezvousClient;
-use openreach_session::Signaling;
-use openreach_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
+use rmd_rendezvous::{init_state, serve, Config};
+use rmd_session::rendezvous::RendezvousClient;
+use rmd_session::Signaling;
+use rmd_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};

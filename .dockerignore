@@ -9,4 +9,4 @@ dist
 **/*.tar.gz
 # Release signing material must never enter an image layer.
 **/minisign.key
-.openreach
+.rmd

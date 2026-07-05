@@ -1,6 +1,6 @@
-# OpenReach release pipeline
+# ReachMyDevice release pipeline
 
-How OpenReach ships prebuilt binaries. Two build hosts because **a macOS `.app`/
+How ReachMyDevice ships prebuilt binaries. Two build hosts because **a macOS `.app`/
 `.dmg` can only be produced on macOS** — Linux (biscuits) can't cross-build them.
 
 | Platform | Artifacts | Built on | Trigger |
@@ -13,7 +13,7 @@ How OpenReach ships prebuilt binaries. Two build hosts because **a macOS `.app`/
 produces `macos-x86_64`, an **Apple Silicon** Mac produces `macos-arm64`. It only
 ships the arch you can actually run and test. Users on the *other* Mac arch build
 from source until a build host for that arch exists (or run
-`OPENREACH_MAC_ARCH=arm64 build-macos.sh` to cross-build an **untested** arm64
+`RMD_MAC_ARCH=arm64 build-macos.sh` to cross-build an **untested** arm64
 binary from Intel).
 
 Both build hosts publish to the **same** GitHub Release (`v<version>`), signed with
@@ -26,22 +26,22 @@ the **same** minisign key, so `install.sh` finds every platform in one place.
 - `build-macos.sh` — macOS artifacts + `.app`/`.dmg`; run on a Mac.
 - `install.sh` — the `curl | sh` end-user installer (detect OS/arch, verify, install).
 - `setup-keys.sh` — one-time: generate the minisign signing key + pin its pubkey.
-- `openreach-minisign.pub` — the committed public key (created by `setup-keys.sh`).
+- `rmd-minisign.pub` — the committed public key (created by `setup-keys.sh`).
 
 ## One-time setup
 
 ```sh
 # 1. Generate the signing key (once, on the Mac). Commits the pubkey + pins it
-#    into install.sh; writes the secret key to ~/.openreach/minisign.key (0600).
+#    into install.sh; writes the secret key to ~/.rmd/minisign.key (0600).
 deploy/release/setup-keys.sh
 
 # 2. Copy the SAME secret key to biscuits so its webhook builds are signed too.
-scp ~/.openreach/minisign.key biscuits:~/.openreach/minisign.key
-ssh biscuits chmod 600 ~/.openreach/minisign.key
+scp ~/.rmd/minisign.key biscuits:~/.rmd/minisign.key
+ssh biscuits chmod 600 ~/.rmd/minisign.key
 
-# 3. On biscuits, add the OpenReach repo to bd-webhook's webhook.toml:
-#      [repos.openreach.tags]
-#      working_dir = "/home/nightness/openreach-dev"
+# 3. On biscuits, add the ReachMyDevice repo to bd-webhook's webhook.toml:
+#      [repos.rmd.tags]
+#      working_dir = "/home/nightness/rmd-dev"
 #      commands = [
 #        { cmd = "git", args = ["fetch", "--tags", "origin"] },
 #        { cmd = "git", args = ["checkout", "${TAG_NAME}"] },
@@ -52,7 +52,7 @@ ssh biscuits chmod 600 ~/.openreach/minisign.key
 #    at http://<biscuits>:3033/webhook with the shared secret, "push" events.
 
 # 4. Commit the pubkey + patched install.sh.
-git add deploy/release/openreach-minisign.pub deploy/release/install.sh
+git add deploy/release/rmd-minisign.pub deploy/release/install.sh
 git commit -m "release: pin minisign public key"
 ```
 
@@ -71,12 +71,12 @@ git tag v0.1.0 && git push origin v0.1.0
   ```
   It adds the `.app`/`.dmg`/tarball to the same Release.
 
-Local dry run (build, no upload): `OPENREACH_NO_UPLOAD=1 deploy/release/build-macos.sh`.
+Local dry run (build, no upload): `RMD_NO_UPLOAD=1 deploy/release/build-macos.sh`.
 
 ## What users run
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Brainwires/openreach/main/deploy/release/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Brainwires/reachmydevice/main/deploy/release/install.sh | sh
 ```
 
 Detects OS/arch, downloads the matching signed tarball, verifies it (minisign if
@@ -86,10 +86,10 @@ macOS / non-x86_64 Linux fall back to printed build-from-source instructions.
 ## Signing & verification
 
 Releases are signed with **minisign** (Ed25519). The public key is pinned in
-`install.sh` and published as `openreach-minisign.pub`. Manual check:
+`install.sh` and published as `rmd-minisign.pub`. Manual check:
 
 ```sh
-minisign -Vm openreach-0.1.0-linux-x86_64.tar.gz -P "$(tail -n1 openreach-minisign.pub)"
+minisign -Vm rmd-0.1.0-linux-x86_64.tar.gz -P "$(tail -n1 rmd-minisign.pub)"
 ```
 
 The secret key is **password-less** (created with `minisign -G -W`) so the webhook

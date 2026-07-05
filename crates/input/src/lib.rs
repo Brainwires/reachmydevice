@@ -1,6 +1,6 @@
-//! OpenReach input injection.
+//! ReachMyDevice input injection.
 //!
-//! Turns wire [`InputEvent`](openreach_protocol::input_event::Event)s (from the
+//! Turns wire [`InputEvent`](rmd_protocol::input_event::Event)s (from the
 //! viewer, over the data channel) into synthetic OS input on the host. The
 //! platform-neutral [`Injector`] trait has a macOS backend ([`mac`], CGEvent);
 //! other platforms return [`InputError::Unsupported`] until Phase 3.
@@ -10,7 +10,7 @@
 //! are mapped to native keycodes via [`keymap`] (a common-key subset in v1 —
 //! unmapped keys are logged and dropped; see `docs/macos-permissions.md`).
 
-use openreach_protocol::input_event::Event as InputEvent;
+use rmd_protocol::input_event::Event as InputEvent;
 
 pub mod keymap;
 #[cfg(target_os = "linux")]

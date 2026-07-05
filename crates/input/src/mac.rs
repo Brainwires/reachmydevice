@@ -16,8 +16,8 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
-use openreach_protocol::input_event::Event as InputEvent;
-use openreach_protocol::modifiers as m;
+use rmd_protocol::input_event::Event as InputEvent;
+use rmd_protocol::modifiers as m;
 
 /// macOS CGEvent injector.
 pub struct MacInjector {

@@ -3,13 +3,13 @@
 //! the input and drives `FileTransfers::handle`; must never panic.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use openreach_protocol::Envelope;
-use openreach_session::filexfer::FileTransfers;
-use openreach_session::FileTransferConfig;
+use rmd_protocol::Envelope;
+use rmd_session::filexfer::FileTransfers;
+use rmd_session::FileTransferConfig;
 use std::sync::{mpsc, Arc};
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(env) = openreach_protocol::decode(data) else {
+    let Ok(env) = rmd_protocol::decode(data) else {
         return;
     };
     let Some(payload) = env.payload else {
@@ -17,7 +17,7 @@ fuzz_target!(|data: &[u8]| {
     };
     let (ev_tx, _ev_rx) = mpsc::channel();
     let out: Arc<dyn Fn(Envelope) + Send + Sync> = Arc::new(|_| {});
-    let dir = std::env::temp_dir().join("openreach-fuzz-xfer");
+    let dir = std::env::temp_dir().join("rmd-fuzz-xfer");
     let mut files = FileTransfers::new(
         out,
         ev_tx,

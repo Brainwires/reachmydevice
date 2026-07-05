@@ -57,23 +57,23 @@ jobs:
       - name: Clippy (portable crates)
         run: >
           cargo clippy
-          -p openreach-protocol -p openreach-transport -p openreach-codec
-          -p openreach-input -p openreach-capture -p openreach-session
-          -p openreach-rendezvous -p openreach-signal-dev
+          -p rmd-protocol -p rmd-transport -p rmd-codec
+          -p rmd-input -p rmd-capture -p rmd-session
+          -p rmd-rendezvous -p rmd-signal-dev
           --all-targets -- -D warnings
       - name: Test (portable crates)
         run: >
           cargo test
-          -p openreach-protocol -p openreach-transport -p openreach-codec
-          -p openreach-session -p openreach-rendezvous
+          -p rmd-protocol -p rmd-transport -p rmd-codec
+          -p rmd-session -p rmd-rendezvous
       # Validate the X11 capture + input backends against a headless Xvfb server.
       - name: X11 backends smoke (Xvfb)
         run: |
-          cargo build -p openreach-capture --example capture_smoke -p openreach-input --example input_smoke
+          cargo build -p rmd-capture --example capture_smoke -p rmd-input --example input_smoke
           Xvfb :99 -screen 0 1280x720x24 >/tmp/xvfb.log 2>&1 &
           sleep 2
-          DISPLAY=:99 cargo run -q -p openreach-capture --example capture_smoke
-          DISPLAY=:99 cargo run -q -p openreach-input --example input_smoke
+          DISPLAY=:99 cargo run -q -p rmd-capture --example capture_smoke
+          DISPLAY=:99 cargo run -q -p rmd-input --example input_smoke
 
   # Supply-chain gate: advisories, licenses, banned crates, and — critically —
   # that no external git/unknown sources sneak in (the webrtc fork must stay a
@@ -137,5 +137,5 @@ jobs:
       - name: Build portable crates
         run: >
           cargo build
-          -p openreach-protocol -p openreach-codec -p openreach-rendezvous
-          -p openreach-signal-dev
+          -p rmd-protocol -p rmd-codec -p rmd-rendezvous
+          -p rmd-signal-dev

@@ -5,16 +5,16 @@
 //! actual OS audio device via `capture::start_audio_capture` (ScreenCaptureKit).
 //! Play something on the host, then run:
 //!
-//!   cargo run -p openreach-session --example audio_e2e
+//!   cargo run -p rmd-session --example audio_e2e
 //!
 //! Reports how many audio frames were delivered end-to-end and their energy —
 //! non-zero energy proves real captured audio survived the whole chain. The only
 //! link not exercised is the physical speaker (a human-ear step).
 
 use bytes::Bytes;
-use openreach_codec::{AudioDecoder, AudioEncoder, AUDIO_FRAME_SAMPLES};
-use openreach_protocol as proto;
-use openreach_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
+use rmd_codec::{AudioDecoder, AudioEncoder, AUDIO_FRAME_SAMPLES};
+use rmd_protocol as proto;
+use rmd_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
 use std::collections::VecDeque;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -30,7 +30,7 @@ fn drain(t: &Transport) -> Vec<TransportEvent> {
 fn main() -> anyhow::Result<()> {
     // Real OS audio capture (mono 48 kHz i16).
     let (cap_tx, cap_rx) = mpsc::channel::<Vec<i16>>();
-    let _capture = openreach_capture::start_audio_capture(0, cap_tx)?;
+    let _capture = rmd_capture::start_audio_capture(0, cap_tx)?;
     eprintln!("real desktop-audio capture started; play something…");
 
     let host = Transport::spawn(TransportConfig {
@@ -55,7 +55,7 @@ fn main() -> anyhow::Result<()> {
     // human can hear the full loop. Our own output is excluded from capture
     // (excludesCurrentProcessAudio), so it doesn't feed back.
     let mut playback = if std::env::var("PLAY").is_ok() {
-        match openreach_session::audio::AudioPlayback::start() {
+        match rmd_session::audio::AudioPlayback::start() {
             Ok(p) => {
                 eprintln!("playback ON — you should hear the captured audio round-tripped");
                 Some(p)

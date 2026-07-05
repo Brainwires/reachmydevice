@@ -1,13 +1,13 @@
 [package]
-name = "openreach-host"
+name = "rmd-host"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "OpenReach host agent — end-to-end-encrypted remote-desktop host (screen capture, input injection, WebRTC)."
+description = "ReachMyDevice host agent — end-to-end-encrypted remote-desktop host (screen capture, input injection, WebRTC)."
 repository.workspace = true
 
-# Debian package: `cargo deb -p openreach-host`. Ships the binary + docs; the
+# Debian package: `cargo deb -p rmd-host`. Ships the binary + docs; the
 # systemd unit is a per-user service (see deploy/service/), installed by
 # deploy/install-host.sh rather than system-wide.
 [package.metadata.deb]
@@ -15,22 +15,22 @@ maintainer = "Brainwires <viipe.com@gmail.com>"
 section = "net"
 priority = "optional"
 extended-description = """\
-OpenReach is a self-hostable, end-to-end-encrypted remote desktop / KVM-over-IP \
+ReachMyDevice is a self-hostable, end-to-end-encrypted remote desktop / KVM-over-IP \
 system. This package installs the host agent (the machine you connect to). After \
-install, run `openreach-host` or set up the per-user service with \
+install, run `rmd-host` or set up the per-user service with \
 deploy/install-host.sh."""
 
 [[bin]]
-name = "openreach-host"
+name = "rmd-host"
 path = "src/main.rs"
 
 [dependencies]
-openreach-protocol.workspace = true
-openreach-session.workspace = true
-openreach-capture.workspace = true
-openreach-codec.workspace = true
-openreach-input.workspace = true
-openreach-transport.workspace = true
+rmd-protocol.workspace = true
+rmd-session.workspace = true
+rmd-capture.workspace = true
+rmd-codec.workspace = true
+rmd-input.workspace = true
+rmd-transport.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
@@ -44,5 +44,5 @@ tray-icon = { version = "0.24", optional = true }
 winit = { version = "0.30", optional = true }
 
 [features]
-# Build the desktop tray companion (`OPENREACH_TRAY=1` then activates it).
+# Build the desktop tray companion (`RMD_TRAY=1` then activates it).
 tray = ["dep:tray-icon", "dep:winit"]

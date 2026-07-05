@@ -1,4 +1,4 @@
-# OpenReach — Architecture Decision Record
+# ReachMyDevice — Architecture Decision Record
 
 Each entry: decision, context, rationale, and consequences. Newest concerns first.
 

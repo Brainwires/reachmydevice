@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenReach</title>
+<title>ReachMyDevice</title>
 <style>
   :root {
     --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --border:#2a2f3a;
@@ -61,7 +61,7 @@
 <div class="wrap">
   <header>
     <div class="logo">OR</div>
-    <h1>OpenReach <span class="muted" style="font-weight:400">rendezvous</span></h1>
+    <h1>ReachMyDevice <span class="muted" style="font-weight:400">rendezvous</span></h1>
     <div class="sp"></div>
     <span id="whoami" class="muted"></span>
     <button id="logoutBtn" class="ghost hidden" onclick="logout()">Sign out</button>
@@ -196,7 +196,7 @@ async function registerDevice(){
   document.getElementById('tokenVal').value=token;
   const host = location.host;
   document.getElementById('onboardCmd').textContent =
-    `OPENREACH_RENDEZVOUS_URL=wss://${host}/ws \\\n  OPENREACH_TOKEN=${token} \\\n  cargo run --release -p openreach-host`;
+    `RMD_RENDEZVOUS_URL=wss://${host}/ws \\\n  RMD_TOKEN=${token} \\\n  cargo run --release -p rmd-host`;
   toast("Device registered");
   refresh();
 }

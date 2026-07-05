@@ -1,7 +1,7 @@
-//! OpenReach wire protocol.
+//! ReachMyDevice wire protocol.
 //!
 //! A single versioned [`pb::Envelope`] is the unit on the control/data channel.
-//! The wire format is Protobuf (via `prost`); see `proto/openreach.proto` and
+//! The wire format is Protobuf (via `prost`); see `proto/rmd.proto` and
 //! `docs/decisions.md` ADR-0004 for why.
 //!
 //! ## Versioning contract
@@ -12,9 +12,9 @@
 
 use prost::Message;
 
-/// Generated Protobuf types (`package openreach.v1`).
+/// Generated Protobuf types (`package rmd.v1`).
 pub mod pb {
-    include!(concat!(env!("OUT_DIR"), "/openreach.v1.rs"));
+    include!(concat!(env!("OUT_DIR"), "/rmd.v1.rs"));
 }
 
 pub use pb::{
@@ -283,7 +283,7 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
 
 /// Microseconds since a process-global monotonic epoch.
 ///
-/// All OpenReach crates call this one function so that timestamps produced in
+/// All ReachMyDevice crates call this one function so that timestamps produced in
 /// different crates within the **same process** share an epoch and are directly
 /// comparable (e.g. capture→encode→send stage latency on the host). It is *not*
 /// comparable across processes or machines — cross-process latency is measured

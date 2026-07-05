@@ -1,4 +1,4 @@
--- OpenReach rendezvous schema (Phase 2).
+-- ReachMyDevice rendezvous schema (Phase 2).
 -- Accounts own devices; devices authenticate with bearer tokens. Device identity
 -- is a long-lived keypair generated on the client's first run; the server stores
 -- the public key for TOFU display and never holds any session key material.

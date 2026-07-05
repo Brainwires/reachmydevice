@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Build + package + publish the OpenReach Linux (x86_64) release artifacts.
+# Build + package + publish the ReachMyDevice Linux (x86_64) release artifacts.
 #
 # Runs locally on a Linux build host (e.g. biscuits), triggered by bd-webhook on
 # a version-tag push. Produces, in ./dist:
-#   - raw binaries:      openreach-{host,viewer,rendezvous}-linux-x86_64
-#   - tarball:           openreach-<version>-linux-x86_64.tar.gz
-#   - Debian packages:   openreach-host_<version>_amd64.deb, openreach-rendezvous_..._amd64.deb
+#   - raw binaries:      rmd-{host,viewer,rendezvous}-linux-x86_64
+#   - tarball:           rmd-<version>-linux-x86_64.tar.gz
+#   - Debian packages:   rmd-host_<version>_amd64.deb, rmd-rendezvous_..._amd64.deb
 #   - SHA256SUMS + a .minisig for every artifact
 # then creates/updates the GitHub Release v<version> and uploads them all.
 #
 # Usage:
 #   deploy/release/build-linux.sh [VERSION]        # VERSION defaults to workspace version
-#   OPENREACH_NO_UPLOAD=1 deploy/release/build-linux.sh   # build only, no gh upload
+#   RMD_NO_UPLOAD=1 deploy/release/build-linux.sh   # build only, no gh upload
 #
 # Build deps (Debian/Ubuntu): rustup toolchain, protobuf-compiler, nasm,
 # pkg-config, libx11-dev libxext-dev libxtst-dev libxdamage-dev libxcb1-dev
@@ -22,9 +22,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 TARGET="x86_64-unknown-linux-gnu"
 ARCH="x86_64"
 VERSION="$(resolve_version "${1:-}")"
-BINS=(openreach-host openreach-viewer openreach-rendezvous)
+BINS=(rmd-host rmd-viewer rmd-rendezvous)
 
-log "OpenReach Linux release build — version $VERSION, target $TARGET"
+log "ReachMyDevice Linux release build — version $VERSION, target $TARGET"
 cd "$REPO_ROOT"
 require_cmd cargo "install Rust via rustup"
 require_cmd protoc "apt-get install protobuf-compiler"
@@ -49,7 +49,7 @@ done
 
 # --- 3. Tarball ------------------------------------------------------------
 STAGE="$(mktemp -d)"
-PKG="openreach-$VERSION-linux-$ARCH"
+PKG="rmd-$VERSION-linux-$ARCH"
 mkdir -p "$STAGE/$PKG/bin"
 for b in "${BINS[@]}"; do install -m 0755 "$BINDIR/$b" "$STAGE/$PKG/bin/$b"; done
 install -m 0755 deploy/install-host.sh "$STAGE/$PKG/install-host.sh"
@@ -65,7 +65,7 @@ if ! command -v cargo-deb >/dev/null 2>&1; then
   log "Installing cargo-deb"
   cargo install cargo-deb --locked
 fi
-for pkg in openreach-host openreach-rendezvous; do
+for pkg in rmd-host rmd-rendezvous; do
   log "Building .deb for $pkg"
   # --no-build: reuse the release binaries we just compiled.
   cargo deb -p "$pkg" --no-build --target "$TARGET" --output "$DIST_DIR/" \
@@ -74,7 +74,7 @@ done
 
 # --- 5. Optional SBOM ------------------------------------------------------
 if command -v cargo-cyclonedx >/dev/null 2>&1; then
-  cargo cyclonedx --format json --all --override-filename "$DIST_DIR/openreach-sbom-linux-$ARCH" \
+  cargo cyclonedx --format json --all --override-filename "$DIST_DIR/rmd-sbom-linux-$ARCH" \
     >/dev/null 2>&1 || warn "SBOM generation failed (skipping)"
 fi
 
@@ -84,4 +84,4 @@ write_checksums
 log "Artifacts in $DIST_DIR:"; ls -la "$DIST_DIR"
 
 publish_release "$VERSION"
-log "Done: OpenReach $VERSION (linux-$ARCH)"
+log "Done: ReachMyDevice $VERSION (linux-$ARCH)"

@@ -1,4 +1,4 @@
-//! OpenReach rendezvous server library.
+//! ReachMyDevice rendezvous server library.
 //!
 //! Self-hostable signaling + device registry. The binary ([`main`](../main.rs))
 //! is a thin wrapper over [`init_state`] + [`router`]; exposing them as a library
@@ -80,5 +80,5 @@ async fn root() -> axum::response::Html<&'static str> {
 
 /// Liveness probe.
 async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok", "service": "openreach-rendezvous" }))
+    Json(serde_json::json!({ "status": "ok", "service": "rmd-rendezvous" }))
 }

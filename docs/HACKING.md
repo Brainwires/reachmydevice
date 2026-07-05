@@ -1,4 +1,4 @@
-# HACKING — OpenReach developer guide
+# HACKING — ReachMyDevice developer guide
 
 ## Prerequisites
 - Rust (pinned in `rust-toolchain.toml`), `protoc` (Protobuf compiler) for the `protocol` crate.
@@ -22,12 +22,12 @@ Builds are then offline/reproducible — no crates.io/git fetch for the transpor
 ## Common commands
 ```sh
 cargo build                       # build everything
-cargo test -p openreach-protocol  # test one crate
+cargo test -p rmd-protocol  # test one crate
 cargo clippy --all-targets --all-features
 cargo fmt --all
 # Fuzzing (needs nightly + `cargo install cargo-fuzz`):
 cd fuzz && cargo +nightly fuzz run protocol_decode   # or filexfer_handle / relay_frame
-RUST_LOG=debug cargo run -p openreach-host    # run host with debug logs
+RUST_LOG=debug cargo run -p rmd-host    # run host with debug logs
 ```
 
 ## Transport (sans-IO rtc fork)
@@ -38,7 +38,7 @@ the fork under `examples/examples/` (notably `play-from-disk-h26x`, `data-channe
 ## Spike run (two LAN machines)
 1. On both machines: `cargo build --release`.
 2. Start `signal-dev` on one machine (rendezvous stand-in).
-3. Start `openreach-host` on machine A; `openreach-viewer` on machine B; they exchange SDP/ICE via signal-dev.
+3. Start `rmd-host` on machine A; `rmd-viewer` on machine B; they exchange SDP/ICE via signal-dev.
 4. Grant macOS permissions when prompted. Confirm live screen + remote control; read latency logs.
 
 ## Logging & debug bundles

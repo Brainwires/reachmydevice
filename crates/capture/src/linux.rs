@@ -14,7 +14,7 @@ use crate::{
     CaptureConfig, CaptureError, CaptureSession, DisplayInfo, Frame, FrameSink, PixelFormat,
 };
 use bytes::Bytes;
-use openreach_protocol::monotonic_micros;
+use rmd_protocol::monotonic_micros;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -85,7 +85,7 @@ pub fn start_capture(
     let fps = config.fps.max(1);
 
     std::thread::Builder::new()
-        .name("openreach-x11-capture".into())
+        .name("rmd-x11-capture".into())
         .spawn(move || {
             // Own the connection on the capture thread.
             let (conn, _default_screen) = match x11rb::connect(None) {

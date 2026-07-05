@@ -6,8 +6,8 @@
 //! screen, window, or OS permissions. (Screen capture, input injection, and
 //! on-glass rendering are validated separately on-device; see the Phase 1 report.)
 
-use openreach_codec::{new_decoder, new_encoder, EncoderConfig};
-use openreach_transport::{SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole};
+use rmd_codec::{new_decoder, new_encoder, EncoderConfig};
+use rmd_transport::{SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole};
 use std::time::{Duration, Instant};
 
 /// Drain all currently-available events from a transport.

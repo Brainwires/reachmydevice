@@ -19,7 +19,7 @@ use crate::{
     PixelFormat,
 };
 use bytes::Bytes;
-use openreach_protocol::monotonic_micros;
+use rmd_protocol::monotonic_micros;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -68,7 +68,7 @@ define_class!(
     // - `StreamOutput` does not implement `Drop` (its only ivar, a `FrameSink`,
     //   is dropped automatically by the generated `dealloc`).
     #[unsafe(super(NSObject))]
-    #[name = "OpenReachStreamOutput"]
+    #[name = "ReachMyDeviceStreamOutput"]
     #[ivars = FrameSink]
     struct StreamOutput;
 
@@ -347,7 +347,7 @@ pub fn start_capture(
 
     // Serial queue for sample delivery — keeps frames ordered and off the main
     // thread.
-    let queue = DispatchQueue::new("com.openreach.capture", DispatchQueueAttr::SERIAL);
+    let queue = DispatchQueue::new("com.rmd.capture", DispatchQueueAttr::SERIAL);
 
     // SAFETY: FFI; registers our output for screen samples on `queue`.
     unsafe {
@@ -395,7 +395,7 @@ define_class!(
     // SAFETY: superclass `NSObject` has no subclassing requirements; the only
     // ivar (an `AudioSink`) is dropped by the generated `dealloc`.
     #[unsafe(super(NSObject))]
-    #[name = "OpenReachAudioOutput"]
+    #[name = "ReachMyDeviceAudioOutput"]
     #[ivars = AudioSink]
     struct AudioStreamOutput;
 
@@ -551,7 +551,7 @@ pub fn start_audio_capture(
         )
     };
 
-    let queue = DispatchQueue::new("com.openreach.audio", DispatchQueueAttr::SERIAL);
+    let queue = DispatchQueue::new("com.rmd.audio", DispatchQueueAttr::SERIAL);
 
     // SAFETY: FFI; registers our output for AUDIO samples on `queue`.
     unsafe {

@@ -11,12 +11,12 @@ use crate::filexfer::{FileEvent, FileTransferConfig, FileTransfers};
 use crate::signal::Signaling;
 use bytes::Bytes;
 use std::sync::atomic::AtomicU64;
-use openreach_capture as capture;
-use openreach_codec as codec;
-use openreach_input as input;
-use openreach_protocol as proto;
-use openreach_protocol::pb::envelope::Payload;
-use openreach_transport::{
+use rmd_capture as capture;
+use rmd_codec as codec;
+use rmd_input as input;
+use rmd_protocol as proto;
+use rmd_protocol::pb::envelope::Payload;
+use rmd_transport::{
     SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole, TransportSender,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,7 +62,7 @@ impl Default for HostConfig {
             height: 1080,
             fps: 30,
             bitrate_bps: 8_000_000,
-            device_name: "openreach-host".to_string(),
+            device_name: "rmd-host".to_string(),
             ice_servers: Vec::new(),
             bind_addr: "0.0.0.0:0".to_string(),
             enable_audio: false,
@@ -169,14 +169,14 @@ where
         authorized: cfg.authorized_device_ids.iter().cloned().collect(),
     };
     // An unattended host must stay reachable, so inhibit system idle sleep for
-    // the host's lifetime (opt out with OPENREACH_NO_KEEPAWAKE). Held in `_keep_awake`.
+    // the host's lifetime (opt out with RMD_NO_KEEPAWAKE). Held in `_keep_awake`.
     let _keep_awake = if access.require {
         tracing::info!(
             authorized = access.authorized.len(),
             "unattended access ENFORCED: only authorized devices may connect"
         );
-        (std::env::var("OPENREACH_NO_KEEPAWAKE").is_err())
-            .then(|| crate::power::prevent_sleep("OpenReach unattended host"))
+        (std::env::var("RMD_NO_KEEPAWAKE").is_err())
+            .then(|| crate::power::prevent_sleep("ReachMyDevice unattended host"))
     } else {
         tracing::warn!("unattended access gate OFF: any viewer completing the handshake is accepted");
         None
@@ -396,7 +396,7 @@ fn spawn_encode_thread(
         bitrate_bps: cfg.bitrate_bps,
     };
     std::thread::Builder::new()
-        .name("openreach-encode".into())
+        .name("rmd-encode".into())
         .spawn(move || {
             let mut encoder = match codec::new_encoder(enc_cfg) {
                 Ok(e) => e,
@@ -534,7 +534,7 @@ fn log_file_event(ev: FileEvent) {
 mod tests {
     use super::AccessControl;
     use crate::identity::DeviceIdentity;
-    use openreach_protocol as proto;
+    use rmd_protocol as proto;
     use std::collections::HashSet;
 
     /// Build a viewer `Hello` carrying an access proof bound to `binding`.

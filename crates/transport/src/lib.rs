@@ -1,4 +1,4 @@
-//! OpenReach transport — WebRTC over the sans-IO `rtc` fork (ADR-0003).
+//! ReachMyDevice transport — WebRTC over the sans-IO `rtc` fork (ADR-0003).
 //!
 //! The `rtc` `RTCPeerConnection` is `!Send` and `&mut self`-driven, so it lives
 //! on a dedicated OS thread running the sans-IO driver loop ([`driver`]). The
@@ -154,7 +154,7 @@ impl Transport {
         let driver_bitrate = bitrate_bps.clone();
 
         let handle = std::thread::Builder::new()
-            .name("openreach-transport".into())
+            .name("rmd-transport".into())
             .spawn(move || {
                 if let Err(e) = driver::run(config, cmd_rx, event_tx, driver_bitrate) {
                     tracing::error!("transport driver exited with error: {e:?}");

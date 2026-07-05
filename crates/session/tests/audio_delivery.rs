@@ -11,9 +11,9 @@
 //! here).
 
 use bytes::Bytes;
-use openreach_codec::{AudioDecoder, AudioEncoder, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE};
-use openreach_protocol as proto;
-use openreach_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
+use rmd_codec::{AudioDecoder, AudioEncoder, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE};
+use rmd_protocol as proto;
+use rmd_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
 use std::time::{Duration, Instant};
 
 fn drain(t: &Transport) -> Vec<TransportEvent> {

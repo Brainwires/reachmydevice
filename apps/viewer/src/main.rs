@@ -1,9 +1,9 @@
-//! OpenReach viewer app.
+//! ReachMyDevice viewer app.
 //!
 //! A winit 0.30 + wgpu 29 window that renders decoded remote-desktop frames and
 //! forwards local input back to the host, with an [`egui`] UI layered over the
 //! same wgpu surface. The heavy lifting (transport, decode, signaling, account
-//! REST) lives in [`openreach_session`]; this binary is the UI shell.
+//! REST) lives in [`rmd_session`]; this binary is the UI shell.
 //!
 //! - [`Gpu`] owns the wgpu surface/device/pipeline. Each frame it blits the
 //!   latest RGBA frame onto a fullscreen quad (aspect-preserving letterbox — see
@@ -16,26 +16,26 @@
 //! threads so the GUI never blocks; results arrive over a channel ([`Job`]).
 //!
 //! ## Quick-connect (headless/scripted) fallback
-//! If `OPENREACH_TOKEN` and `OPENREACH_PEER_DEVICE_ID` are set the login/device
+//! If `RMD_TOKEN` and `RMD_PEER_DEVICE_ID` are set the login/device
 //! screens are skipped and the app connects straight through, matching the old
-//! env-driven behaviour (`OPENREACH_RENDEZVOUS_URL` as the ws URL, or
-//! `OPENREACH_SIGNAL_ADDR` for the LAN relay).
+//! env-driven behaviour (`RMD_RENDEZVOUS_URL` as the ws URL, or
+//! `RMD_SIGNAL_ADDR` for the LAN relay).
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use openreach_protocol as proto;
-use openreach_protocol::input_event::Event as InputEvent;
-use openreach_protocol::{KeyEvent, MouseButton, MouseMove, MouseScroll};
-use openreach_session::rendezvous::RendezvousClient;
-use openreach_session::{
+use rmd_protocol as proto;
+use rmd_protocol::input_event::Event as InputEvent;
+use rmd_protocol::{KeyEvent, MouseButton, MouseMove, MouseScroll};
+use rmd_session::rendezvous::RendezvousClient;
+use rmd_session::{
     identity::known_peers, pairing::generate_pairing_code, pairing_client::pair_pake, AccountClient,
     DeviceIdentity, DeviceInfo, FileEvent, SignalClient, Signaling, ViewerConfig, ViewerSession,
     ViewerUpdate,
 };
-use openreach_protocol::DisplayDescriptor;
+use rmd_protocol::DisplayDescriptor;
 
 use egui_wgpu::ScreenDescriptor;
 use winit::application::ApplicationHandler;
@@ -53,7 +53,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(4);
 const PING_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Default rendezvous server shown in the login form (overridable in the field
-/// or via `OPENREACH_RENDEZVOUS_URL`).
+/// or via `RMD_RENDEZVOUS_URL`).
 const DEFAULT_SERVER: &str = "https://openreach.brainwires.dev";
 
 fn main() {
@@ -187,11 +187,11 @@ struct App {
     displays: Vec<DisplayDescriptor>,
     /// The display id currently selected in the picker.
     active_display: u32,
-    /// Whether to play host audio (opt-in; set via `OPENREACH_AUDIO`).
+    /// Whether to play host audio (opt-in; set via `RMD_AUDIO`).
     enable_audio: bool,
 
     // input bookkeeping
-    /// Current keyboard modifier bitmask (`openreach_protocol::modifiers`).
+    /// Current keyboard modifier bitmask (`rmd_protocol::modifiers`).
     modifiers: u32,
     /// Last cursor position, normalized to [0, 1] over the window.
     last_cursor: (f64, f64),
@@ -225,8 +225,8 @@ impl App {
         let this_device_id = identity.device_id();
 
         let device_name =
-            std::env::var("OPENREACH_NAME").unwrap_or_else(|_| "openreach-viewer".into());
-        let ice_servers = std::env::var("OPENREACH_ICE")
+            std::env::var("RMD_NAME").unwrap_or_else(|_| "rmd-viewer".into());
+        let ice_servers = std::env::var("RMD_ICE")
             .map(|s| {
                 s.split(',')
                     .map(|x| x.trim().to_string())
@@ -234,8 +234,8 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
-        let bind_addr = std::env::var("OPENREACH_BIND").unwrap_or_else(|_| "0.0.0.0:0".into());
-        let server_url = std::env::var("OPENREACH_RENDEZVOUS_URL")
+        let bind_addr = std::env::var("RMD_BIND").unwrap_or_else(|_| "0.0.0.0:0".into());
+        let server_url = std::env::var("RMD_RENDEZVOUS_URL")
             .ok()
             .filter(|u| u.starts_with("http"))
             .unwrap_or_else(|| DEFAULT_SERVER.into());
@@ -274,7 +274,7 @@ impl App {
             file_status: None,
             displays: Vec::new(),
             active_display: 0,
-            enable_audio: std::env::var("OPENREACH_AUDIO").is_ok(),
+            enable_audio: std::env::var("RMD_AUDIO").is_ok(),
             modifiers: 0,
             last_cursor: (0.0, 0.0),
             job: None,
@@ -471,7 +471,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.job = Some(rx);
         std::thread::Builder::new()
-            .name("openreach-viewer-job".into())
+            .name("rmd-viewer-job".into())
             .spawn(move || {
                 let _ = tx.send(f());
             })
@@ -847,7 +847,7 @@ impl App {
         egui::CentralPanel::default().show(root, |ui| {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
-                ui.heading("OpenReach");
+                ui.heading("ReachMyDevice");
                 ui.label("Sign in to your rendezvous server");
             });
             ui.add_space(16.0);
@@ -1248,7 +1248,7 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("OpenReach Viewer");
+        let attrs = Window::default_attributes().with_title("ReachMyDevice Viewer");
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -1433,10 +1433,10 @@ impl ApplicationHandler for App {
 /// back to the login UI.
 fn quick_connect_signaling() -> Option<anyhow::Result<Box<dyn Signaling>>> {
     if let (Ok(token), Ok(peer)) = (
-        std::env::var("OPENREACH_TOKEN"),
-        std::env::var("OPENREACH_PEER_DEVICE_ID"),
+        std::env::var("RMD_TOKEN"),
+        std::env::var("RMD_PEER_DEVICE_ID"),
     ) {
-        let ws = std::env::var("OPENREACH_RENDEZVOUS_URL")
+        let ws = std::env::var("RMD_RENDEZVOUS_URL")
             .unwrap_or_else(|_| "wss://openreach.brainwires.dev/ws".into());
         tracing::info!(%ws, %peer, "quick-connect via rendezvous");
         return Some(
@@ -1444,7 +1444,7 @@ fn quick_connect_signaling() -> Option<anyhow::Result<Box<dyn Signaling>>> {
                 .map(|c| Box::new(c) as Box<dyn Signaling>),
         );
     }
-    if let Ok(addr) = std::env::var("OPENREACH_SIGNAL_ADDR") {
+    if let Ok(addr) = std::env::var("RMD_SIGNAL_ADDR") {
         tracing::info!(%addr, "quick-connect via LAN relay");
         return Some(SignalClient::connect(&addr).map(|c| Box::new(c) as Box<dyn Signaling>));
     }
@@ -1453,16 +1453,16 @@ fn quick_connect_signaling() -> Option<anyhow::Result<Box<dyn Signaling>>> {
 
 // --- small helpers ---------------------------------------------------------
 
-/// The config directory for identity + known-peers (`$XDG_CONFIG_HOME/openreach`
-/// or `~/.config/openreach`).
+/// The config directory for identity + known-peers (`$XDG_CONFIG_HOME/rmd`
+/// or `~/.config/rmd`).
 fn config_dir() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("openreach");
+        return PathBuf::from(xdg).join("rmd");
     }
     if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".config").join("openreach");
+        return PathBuf::from(home).join(".config").join("rmd");
     }
-    PathBuf::from(".openreach")
+    PathBuf::from(".rmd")
 }
 
 /// Human-readable byte count (e.g. `3.2 MB`).
@@ -1578,7 +1578,7 @@ impl Gpu {
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("openreach-viewer device"),
+                label: Some("rmd-viewer device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 experimental_features: wgpu::ExperimentalFeatures::disabled(),
@@ -1609,7 +1609,7 @@ impl Gpu {
         surface.configure(&device, &config);
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("openreach-viewer bind group layout"),
+            label: Some("rmd-viewer bind group layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -1641,18 +1641,18 @@ impl Gpu {
         });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("openreach-viewer blit shader"),
+            label: Some("rmd-viewer blit shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("openreach-viewer pipeline layout"),
+            label: Some("rmd-viewer pipeline layout"),
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("openreach-viewer blit pipeline"),
+            label: Some("rmd-viewer blit pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -1678,14 +1678,14 @@ impl Gpu {
         });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("openreach-viewer sampler"),
+            label: Some("rmd-viewer sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("openreach-viewer uniforms"),
+            label: Some("rmd-viewer uniforms"),
             size: std::mem::size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -1728,7 +1728,7 @@ impl Gpu {
 
     /// Upload a decoded RGBA frame, (re)creating the texture and bind group when
     /// the incoming dimensions change.
-    fn upload_frame(&mut self, frame: &openreach_codec::DecodedFrame) {
+    fn upload_frame(&mut self, frame: &rmd_codec::DecodedFrame) {
         let (w, h) = (frame.width.max(1), frame.height.max(1));
         let needs_new = self
             .frame
@@ -1737,7 +1737,7 @@ impl Gpu {
 
         if needs_new {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("openreach-viewer frame texture"),
+                label: Some("rmd-viewer frame texture"),
                 size: wgpu::Extent3d {
                     width: w,
                     height: h,
@@ -1752,7 +1752,7 @@ impl Gpu {
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("openreach-viewer bind group"),
+                label: Some("rmd-viewer bind group"),
                 layout: &self.bind_group_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
@@ -1837,7 +1837,7 @@ impl Gpu {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("openreach-viewer encoder"),
+                label: Some("rmd-viewer encoder"),
             });
 
         let user_cmd_bufs = self.egui_renderer.update_buffers(
@@ -1851,7 +1851,7 @@ impl Gpu {
         // Pass 1: clear + video blit.
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("openreach-viewer blit pass"),
+                label: Some("rmd-viewer blit pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -1889,7 +1889,7 @@ impl Gpu {
         {
             let mut pass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("openreach-viewer egui pass"),
+                    label: Some("rmd-viewer egui pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &view,
                         resolve_target: None,

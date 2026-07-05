@@ -413,9 +413,9 @@ fn run_host(
     // negotiated in the initial SDP.
     let video_ssrc: SSRC = rand::random();
     let track = MediaStreamTrack::new(
-        "openreach-video".to_owned(),
-        "openreach-video-track".to_owned(),
-        "openreach-video-label".to_owned(),
+        "rmd-video".to_owned(),
+        "rmd-video-track".to_owned(),
+        "rmd-video-label".to_owned(),
         RtpCodecKind::Video,
         vec![RTCRtpEncodingParameters {
             rtp_coding_parameters: RTCRtpCodingParameters {
@@ -1207,7 +1207,7 @@ mod tests {
     /// Network-gated: runs the real srflx gathering against Google's public
     /// STUN server and asserts we learn a *public* (non-private, non-loopback)
     /// IPv4 address. Ignored by default so CI doesn't flake on network access;
-    /// run with `cargo test -p openreach-transport -- --ignored`.
+    /// run with `cargo test -p rmd-transport -- --ignored`.
     #[test]
     #[ignore = "requires outbound UDP to a public STUN server"]
     fn srflx_gathering_finds_public_address() {

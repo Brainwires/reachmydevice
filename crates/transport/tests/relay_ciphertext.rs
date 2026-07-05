@@ -13,14 +13,14 @@
 //!    only ever handled DTLS-SRTP ciphertext, never session content.
 
 use bytes::Bytes;
-use openreach_transport::{SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole};
+use rmd_transport::{SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole};
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// A distinctive plaintext string that must never appear on the wire.
-const CANARY: &[u8] = b"OPENREACH-PLAINTEXT-CANARY-9f3a2c71-do-not-leak";
+const CANARY: &[u8] = b"RMD-PLAINTEXT-CANARY-9f3a2c71-do-not-leak";
 
 /// Transparent UDP relay: learns the two peer addresses from inbound traffic and
 /// cross-forwards, recording every datagram payload.

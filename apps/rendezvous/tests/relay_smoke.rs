@@ -1,7 +1,7 @@
 //! Stable companion to the `relay_frame` cargo-fuzz target: feed random JSON to
 //! the signaling frame parser and assert it never panics.
 
-use openreach_rendezvous::signaling::RelayFrame;
+use rmd_rendezvous::signaling::RelayFrame;
 
 fn xorshift(state: &mut u64) -> u64 {
     let mut x = *state;

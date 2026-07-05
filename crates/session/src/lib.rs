@@ -1,4 +1,4 @@
-//! OpenReach session wiring.
+//! ReachMyDevice session wiring.
 //!
 //! Composes the media/transport/input crates into runnable sessions:
 //! - [`host::run_host`] — headless host (capture → encode → transport; input inject).

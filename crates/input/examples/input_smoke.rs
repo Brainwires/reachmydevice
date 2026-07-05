@@ -7,14 +7,14 @@
 //!
 //! ```sh
 //! Xvfb :99 -screen 0 1280x720x24 &
-//! DISPLAY=:99 cargo run -p openreach-input --example input_smoke
+//! DISPLAY=:99 cargo run -p rmd-input --example input_smoke
 //! ```
 
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
-    use openreach_input::new_injector;
-    use openreach_protocol::input_event::Event;
-    use openreach_protocol::{KeyEvent, MouseMove};
+    use rmd_input::new_injector;
+    use rmd_protocol::input_event::Event;
+    use rmd_protocol::{KeyEvent, MouseMove};
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::ConnectionExt;
 

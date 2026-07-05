@@ -1,12 +1,12 @@
 [package]
-name = "openreach-capture"
+name = "rmd-capture"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-openreach-protocol.workspace = true
+rmd-protocol.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

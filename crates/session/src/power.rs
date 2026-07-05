@@ -121,7 +121,7 @@ mod imp {
         let child = Command::new("systemd-inhibit")
             .args([
                 "--what=idle:sleep",
-                "--who=OpenReach",
+                "--who=ReachMyDevice",
                 &format!("--why={reason}"),
                 "--mode=block",
                 "sleep",

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent for the ReachMyDevice host on macOS (unattended access).
+  Install:
+    cp com.brainwires.rmd-host.plist ~/Library/LaunchAgents/
+    # edit the EnvironmentVariables below (token/URL), then:
+    launchctl load ~/Library/LaunchAgents/com.brainwires.rmd-host.plist
+  Grant Screen Recording + Accessibility to the rmd-host binary in
+  System Settings > Privacy & Security (see docs/macos-permissions.md).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.brainwires.rmd-host</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/local/bin/rmd-host</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RMD_RENDEZVOUS_URL</key><string>wss://openreach.brainwires.dev/ws</string>
+    <key>RMD_TOKEN</key><string>replace-with-device-token</string>
+    <key>RMD_ICE</key><string>stun:stun.l.google.com:19302</string>
+    <key>RMD_NAME</key><string>my-mac</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/tmp/rmd-host.log</string>
+  <key>StandardOutPath</key><string>/tmp/rmd-host.log</string>
+</dict>
+</plist>

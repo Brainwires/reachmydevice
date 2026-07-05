@@ -4,19 +4,19 @@
 //! a signaling message addressed to the other, and confirms it is relayed.
 //! Proves the WSS path (incl. any proxy) and the server's relay end-to-end.
 //!
-//! Env: `OPENREACH_RZV_URL` (e.g. `wss://openreach.brainwires.dev/ws`),
-//! `OPENREACH_TOK_A`, `OPENREACH_TOK_B`, `OPENREACH_DEV_B` (device id of B).
+//! Env: `RMD_RZV_URL` (e.g. `wss://openreach.brainwires.dev/ws`),
+//! `RMD_TOK_A`, `RMD_TOK_B`, `RMD_DEV_B` (device id of B).
 
-use openreach_session::rendezvous::RendezvousClient;
-use openreach_session::Signaling;
-use openreach_transport::SignalMsg;
+use rmd_session::rendezvous::RendezvousClient;
+use rmd_session::Signaling;
+use rmd_transport::SignalMsg;
 use std::time::{Duration, Instant};
 
 fn main() -> anyhow::Result<()> {
-    let url = std::env::var("OPENREACH_RZV_URL")?;
-    let tok_a = std::env::var("OPENREACH_TOK_A")?;
-    let tok_b = std::env::var("OPENREACH_TOK_B")?;
-    let dev_b = std::env::var("OPENREACH_DEV_B")?;
+    let url = std::env::var("RMD_RZV_URL")?;
+    let tok_a = std::env::var("RMD_TOK_A")?;
+    let tok_b = std::env::var("RMD_TOK_B")?;
+    let dev_b = std::env::var("RMD_DEV_B")?;
 
     // A knows B's id (like a viewer targeting a host); B learns A from the hello.
     let a = RendezvousClient::connect(&url, &tok_a, Some(dev_b))?;

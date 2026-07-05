@@ -1,5 +1,5 @@
 [package]
-name = "openreach-viewer"
+name = "rmd-viewer"
 version.workspace = true
 edition.workspace = true
 # egui 0.35 (and the egui-wgpu it bundles) require a newer toolchain than the
@@ -8,14 +8,14 @@ rust-version = "1.92"
 license.workspace = true
 
 [[bin]]
-name = "openreach-viewer"
+name = "rmd-viewer"
 path = "src/main.rs"
 
 [dependencies]
-openreach-protocol.workspace = true
-openreach-session.workspace = true
-openreach-codec.workspace = true
-openreach-transport.workspace = true
+rmd-protocol.workspace = true
+rmd-session.workspace = true
+rmd-codec.workspace = true
+rmd-transport.workspace = true
 bytes.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

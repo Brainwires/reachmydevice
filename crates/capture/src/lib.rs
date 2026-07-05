@@ -1,4 +1,4 @@
-//! OpenReach screen capture.
+//! ReachMyDevice screen capture.
 //!
 //! Platform-neutral [`Frame`] producer. A [`CaptureSession`] delivers BGRA
 //! frames to a [`FrameSink`] (an mpsc channel) on an internal thread; the codec
@@ -67,7 +67,7 @@ pub struct Frame {
     pub bytes_per_row: u32,
     pub format: PixelFormat,
     pub data: Bytes,
-    /// Host-process monotonic capture time; see [`openreach_protocol::monotonic_micros`].
+    /// Host-process monotonic capture time; see [`rmd_protocol::monotonic_micros`].
     pub capture_ts_micros: u64,
 }
 

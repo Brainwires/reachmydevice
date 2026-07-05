@@ -1,6 +1,6 @@
-# OpenReach — Architecture Overview
+# ReachMyDevice — Architecture Overview
 
-OpenReach is a self-hostable, end-to-end-encrypted remote KVM (keyboard/video/mouse) system:
+ReachMyDevice is a self-hostable, end-to-end-encrypted remote KVM (keyboard/video/mouse) system:
 a **host agent** on the controlled machine, a **viewer** on the controlling machine, and a
 self-hostable **rendezvous** server for signaling + NAT traversal. P2P when possible, TURN-relayed
 when not, with the relay only ever seeing ciphertext.

@@ -1,5 +1,5 @@
 [package]
-name = "openreach-protocol"
+name = "rmd-protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

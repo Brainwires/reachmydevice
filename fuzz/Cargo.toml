@@ -1,5 +1,5 @@
 [package]
-name = "openreach-fuzz"
+name = "rmd-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -13,9 +13,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 serde_json = "1"
-openreach-protocol = { path = "../crates/protocol" }
-openreach-session = { path = "../crates/session" }
-openreach-rendezvous = { path = "../apps/rendezvous" }
+rmd-protocol = { path = "../crates/protocol" }
+rmd-session = { path = "../crates/session" }
+rmd-rendezvous = { path = "../apps/rendezvous" }
 
 [[bin]]
 name = "protocol_decode"

@@ -19,10 +19,10 @@ use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use zeroize::Zeroizing;
 
-/// Ticket format magic ("OpenReach Pairing v1").
+/// Ticket format magic ("ReachMyDevice Pairing v1").
 const TICKET_MAGIC: &[u8; 4] = b"ORP1";
 /// Domain-separation tag for all pairing key derivations.
-const PAIR_TAG: &[u8] = b"openreach-pairing-v1";
+const PAIR_TAG: &[u8] = b"rmd-pairing-v1";
 
 /// A QR pairing ticket: everything a scanner needs to derive the shared key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,7 +72,7 @@ impl PairingTicket {
         let fixed = 4 + 32 + 32 + 8 + 2;
         anyhow::ensure!(
             bytes.len() >= fixed && &bytes[..4] == TICKET_MAGIC,
-            "not an OpenReach pairing ticket"
+            "not an ReachMyDevice pairing ticket"
         );
         let mut o = 4;
         let identity_pubkey: [u8; 32] = bytes[o..o + 32].try_into().unwrap();
@@ -140,7 +140,7 @@ pub fn derive_key_from_seed(
 /// by [`role_label`] (whoever has the lexicographically-smaller public key is the
 /// "initiator"), so both sides agree without negotiation.
 pub fn confirmation(key: &[u8; 32], role: &[u8]) -> [u8; 16] {
-    let hk = Hkdf::<Sha256>::new(Some(b"openreach-pairing-confirm-v2"), key);
+    let hk = Hkdf::<Sha256>::new(Some(b"rmd-pairing-confirm-v2"), key);
     let mut tag = [0u8; 16];
     hk.expand(role, &mut tag)
         .expect("16 is a valid HKDF length");

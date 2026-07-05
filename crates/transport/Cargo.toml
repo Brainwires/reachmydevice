@@ -1,12 +1,12 @@
 [package]
-name = "openreach-transport"
+name = "rmd-transport"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-openreach-protocol.workspace = true
+rmd-protocol.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 anyhow.workspace = true

@@ -9,7 +9,7 @@
 
 use crate::keymap;
 use crate::Injector;
-use openreach_protocol::input_event::Event as InputEvent;
+use rmd_protocol::input_event::Event as InputEvent;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::Window;
 use x11rb::protocol::xtest::ConnectionExt as XtestExt;

@@ -3,9 +3,9 @@
 //! mismatched sizes, path-traversal names, out-of-order chunks) and assert it
 //! never panics. Writes only under a temp dir; path-traversal is sanitized.
 
-use openreach_protocol as proto;
-use openreach_session::filexfer::FileTransfers;
-use openreach_session::FileTransferConfig;
+use rmd_protocol as proto;
+use rmd_session::filexfer::FileTransfers;
+use rmd_session::FileTransferConfig;
 use std::sync::{mpsc, Arc};
 
 fn xorshift(state: &mut u64) -> u64 {

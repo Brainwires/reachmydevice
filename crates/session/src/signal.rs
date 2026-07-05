@@ -5,7 +5,7 @@
 //! This is the seam that Phase 2 replaces with the rendezvous WebSocket — the
 //! rest of the session only sees [`SignalMsg`].
 
-use openreach_transport::SignalMsg;
+use rmd_transport::SignalMsg;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::sync::mpsc::{self, Receiver};
@@ -48,7 +48,7 @@ impl SignalClient {
 
         let (tx, inbound) = mpsc::channel();
         std::thread::Builder::new()
-            .name("openreach-signal-rx".into())
+            .name("rmd-signal-rx".into())
             .spawn(move || {
                 let mut lines = BufReader::new(reader_stream).lines();
                 while let Some(Ok(line)) = lines.next() {

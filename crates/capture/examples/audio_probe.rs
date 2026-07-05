@@ -1,7 +1,7 @@
 //! Verify desktop-audio capture: start it, collect samples for a few seconds,
 //! and report how many arrived and their RMS level. Run with audio playing.
 //!
-//!   cargo run -p openreach-capture --example audio_probe
+//!   cargo run -p rmd-capture --example audio_probe
 //!
 //! Needs the Screen Recording TCC permission (same as video capture).
 
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 fn main() -> anyhow::Result<()> {
     let (tx, rx) = mpsc::channel::<Vec<i16>>();
-    let _session = openreach_capture::start_audio_capture(0, tx)?;
+    let _session = rmd_capture::start_audio_capture(0, tx)?;
     eprintln!("capturing desktop audio for 4s… (play something)");
 
     let start = Instant::now();

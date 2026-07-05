@@ -22,7 +22,7 @@ use zeroize::Zeroizing;
 /// absent, the key is stored in plaintext (with a loud warning) so headless
 /// hosts still start — the hardware-backed (TPM/Enclave) option is the future
 /// answer for non-exportable unattended keys.
-pub const KEY_PASSPHRASE_ENV: &str = "OPENREACH_KEY_PASSPHRASE";
+pub const KEY_PASSPHRASE_ENV: &str = "RMD_KEY_PASSPHRASE";
 
 /// Magic header identifying an encrypted (wrapped) identity file.
 const WRAP_MAGIC: &[u8; 4] = b"ORK1";
@@ -106,7 +106,7 @@ fn restrict_perms(path: &Path) -> anyhow::Result<()> {
 /// key (and thus owns the `device_id`, a hash of that public key), and the
 /// `channel_binding` (the session's DTLS certificate fingerprint) ties the proof
 /// to *this* connection so a malicious relay cannot replay it into another.
-pub const AUTH_PROOF_TAG: &[u8] = b"openreach-access-proof-v2";
+pub const AUTH_PROOF_TAG: &[u8] = b"rmd-access-proof-v2";
 
 /// The message a device signs to prove key possession for host access, bound to
 /// a channel value. `binding` is the DTLS fingerprint of this session; pass an
@@ -245,7 +245,7 @@ impl DeviceIdentity {
 
     /// Load the identity from `path`, or generate + save a new one if absent.
     ///
-    /// If `OPENREACH_KEY_PASSPHRASE` is set the file is encrypted at rest; a
+    /// If `RMD_KEY_PASSPHRASE` is set the file is encrypted at rest; a
     /// legacy plaintext file is read (with a warning) and transparently upgraded
     /// to the encrypted form when a passphrase is available.
     pub fn load_or_create(path: &Path) -> anyhow::Result<Self> {

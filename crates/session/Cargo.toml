@@ -1,16 +1,16 @@
 [package]
-name = "openreach-session"
+name = "rmd-session"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-openreach-protocol.workspace = true
-openreach-transport.workspace = true
-openreach-capture.workspace = true
-openreach-codec.workspace = true
-openreach-input.workspace = true
+rmd-protocol.workspace = true
+rmd-transport.workspace = true
+rmd-capture.workspace = true
+rmd-codec.workspace = true
+rmd-input.workspace = true
 bytes.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
@@ -63,5 +63,5 @@ path = "examples/rzv_relay_check.rs"
 
 [dev-dependencies]
 # Start the rendezvous server in-process for the end-to-end signaling test.
-openreach-rendezvous = { path = "../../apps/rendezvous" }
+rmd-rendezvous = { path = "../../apps/rendezvous" }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

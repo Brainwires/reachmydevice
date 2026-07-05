@@ -1,6 +1,6 @@
-# OpenReach — Threat Model
+# ReachMyDevice — Threat Model
 
-Scope: the OpenReach host agent, viewer, and self-hostable rendezvous (signaling +
+Scope: the ReachMyDevice host agent, viewer, and self-hostable rendezvous (signaling +
 device registry) with coturn (STUN/TURN). This documents assets, adversaries,
 trust boundaries, the guarantees the design provides, and residual risks.
 
@@ -39,7 +39,7 @@ trust boundaries, the guarantees the design provides, and residual risks.
 - **Goal:** impersonate a host to a viewer (MITM), or read content.
 - **Mitigation:** content is E2EE (A1), so the server cannot read it. **The host now
   proves its identity, bound to the session's DTLS fingerprint**, in its `HelloAck`
-  (an ed25519 signature over `"openreach-access-proof-v2" || host_pubkey || 0x00 ||
+  (an ed25519 signature over `"rmd-access-proof-v2" || host_pubkey || 0x00 ||
   dtls_fingerprint`). A valid proof is **necessary but not sufficient**: the viewer
   additionally requires the proven identity to match **both** the device the user
   selected *and the key pinned for it* (`known_peers`) — a valid self-proof over the
@@ -59,7 +59,7 @@ trust boundaries, the guarantees the design provides, and residual risks.
   yields neither passwords nor live tokens). **Per-IP rate limiting** (tower_governor)
   plus a **per-username lockout with exponential backoff** on repeated password
   failures (defeats IP-rotating credential stuffing that per-IP limits miss).
-  **Registration is closed by default** (`OPENREACH_RZ_OPEN_REGISTRATION` must be
+  **Registration is closed by default** (`RMD_RZ_OPEN_REGISTRATION` must be
   explicitly enabled). TLS everywhere via Caddy/Cloudflare.
 - **Residual:** no MFA yet (optional TOTP is a tracked item — but the account system
   is being superseded by the direct QR/PAKE pairing path, which removes server-side
@@ -73,15 +73,15 @@ trust boundaries, the guarantees the design provides, and residual risks.
 - **Unattended-access gate (implemented, channel-bound):** a host with
   `require_authorization` accepts a session only from a viewer whose `Hello` carries a
   valid **access proof** — an ed25519 signature over
-  `"openreach-access-proof-v2" || public_key || 0x00 || dtls_fingerprint` — *and* whose
+  `"rmd-access-proof-v2" || public_key || 0x00 || dtls_fingerprint` — *and* whose
   derived `device_id` is in the host's `authorized_keys` list. The signature proves the
   viewer holds the private key for the claimed identity (not a spoofable id claim), and
   the **DTLS-fingerprint binding ties the proof to this exact session**: a malicious
   rendezvous that MITMs the DTLS must present its own certificate to the host, so the
   fingerprint the host verifies no longer matches the one the viewer signed, and the
   proof is rejected (see `host::tests::authorize_accepts_bound_proof_and_rejects_mitm`).
-  Enabled by placing device_ids in `~/.config/openreach/authorized_keys` (or
-  `OPENREACH_AUTHORIZED_KEYS`), or with `OPENREACH_REQUIRE_AUTH=1`.
+  Enabled by placing device_ids in `~/.config/rmd/authorized_keys` (or
+  `RMD_AUTHORIZED_KEYS`), or with `RMD_REQUIRE_AUTH=1`.
 
 ### A5. Stolen device / extracted identity key
 - **Mitigation:** the identity private key is stored `0600` in the user config dir.

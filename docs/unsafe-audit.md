@@ -1,4 +1,4 @@
-# `unsafe` audit — OpenReach
+# `unsafe` audit — ReachMyDevice
 
 All `unsafe` in the workspace is confined to **one file**:
 `crates/capture/src/mac.rs` (macOS ScreenCaptureKit capture). Every other crate —

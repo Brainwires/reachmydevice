@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to OpenReach. Format loosely follows Keep a Changelog.
+All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
@@ -61,12 +61,12 @@ threat model (`docs/threat-model.md`) records the mitigations and residuals.
   `authorized_keys`. The proof is signed over the session's **DTLS fingerprint**,
   so a malicious rendezvous that MITMs the transport is rejected (the fingerprint
   it must present no longer matches the signed one) — closing the earlier
-  proof-replay residual. Enabled by populating `~/.config/openreach/authorized_keys`
-  (or `OPENREACH_AUTHORIZED_KEYS`) or `OPENREACH_REQUIRE_AUTH=1`; off for LAN/dev.
+  proof-replay residual. Enabled by populating `~/.config/rmd/authorized_keys`
+  (or `RMD_AUTHORIZED_KEYS`) or `RMD_REQUIRE_AUTH=1`; off for LAN/dev.
   Accept/MITM-reject and proof-binding are unit-tested. See threat-model A4.
 - **`deploy/install-host.sh`**: one-command host install — builds, installs the
   binary + service unit (systemd/launchd), and seeds the config dir.
-- **Host tray companion** (`--features tray`, opt-in via `OPENREACH_TRAY=1`): a
+- **Host tray companion** (`--features tray`, opt-in via `RMD_TRAY=1`): a
   menu-bar/system-tray icon that goes green while a remote is connected, with a
   Quit item. The session runs on a background thread and reports state
   (`HostStatus`) to the tray, which owns the main thread (required on macOS).
@@ -85,7 +85,7 @@ threat model (`docs/threat-model.md`) records the mitigations and residuals.
   macOS desktop capture uses the Screen Recording permission the host already
   needs; verified to that permission boundary (`examples/audio_probe`). Transport
   is the reliable data channel for now (a dedicated Opus RTP track is the latency
-  optimization). Off by default; enable with `OPENREACH_AUDIO=1` on host + viewer.
+  optimization). Off by default; enable with `RMD_AUDIO=1` on host + viewer.
   **Verified fully end-to-end on real hardware**: real ScreenCaptureKit desktop
   capture → Opus → WebRTC/DTLS-SRTP → decode → speaker, with a human confirming the
   audible round-trip (`docs/validation.md`); also delivered cross-NAT (biscuits→Mac,

@@ -9,8 +9,8 @@
 //! v1 syncs UTF-8 text. Images (`CLIPBOARD_KIND_IMAGE_PNG`) are wired in the
 //! protocol and are a straightforward extension here.
 
-use openreach_protocol as proto;
-use openreach_protocol::ClipboardKind;
+use rmd_protocol as proto;
+use rmd_protocol::ClipboardKind;
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
@@ -32,7 +32,7 @@ impl ClipboardSync {
     {
         let (incoming_tx, incoming_rx) = mpsc::channel();
         std::thread::Builder::new()
-            .name("openreach-clipboard".into())
+            .name("rmd-clipboard".into())
             .spawn(move || run(send_to_peer, incoming_rx))
             .ok();
         Self {

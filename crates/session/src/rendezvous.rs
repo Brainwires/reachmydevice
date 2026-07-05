@@ -16,7 +16,7 @@
 
 use crate::signal::Signaling;
 use futures::{SinkExt, StreamExt};
-use openreach_transport::SignalMsg;
+use rmd_transport::SignalMsg;
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc as std_mpsc;
 use std::sync::Mutex;
@@ -66,7 +66,7 @@ impl RendezvousClient {
         let (in_tx, in_rx) = std_mpsc::channel::<SignalMsg>();
 
         std::thread::Builder::new()
-            .name("openreach-rendezvous".into())
+            .name("rmd-rendezvous".into())
             .spawn(move || {
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()

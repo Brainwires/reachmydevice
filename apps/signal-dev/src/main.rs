@@ -1,4 +1,4 @@
-//! OpenReach dev signaling relay (spike only).
+//! ReachMyDevice dev signaling relay (spike only).
 //!
 //! A minimal newline-delimited TCP relay standing in for the Phase-2 rendezvous
 //! server. Every line a client sends is forwarded verbatim to every *other*
@@ -8,7 +8,7 @@
 //!
 //! Usage:
 //! ```sh
-//! OPENREACH_SIGNAL_ADDR=0.0.0.0:9000 cargo run -p openreach-signal-dev
+//! RMD_SIGNAL_ADDR=0.0.0.0:9000 cargo run -p rmd-signal-dev
 //! ```
 //! Then point both host and viewer at `ws://<this-host>:9000` equivalent (raw
 //! TCP here). Replaced by the axum WebSocket rendezvous in Phase 2.
@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let addr =
-        std::env::var("OPENREACH_SIGNAL_ADDR").unwrap_or_else(|_| "0.0.0.0:9000".to_string());
+        std::env::var("RMD_SIGNAL_ADDR").unwrap_or_else(|_| "0.0.0.0:9000".to_string());
     let listener = TcpListener::bind(&addr).await?;
     tracing::info!(%addr, "signal-dev relay listening");
 

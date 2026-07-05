@@ -7,9 +7,9 @@
 //! winit event loop to pump tray/menu events.
 //!
 //! Headless/server hosts simply don't build this feature and run
-//! [`openreach_session::run_host`] directly.
+//! [`rmd_session::run_host`] directly.
 
-use openreach_session::{run_host_reporting, HostConfig, HostStatus, Signaling};
+use rmd_session::{run_host_reporting, HostConfig, HostStatus, Signaling};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
@@ -26,7 +26,7 @@ pub fn run_with_tray(cfg: HostConfig, signal: Box<dyn Signaling>) -> anyhow::Res
     let (status_tx, status_rx) = mpsc::channel::<HostStatus>();
     let (done_tx, done_rx) = mpsc::channel::<anyhow::Result<()>>();
     std::thread::Builder::new()
-        .name("openreach-host-session".into())
+        .name("rmd-host-session".into())
         .spawn(move || {
             let result = run_host_reporting(cfg, signal, move |s| {
                 let _ = status_tx.send(s);
@@ -61,13 +61,13 @@ struct TrayApp {
 
 impl TrayApp {
     fn build_tray(&mut self) {
-        let quit = MenuItem::new("Quit OpenReach host", true, None);
+        let quit = MenuItem::new("Quit ReachMyDevice host", true, None);
         self.quit_id = Some(quit.id().clone());
         let menu = Menu::new();
         let _ = menu.append(&quit);
         match TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("OpenReach host — waiting")
+            .with_tooltip("ReachMyDevice host — waiting")
             .with_icon(status_icon(HostStatus::Waiting))
             .build()
         {
@@ -81,8 +81,8 @@ impl TrayApp {
             return;
         };
         let tip = match status {
-            HostStatus::Active => "OpenReach host — ● remote connected",
-            HostStatus::Waiting | HostStatus::Ended => "OpenReach host — waiting",
+            HostStatus::Active => "ReachMyDevice host — ● remote connected",
+            HostStatus::Waiting | HostStatus::Ended => "ReachMyDevice host — waiting",
         };
         let _ = tray.set_tooltip(Some(tip));
         let _ = tray.set_icon(Some(status_icon(status)));

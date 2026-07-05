@@ -20,7 +20,7 @@
 //! [`FileTransfers`] is single-threaded (lives on the session's control loop);
 //! each outbound transfer runs on its own thread, paced by acks.
 
-use openreach_protocol as proto;
+use rmd_protocol as proto;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -153,7 +153,7 @@ impl FileTransfers {
         let events = self.events.clone();
         let tid = transfer_id.clone();
         std::thread::Builder::new()
-            .name("openreach-filesend".into())
+            .name("rmd-filesend".into())
             .spawn(move || send_loop(path, tid, size, out, events, shared))
             .ok();
 
@@ -510,7 +510,7 @@ mod tests {
     /// pair of envelope queues, and verify the received file matches byte-for-byte.
     #[test]
     fn transfer_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("openreach-xfer-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rmd-xfer-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("payload.bin");
@@ -581,7 +581,7 @@ mod tests {
     /// the same offer must ack at the partial length and finish correctly.
     #[test]
     fn resume_from_partial() {
-        let dir = std::env::temp_dir().join(format!("openreach-resume-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rmd-resume-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let recv_dir = dir.join("downloads");
         let content = payload(400_000);

@@ -7,7 +7,7 @@
 .env
 *.local
 
-# OpenReach runtime artifacts
+# ReachMyDevice runtime artifacts
 /debug-bundles
 *.log
 

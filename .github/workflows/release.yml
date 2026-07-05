@@ -49,7 +49,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build host + viewer (release)
-        run: cargo build --release --target ${{ matrix.target }} -p openreach-host -p openreach-viewer
+        run: cargo build --release --target ${{ matrix.target }} -p rmd-host -p rmd-viewer
 
       # Software Bill of Materials (CycloneDX) — records every dependency +
       # version, including the vendored fork, for each release artifact.
@@ -57,7 +57,7 @@ jobs:
         run: |
           cargo install cargo-cyclonedx --locked || true
           mkdir -p dist
-          cargo cyclonedx --format json --all --override-filename dist/openreach-sbom-${{ matrix.name }} || true
+          cargo cyclonedx --format json --all --override-filename dist/rmd-sbom-${{ matrix.name }} || true
 
       # --- Code signing hooks (no-ops without secrets) -----------------------
       # macOS: codesign + notarize when APPLE_* secrets are present.
@@ -66,7 +66,7 @@ jobs:
         env:
           APPLE_SIGN_ID: ${{ secrets.APPLE_SIGN_ID }}
         run: |
-          for b in openreach-host openreach-viewer; do
+          for b in rmd-host rmd-viewer; do
             codesign --force --options runtime --sign "$APPLE_SIGN_ID" \
               "target/${{ matrix.target }}/release/$b" || true
           done
@@ -75,12 +75,12 @@ jobs:
       - name: Stage artifacts
         run: |
           mkdir -p dist
-          for b in openreach-host openreach-viewer; do
+          for b in rmd-host rmd-viewer; do
             cp "target/${{ matrix.target }}/release/$b" "dist/$b-${{ matrix.name }}" 2>/dev/null || true
           done
           # Package the rendezvous deploy bundle once (on Linux).
           if [ "${{ runner.os }}" = "Linux" ]; then
-            tar czf dist/openreach-rendezvous-deploy.tar.gz deploy/ docs/vps-deployment.md
+            tar czf dist/rmd-rendezvous-deploy.tar.gz deploy/ docs/vps-deployment.md
           fi
           (cd dist && ls -la && shasum -a 256 * > SHA256SUMS || sha256sum * > SHA256SUMS)
 
@@ -101,7 +101,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: openreach-${{ matrix.name }}
+          name: rmd-${{ matrix.name }}
           path: dist/*
 
   # TODO(packaging): native installers as follow-on jobs —

@@ -9,10 +9,10 @@ use crate::clipboard::ClipboardSync;
 use crate::filexfer::{FileEvent, FileTransferConfig, FileTransfers};
 use crate::signal::Signaling;
 use bytes::Bytes;
-use openreach_codec as codec;
-use openreach_protocol as proto;
-use openreach_protocol::pb::envelope::Payload;
-use openreach_transport::{
+use rmd_codec as codec;
+use rmd_protocol as proto;
+use rmd_protocol::pb::envelope::Payload;
+use rmd_transport::{
     SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole, TransportSender,
 };
 use std::path::PathBuf;
@@ -40,7 +40,7 @@ pub struct ViewerConfig {
 impl Default for ViewerConfig {
     fn default() -> Self {
         Self {
-            device_name: "openreach-viewer".to_string(),
+            device_name: "rmd-viewer".to_string(),
             ice_servers: Vec::new(),
             bind_addr: "0.0.0.0:0".to_string(),
             enable_audio: false,
@@ -106,7 +106,7 @@ impl ViewerSession {
         {
             let updates_tx = updates_tx.clone();
             std::thread::Builder::new()
-                .name("openreach-decode".into())
+                .name("rmd-decode".into())
                 .spawn(move || {
                     let mut decoder = match codec::new_decoder() {
                         Ok(d) => d,
@@ -158,7 +158,7 @@ impl ViewerSession {
             let identity = cfg.identity.clone();
             let audio_rx = audio_rx.clone();
             std::thread::Builder::new()
-                .name("openreach-viewer-pump".into())
+                .name("rmd-viewer-pump".into())
                 .spawn(move || {
                     // Audio playback lives on this thread (cpal stream is !Send).
                     let mut audio = if enable_audio {

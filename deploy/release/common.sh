@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared helpers for the OpenReach release build scripts (build-linux.sh /
+# Shared helpers for the ReachMyDevice release build scripts (build-linux.sh /
 # build-macos.sh). Source this; do not execute it directly.
 #
 # Provides: logging, version detection, minisign signing, checksum generation,
@@ -13,13 +13,13 @@ REL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$REL_DIR/../.." && pwd)"
 DIST_DIR="$REPO_ROOT/dist"
 
-GH_REPO="${OPENREACH_GH_REPO:-Brainwires/openreach}"
+GH_REPO="${RMD_GH_REPO:-Brainwires/reachmydevice}"
 
 # Where the minisign secret key lives on a build machine (kept out of the repo).
-# Override with OPENREACH_MINISIGN_KEY. The matching public key is committed at
-# deploy/release/openreach-minisign.pub and embedded in install.sh.
-MINISIGN_KEY="${OPENREACH_MINISIGN_KEY:-$HOME/.openreach/minisign.key}"
-MINISIGN_PUB="$REL_DIR/openreach-minisign.pub"
+# Override with RMD_MINISIGN_KEY. The matching public key is committed at
+# deploy/release/rmd-minisign.pub and embedded in install.sh.
+MINISIGN_KEY="${RMD_MINISIGN_KEY:-$HOME/.rmd/minisign.key}"
+MINISIGN_PUB="$REL_DIR/rmd-minisign.pub"
 
 # --- Logging ----------------------------------------------------------------
 log()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
@@ -33,11 +33,11 @@ require_cmd() {
 # --- Version ----------------------------------------------------------------
 # Resolve the release version. Priority:
 #   1. explicit $1 argument (e.g. the webhook's ${VERSION}, "0.1.0")
-#   2. $OPENREACH_VERSION
+#   2. $RMD_VERSION
 #   3. the workspace [workspace.package] version in Cargo.toml
 # A leading "v" is stripped so tags (v0.1.0) and bare versions both work.
 resolve_version() {
-  local v="${1:-${OPENREACH_VERSION:-}}"
+  local v="${1:-${RMD_VERSION:-}}"
   if [[ -z "$v" ]]; then
     v="$(grep -m1 -E '^version *= *"' "$REPO_ROOT/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')"
   fi
@@ -63,7 +63,7 @@ sign_file() {
   # -W keys are password-less (created with `minisign -G -W`), so this is
   # non-interactive on the webhook build host. A password-protected key would
   # prompt here; feed it via a here-string if you use one.
-  minisign -S -s "$MINISIGN_KEY" -m "$f" -c "OpenReach release" >/dev/null
+  minisign -S -s "$MINISIGN_KEY" -m "$f" -c "ReachMyDevice release" >/dev/null
 }
 
 # SHA256SUMS over every file currently in $DIST_DIR (portable across GNU/BSD).
@@ -92,11 +92,11 @@ sign_all() {
 # --- GitHub Release ---------------------------------------------------------
 # Create the release for tag v<version> if it doesn't exist, then upload every
 # file in $DIST_DIR (clobbering same-named assets so re-runs are idempotent).
-# Skipped entirely when OPENREACH_NO_UPLOAD=1 (local/dev builds).
+# Skipped entirely when RMD_NO_UPLOAD=1 (local/dev builds).
 publish_release() {
   local version="$1" tag="v${1#v}"
-  if [[ "${OPENREACH_NO_UPLOAD:-0}" == "1" ]]; then
-    log "OPENREACH_NO_UPLOAD=1 — artifacts staged in $DIST_DIR, not uploaded"
+  if [[ "${RMD_NO_UPLOAD:-0}" == "1" ]]; then
+    log "RMD_NO_UPLOAD=1 — artifacts staged in $DIST_DIR, not uploaded"
     return 0
   fi
   require_cmd gh "install GitHub CLI and run: gh auth login"
@@ -104,8 +104,8 @@ publish_release() {
   if ! gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
     log "Creating GitHub Release $tag"
     gh release create "$tag" --repo "$GH_REPO" \
-      --title "OpenReach $tag" \
-      --generate-notes ${OPENREACH_PRERELEASE:+--prerelease}
+      --title "ReachMyDevice $tag" \
+      --generate-notes ${RMD_PRERELEASE:+--prerelease}
   else
     log "Release $tag already exists — uploading/replacing assets"
   fi

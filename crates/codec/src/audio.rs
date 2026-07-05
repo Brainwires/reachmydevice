@@ -1,6 +1,6 @@
 //! Opus audio encode/decode (host → viewer).
 //!
-//! Fixed to the real-time-friendly configuration used across OpenReach:
+//! Fixed to the real-time-friendly configuration used across ReachMyDevice:
 //! 48 kHz, mono, 20 ms frames (960 samples/frame). Each encoded frame is a
 //! self-contained Opus packet carried in an `AudioFrame` protocol message.
 //!

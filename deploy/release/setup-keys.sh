@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# One-time setup of the OpenReach release signing key (minisign).
+# One-time setup of the ReachMyDevice release signing key (minisign).
 #
 # Generates a password-less minisign keypair, stores the SECRET key at
-# ~/.openreach/minisign.key (0600, NEVER committed), writes the public key to
-# deploy/release/openreach-minisign.pub (committed), and patches the pinned
+# ~/.rmd/minisign.key (0600, NEVER committed), writes the public key to
+# deploy/release/rmd-minisign.pub (committed), and patches the pinned
 # pubkey into deploy/release/install.sh so `curl | sh` installs verify signatures.
 #
 # Run ONCE on the machine that holds the signing key, then copy the same secret
@@ -44,8 +44,8 @@ echo "  Public key (commit this):          $MINISIGN_PUB"
 echo "  Pinned into:                       deploy/release/install.sh"
 echo
 echo "Next:"
-echo "  1. Commit deploy/release/openreach-minisign.pub and the patched install.sh."
+echo "  1. Commit deploy/release/rmd-minisign.pub and the patched install.sh."
 echo "  2. Copy $MINISIGN_KEY to the same path on biscuits (0600) so its webhook"
 echo "     builds are signed with the same identity:"
-echo "       scp $MINISIGN_KEY biscuits:~/.openreach/minisign.key"
-echo "       ssh biscuits chmod 600 ~/.openreach/minisign.key"
+echo "       scp $MINISIGN_KEY biscuits:~/.rmd/minisign.key"
+echo "       ssh biscuits chmod 600 ~/.rmd/minisign.key"

@@ -1,4 +1,4 @@
-# VPS deployment — OpenReach rendezvous
+# VPS deployment — ReachMyDevice rendezvous
 
 The rendezvous unit is one `docker-compose` with three services, sized for a
 **1 vCPU / 1 GB** VPS:
@@ -12,14 +12,14 @@ The rendezvous unit is one `docker-compose` with three services, sized for a
 Files live in [`deploy/`](../deploy).
 
 ## 1. DNS
-Point an A/AAAA record (e.g. `openreach.example.com`) at the VPS public IP.
+Point an A/AAAA record (e.g. `rmd.example.com`) at the VPS public IP.
 
 ## 2. Configure
 ```sh
 cd deploy
 cp .env.example .env
 # edit .env:
-#   OPENREACH_DOMAIN=openreach.example.com
+#   RMD_DOMAIN=rmd.example.com
 #   TURN_SECRET=$(openssl rand -hex 32)
 ```
 
@@ -33,19 +33,19 @@ Open on the VPS:
 ```sh
 docker compose up -d
 docker compose logs -f rendezvous
-curl https://openreach.example.com/health   # -> {"status":"ok",...}
+curl https://rmd.example.com/health   # -> {"status":"ok",...}
 ```
 
 ## 5. Create your account
 ```sh
-curl -X POST https://openreach.example.com/api/register \
+curl -X POST https://rmd.example.com/api/register \
   -H 'content-type: application/json' \
   -d '{"username":"me","password":"a-strong-password"}'
 ```
 The host and viewer apps register their own device + obtain a token on first run
 (Phase 3 wires the onboarding UI); the token authenticates the signaling
-WebSocket at `wss://openreach.example.com/ws?token=<token>`. Set
-`OPENREACH_RZ_OPEN_REGISTRATION=false` and redeploy once your account exists.
+WebSocket at `wss://rmd.example.com/ws?token=<token>`. Set
+`RMD_RZ_OPEN_REGISTRATION=false` and redeploy once your account exists.
 
 ## Security posture (hardened defaults)
 - **TLS everywhere** via Caddy/ACME; port 80 is ACME/redirect only.
@@ -57,8 +57,8 @@ WebSocket at `wss://openreach.example.com/ws?token=<token>`. Set
 - Rendezvous runs as a **non-root** user in the container; SQLite on a volume.
 
 ## Backups
-State is `rendezvous_data:/data/openreach.db` (SQLite). Snapshot the volume or
-run `sqlite3 openreach.db .backup` on a schedule.
+State is `rendezvous_data:/data/rmd.db` (SQLite). Snapshot the volume or
+run `sqlite3 rmd.db .backup` on a schedule.
 
 ## Notes / limitations (v1)
 - `coturn` uses `network_mode: host` because the TURN relay needs the host UDP

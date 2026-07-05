@@ -1,4 +1,4 @@
-//! Stable-runnable companion to the `openreach-fuzz` cargo-fuzz targets: feed a
+//! Stable-runnable companion to the `rmd-fuzz` cargo-fuzz targets: feed a
 //! large volume of pseudo-random bytes to the protobuf `decode` entry point and
 //! assert it never panics (malformed input must return `Err`, not crash). This
 //! runs in normal CI; the libFuzzer targets under `fuzz/` explore deeper.
@@ -25,7 +25,7 @@ fn decode_never_panics_on_random_bytes() {
         }
         buf.truncate(len);
         // Must not panic; result is irrelevant.
-        let _ = openreach_protocol::decode(&buf);
+        let _ = rmd_protocol::decode(&buf);
     }
 }
 
@@ -33,7 +33,7 @@ fn decode_never_panics_on_random_bytes() {
 fn decode_survives_valid_prefix_plus_garbage() {
     // Start from a real encoded envelope, then flip/append random bytes — the
     // "almost valid" cases that trip naive parsers.
-    let base = openreach_protocol::encode(&openreach_protocol::ping(42));
+    let base = rmd_protocol::encode(&rmd_protocol::ping(42));
     let mut state = 0x1234_5678_9ABC_DEF0;
     for _ in 0..20_000 {
         let mut b = base.clone();
@@ -44,6 +44,6 @@ fn decode_survives_valid_prefix_plus_garbage() {
         for _ in 0..extra {
             b.push(xorshift(&mut state) as u8);
         }
-        let _ = openreach_protocol::decode(&b);
+        let _ = rmd_protocol::decode(&b);
     }
 }

@@ -1,4 +1,4 @@
-# OpenReach — cross-platform self-hostable remote KVM.
+# ReachMyDevice — cross-platform self-hostable remote KVM.
 # Workspace root. See docs/architecture.md for the crate map.
 [workspace]
 resolver = "2"
@@ -23,7 +23,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.82"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Brainwires/openreach"
+repository = "https://github.com/Brainwires/reachmydevice"
 authors = ["Brainwires"]
 
 # Shared dependency versions. Individual crates opt in via `foo.workspace = true`.
@@ -44,12 +44,12 @@ serde_json = "1"
 prost = "0.13"
 prost-build = "0.13"
 # internal crates
-openreach-protocol = { path = "crates/protocol" }
-openreach-transport = { path = "crates/transport" }
-openreach-capture = { path = "crates/capture" }
-openreach-codec = { path = "crates/codec" }
-openreach-input = { path = "crates/input" }
-openreach-session = { path = "crates/session" }
+rmd-protocol = { path = "crates/protocol" }
+rmd-transport = { path = "crates/transport" }
+rmd-capture = { path = "crates/capture" }
+rmd-codec = { path = "crates/codec" }
+rmd-input = { path = "crates/input" }
+rmd-session = { path = "crates/session" }
 
 # Fast, small release binaries; keep debug symbols off the hot path.
 [profile.release]

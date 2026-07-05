@@ -6,7 +6,7 @@
 //!
 //! **Source.** [`AudioCapture`] prefers real **desktop/system audio** — what's
 //! actually playing on the host — via the platform backend
-//! ([`openreach_capture::start_audio_capture`], ScreenCaptureKit on macOS). It
+//! ([`rmd_capture::start_audio_capture`], ScreenCaptureKit on macOS). It
 //! falls back to the default **input device** (cpal) only where desktop capture
 //! isn't available (e.g. Linux) or is denied. macOS desktop capture requires the
 //! Screen Recording permission — the same one the host already needs for video.
@@ -21,7 +21,7 @@
 
 use codec::{AudioDecoder, AudioEncoder, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use openreach_codec as codec;
+use rmd_codec as codec;
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -39,7 +39,7 @@ pub struct AudioCapture {
 /// tests, where no capture device exists). All are RAII guards.
 #[allow(dead_code)]
 enum AudioSource {
-    Desktop(Box<dyn openreach_capture::CaptureSession>),
+    Desktop(Box<dyn rmd_capture::CaptureSession>),
     Device(cpal::Stream),
     Synthetic,
 }
@@ -56,11 +56,11 @@ impl AudioCapture {
     {
         // Synthetic source: a generated 440 Hz tone, for headless hosts with no
         // capture device (e.g. proving cross-machine audio delivery). Opt-in.
-        if std::env::var("OPENREACH_AUDIO_SYNTH").is_ok() {
+        if std::env::var("RMD_AUDIO_SYNTH").is_ok() {
             tracing::info!("audio source: synthetic 440 Hz tone");
             let (tx, rx) = mpsc::channel::<Vec<i16>>();
             std::thread::Builder::new()
-                .name("openreach-audio-synth".into())
+                .name("rmd-audio-synth".into())
                 .spawn(move || {
                     let step = 2.0 * std::f32::consts::PI * 440.0 / 48_000.0;
                     let mut phase = 0.0_f32;
@@ -87,7 +87,7 @@ impl AudioCapture {
 
         // Preferred path: desktop/system audio (mono 48 kHz i16 from the backend).
         let (desk_tx, desk_rx) = mpsc::channel::<Vec<i16>>();
-        match openreach_capture::start_audio_capture(0, desk_tx) {
+        match rmd_capture::start_audio_capture(0, desk_tx) {
             Ok(handle) => {
                 tracing::info!("audio source: desktop (system audio)");
                 spawn_encode(48_000, bitrate_bps, desk_rx, on_packet);
@@ -157,7 +157,7 @@ where
     F: Fn(Vec<u8>) + Send + 'static,
 {
     std::thread::Builder::new()
-        .name("openreach-audio-encode".into())
+        .name("rmd-audio-encode".into())
         .spawn(move || {
             let mut encoder = match AudioEncoder::new(bitrate_bps) {
                 Ok(e) => e,
@@ -405,7 +405,7 @@ fn downmix_i16(data: &[i16], channels: usize) -> Vec<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openreach_protocol as proto;
+    use rmd_protocol as proto;
 
     /// End-to-end audio pipeline in software: PCM → Opus encode → `AudioFrame`
     /// wire envelope → decode envelope → Opus decode → PCM. This exercises every

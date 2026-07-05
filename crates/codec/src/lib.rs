@@ -1,4 +1,4 @@
-//! OpenReach video codec.
+//! ReachMyDevice video codec.
 //!
 //! Trait-based [`Encoder`]/[`Decoder`] abstraction with pluggable backends. The
 //! Phase-1 backend is **software H.264** ([`software`], via `openh264`); a
@@ -23,7 +23,7 @@ pub use audio::{
     AudioDecoder, AudioEncoder, AUDIO_CHANNELS, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE,
 };
 
-/// Video codecs OpenReach can negotiate. v1 wires H.264 only; VP8/VP9/H.265 are
+/// Video codecs ReachMyDevice can negotiate. v1 wires H.264 only; VP8/VP9/H.265 are
 /// extension points behind the same traits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VideoCodec {

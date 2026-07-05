@@ -5,19 +5,19 @@
 //! many arrived. Used to validate the full host→viewer pipeline (real capture →
 //! encode → transport → decode) without a display or GPU.
 //!
-//! Env: `OPENREACH_SIGNAL_ADDR` (default `127.0.0.1:9000`),
-//! `OPENREACH_BIND` (default `0.0.0.0:0`), `OPENREACH_ICE` (comma-separated),
-//! `OPENREACH_TEST_SECS` (default `12`). Exits non-zero if no frames decode.
+//! Env: `RMD_SIGNAL_ADDR` (default `127.0.0.1:9000`),
+//! `RMD_BIND` (default `0.0.0.0:0`), `RMD_ICE` (comma-separated),
+//! `RMD_TEST_SECS` (default `12`). Exits non-zero if no frames decode.
 
-use openreach_session::rendezvous::RendezvousClient;
-use openreach_session::{SignalClient, Signaling, ViewerConfig, ViewerSession, ViewerUpdate};
+use rmd_session::rendezvous::RendezvousClient;
+use rmd_session::{SignalClient, Signaling, ViewerConfig, ViewerSession, ViewerUpdate};
 use std::time::{Duration, Instant};
 
-/// Rendezvous WebSocket if `OPENREACH_RENDEZVOUS_URL` is set, else the LAN relay.
+/// Rendezvous WebSocket if `RMD_RENDEZVOUS_URL` is set, else the LAN relay.
 fn build_signaling() -> anyhow::Result<Box<dyn Signaling>> {
-    if let Ok(url) = std::env::var("OPENREACH_RENDEZVOUS_URL") {
-        let token = std::env::var("OPENREACH_TOKEN")?;
-        let peer = std::env::var("OPENREACH_PEER_DEVICE_ID")?;
+    if let Ok(url) = std::env::var("RMD_RENDEZVOUS_URL") {
+        let token = std::env::var("RMD_TOKEN")?;
+        let peer = std::env::var("RMD_PEER_DEVICE_ID")?;
         Ok(Box::new(RendezvousClient::connect(
             &url,
             &token,
@@ -25,28 +25,28 @@ fn build_signaling() -> anyhow::Result<Box<dyn Signaling>> {
         )?))
     } else {
         let addr =
-            std::env::var("OPENREACH_SIGNAL_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".into());
+            std::env::var("RMD_SIGNAL_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".into());
         Ok(Box::new(SignalClient::connect(&addr)?))
     }
 }
 
 fn main() -> anyhow::Result<()> {
-    let secs: u64 = std::env::var("OPENREACH_TEST_SECS")
+    let secs: u64 = std::env::var("RMD_TEST_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(12);
 
     // Optional identity for testing unattended-access enforcement.
-    let identity = std::env::var("OPENREACH_IDENTITY")
+    let identity = std::env::var("RMD_IDENTITY")
         .ok()
-        .and_then(|p| openreach_session::DeviceIdentity::load_or_create(std::path::Path::new(&p)).ok());
+        .and_then(|p| rmd_session::DeviceIdentity::load_or_create(std::path::Path::new(&p)).ok());
     if let Some(id) = identity.as_ref() {
         eprintln!("[headless] device_id={}", id.device_id());
     }
 
     let cfg = ViewerConfig {
         device_name: "headless-viewer".into(),
-        ice_servers: std::env::var("OPENREACH_ICE")
+        ice_servers: std::env::var("RMD_ICE")
             .map(|s| {
                 s.split(',')
                     .map(|x| x.trim().to_string())
@@ -54,8 +54,8 @@ fn main() -> anyhow::Result<()> {
                     .collect()
             })
             .unwrap_or_default(),
-        bind_addr: std::env::var("OPENREACH_BIND").unwrap_or_else(|_| "0.0.0.0:0".into()),
-        enable_audio: std::env::var("OPENREACH_AUDIO").is_ok(),
+        bind_addr: std::env::var("RMD_BIND").unwrap_or_else(|_| "0.0.0.0:0".into()),
+        enable_audio: std::env::var("RMD_AUDIO").is_ok(),
         // Present an identity if configured (to test unattended-access enforcement).
         identity: identity.map(std::sync::Arc::new),
     };
