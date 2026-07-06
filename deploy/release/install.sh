@@ -138,17 +138,20 @@ case "$SLUG" in linux-x86_64|macos-x86_64|macos-arm64) PREBUILT_OK=1 ;; esac
 if [ -n "$DO_UNINSTALL" ]; then uninstall; fi
 
 # --- Choose install method -------------------------------------------------
+# Prefer prebuilt binaries (no toolchain needed). Build from source only when the
+# user asks (--source / RMD_MODE=source) or no prebuilt exists for this platform.
+# The build-requirements check runs ONLY in source mode, so it never blocks a
+# prebuilt install.
 MODE="${RMD_MODE:-}"
 if [ -z "$MODE" ]; then
-  if [ "$PREBUILT_OK" = 1 ] && [ -t 0 ]; then
-    printf 'Install method:\n  1) Prebuilt binaries (recommended)\n  2) Build from source\nChoose [1]: '
-    read ans || ans=""
-    case "$ans" in 2|s|source) MODE=source ;; *) MODE=prebuilt ;; esac
-  elif [ "$PREBUILT_OK" = 1 ]; then MODE=prebuilt
-  else MODE=source
+  if [ "$PREBUILT_OK" = 1 ]; then
+    MODE=prebuilt
+  else
+    MODE=source
+    warn "No prebuilt binary is published for $SLUG — falling back to a source build."
+    warn "Prebuilt platforms: linux-x86_64, macos-x86_64, macos-arm64.  (Pass --source to force a build.)"
   fi
 fi
-[ "$MODE" = source ] || [ "$PREBUILT_OK" = 1 ] || { warn "no prebuilt binary for $SLUG — building from source"; MODE=source; }
 
 # --- Installed version (for the re-runnable upgrade check) ------------------
 installed_version() { # -> prints version string or empty
