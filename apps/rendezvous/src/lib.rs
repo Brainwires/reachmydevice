@@ -117,10 +117,18 @@ fn is_apex_host(host: &str) -> bool {
 }
 
 /// Serve the host install one-liner script (`curl https://reachmy.dev/install.sh`).
+///
+/// Reads `RMD_INSTALL_SH` (a mounted file) if set + readable, so the script can be
+/// updated without rebuilding the binary; otherwise falls back to the version
+/// compiled in at build time.
 async fn install_script() -> impl IntoResponse {
+    let body = std::env::var("RMD_INSTALL_SH")
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_else(|| include_str!("../../../deploy/release/install.sh").to_string());
     (
         [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
-        include_str!("../../../deploy/release/install.sh"),
+        body,
     )
 }
 
