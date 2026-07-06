@@ -161,11 +161,28 @@ async fn handle_socket(socket: WebSocket, state: AppState, device_id: String) {
     state.hub.register(device_id.clone(), tx.clone()).await;
     tracing::info!(device = %device_id, "signaling connected");
 
-    // Pump relayed messages out to this device.
+    // Pump relayed messages out to this device, and send a keepalive Ping every
+    // 30s so an idle connection (a host waiting for a viewer) isn't dropped by an
+    // intermediary idle timeout — Cloudflare's tunnel kills idle WebSockets at
+    // ~100s. Any frame resets that timer; the peer (tungstenite) auto-answers Pong.
     let mut send_task = tokio::spawn(async move {
-        while let Some(text) = rx.recv().await {
-            if sink.send(Message::Text(text.into())).await.is_err() {
-                break;
+        let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
+        keepalive.tick().await; // consume the immediate first tick
+        loop {
+            tokio::select! {
+                msg = rx.recv() => match msg {
+                    Some(text) => {
+                        if sink.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                _ = keepalive.tick() => {
+                    if sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
