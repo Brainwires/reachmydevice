@@ -2,7 +2,11 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
-## [Unreleased]
+## [0.2.2] - 2026-07-06
+
+The browser viewer works end-to-end: a browser connects to a native host over the
+vendored sans-IO WebRTC fork, across NAT, with a relay fallback and clean
+reconnects.
 
 ### Added
 - **TURN relay for cross-NAT / browser connectivity.** The rendezvous now serves
