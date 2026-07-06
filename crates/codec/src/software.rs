@@ -16,6 +16,7 @@ use openh264::encoder::{
 };
 use openh264::formats::{YUVSlices, YUVSource};
 use openh264::OpenH264API;
+use std::time::{Duration, Instant};
 use yuvutils_rs::{
     bgra_to_yuv420, YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange,
     YuvStandardMatrix,
@@ -23,7 +24,13 @@ use yuvutils_rs::{
 
 /// Rebuild the encoder only when the bitrate target moves more than this
 /// fraction, so gradual GCC nudges don't thrash (each rebuild forces a keyframe).
-const BITRATE_REBUILD_THRESHOLD: f32 = 0.20;
+/// GCC oscillates continuously, so this must be generous.
+const BITRATE_REBUILD_THRESHOLD: f32 = 0.35;
+
+/// Minimum wall-clock gap between encoder rebuilds. Bounds the rebuild rate no
+/// matter how fast GCC swings, so we never re-create the encoder (and emit a
+/// costly keyframe) every frame — the churn behind the openh264 warning flood.
+const REBUILD_MIN_INTERVAL: Duration = Duration::from_secs(4);
 
 /// Build an openh264 encoder for `cfg`. Width/height come from the frames later;
 /// bitrate/fps/GOP are set here.
@@ -35,6 +42,9 @@ fn build_encoder(cfg: &EncoderConfig) -> anyhow::Result<OhEncoder> {
         .usage_type(UsageType::ScreenContentRealTime)
         .rate_control_mode(RateControlMode::Bitrate)
         .complexity(Complexity::Low)
+        // Quiet openh264's own stderr logging (e.g. the harmless "AdaptiveQuant
+        // not supported for screen content" ParamValidation warnings on init).
+        .debug(false)
         // Periodic IDR every ~2s bounds recovery time after loss/join, on top of
         // on-demand keyframes (PLI / viewer join).
         .intra_frame_period(IntraFramePeriod::from_num_frames(cfg.fps.max(1) * 2));
@@ -48,6 +58,8 @@ pub struct OpenH264Encoder {
     cfg: EncoderConfig,
     /// Bitrate requested by [`Encoder::set_target_bitrate`], applied lazily.
     pending_bitrate_bps: u32,
+    /// When the encoder was last (re)built, to rate-limit rebuilds.
+    last_rebuild: Instant,
 }
 
 impl OpenH264Encoder {
@@ -56,16 +68,24 @@ impl OpenH264Encoder {
             encoder: build_encoder(&cfg)?,
             pending_bitrate_bps: cfg.bitrate_bps,
             cfg,
+            last_rebuild: Instant::now(),
         })
     }
 
-    /// Rebuild the encoder if the pending bitrate has drifted past the threshold.
+    /// Rebuild the encoder if the pending bitrate has drifted past the threshold
+    /// *and* enough time has passed since the last rebuild. openh264 0.9 exposes
+    /// no runtime bitrate setter (its `set_option`/`raw_api` is private), so a
+    /// rebuild is the only way to retarget — but it drops encoder state and forces
+    /// a keyframe, so we do it sparingly rather than chasing every GCC swing.
     fn maybe_reconfigure(&mut self) -> anyhow::Result<()> {
         let cur = self.cfg.bitrate_bps.max(1) as f32;
         let delta = (self.pending_bitrate_bps as f32 - cur).abs() / cur;
-        if delta > BITRATE_REBUILD_THRESHOLD {
+        if delta > BITRATE_REBUILD_THRESHOLD
+            && self.last_rebuild.elapsed() >= REBUILD_MIN_INTERVAL
+        {
             self.cfg.bitrate_bps = self.pending_bitrate_bps;
             self.encoder = build_encoder(&self.cfg)?;
+            self.last_rebuild = Instant::now();
             tracing::debug!(
                 bitrate_bps = self.cfg.bitrate_bps,
                 "encoder rebuilt for new bitrate"
