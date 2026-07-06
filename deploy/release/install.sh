@@ -134,12 +134,15 @@ SLUG="$PLAT-$ARCH"
 PREBUILT_OK=0
 case "$SLUG" in linux-x86_64|macos-x86_64|macos-arm64) PREBUILT_OK=1 ;; esac
 
+# Uninstall short-circuits everything else (needs $PLAT + $BINDIR, now set).
+if [ -n "$DO_UNINSTALL" ]; then uninstall; fi
+
 # --- Choose install method -------------------------------------------------
 MODE="${RMD_MODE:-}"
 if [ -z "$MODE" ]; then
-  if [ "$PREBUILT_OK" = 1 ] && [ -r /dev/tty ]; then
+  if [ "$PREBUILT_OK" = 1 ] && [ -t 0 ]; then
     printf 'Install method:\n  1) Prebuilt binaries (recommended)\n  2) Build from source\nChoose [1]: '
-    read ans </dev/tty 2>/dev/null || ans=""
+    read ans || ans=""
     case "$ans" in 2|s|source) MODE=source ;; *) MODE=prebuilt ;; esac
   elif [ "$PREBUILT_OK" = 1 ]; then MODE=prebuilt
   else MODE=source
