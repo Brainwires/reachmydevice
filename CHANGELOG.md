@@ -31,6 +31,18 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 - **Rendezvous keepalive.** The signaling `/ws` now sends a WebSocket Ping every 30s
   so Cloudflare's ~100s idle timeout no longer silently drops a long-idle host, and a
   `last_seen` heartbeat keeps the console's online indicator fresh.
+- **Reconnect loses input control.** Reconnection used an ICE restart on the
+  long-lived peer connection (swaps ICE creds, keeps DTLS/SCTP). A reloaded browser
+  brings fresh DTLS + a new SCTP association that can't graft onto the old
+  connection, so video renegotiated but the host's `control` data channel never
+  re-opened — killing keyboard/mouse until `rmdd` was restarted. The transport now
+  rebuilds a **fresh peer connection per session** (new DTLS + `control` channel +
+  offer) on drop, so a reconnecting/reloaded viewer always gets working input.
+- **H.264 encoder rebuild churn.** The encoder was fully rebuilt whenever GCC's
+  bitrate target drifted >20% — which happens continuously — flooding logs with
+  openh264 `ParamValidation` warnings and forcing wasteful keyframes. Rebuilds now
+  need a 35% sustained drift and a 4s minimum interval, and openh264 logging is
+  silenced.
 
 ## [0.2.1] - 2026-07-06
 
