@@ -2,6 +2,24 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
+## [0.2.1] - 2026-07-06
+
+Distribution + first-run polish (all publicly installable now that the repo is public).
+
+- **Unix CLI names:** the host daemon is **`rmdd`**, the client/viewer is **`rmd`**
+  (package names unchanged). `rmd`/`rmdd` gained `--version`/`--help`.
+- **Installer overhaul (`install.sh`):** prebuilt (default) *or* source install; the
+  system-requirements check runs only for source builds and never blocks a prebuilt.
+  Installs to `~/.local/bin` (no sudo) and auto-adds it to the shell PATH. Re-runnable
+  (upgrades, or reports "up to date"); `--uninstall`, `--help`, and flag equivalents.
+  Signature *or* SHA-256-over-HTTPS verification with no required external tool.
+- **`linux-arm64` prebuilt** for arm64 SBCs (Orange Pi 5B, Raspberry Pi 4/5 on a
+  64-bit OS), cross-compiled with `cross` (glibc-2.31 baseline → Pi-OS portable).
+- **Host over SSH:** the Linux capture backend now **auto-discovers `DISPLAY`/
+  `XAUTHORITY`** (tries `:0`/`:1` + the usual cookie locations), so `rmdd` started
+  over SSH captures the local desktop with no env prefix.
+- The rendezvous serves `/install.sh` from a mounted file (fast updates, no rebuild).
+
 ## [0.2.0] - 2026-07-05
 
 Pure-Rust default build, a browser viewer, and a public landing page.
