@@ -4,6 +4,21 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+### Added
+- **TURN relay for cross-NAT / browser connectivity.** The rendezvous now serves
+  `GET /api/ice` (device-token auth), minting **ephemeral** coturn
+  `--use-auth-secret` credentials (username `<expiry>:rmd`, credential
+  `base64(HMAC-SHA1(secret, username))`) alongside STUN — configured via
+  `RMD_TURN_SECRET` / `RMD_TURN_HOST` / `RMD_TURN_PORT` / `RMD_TURN_TTL`
+  (STUN-only when unset). The host (`rmdd`), native viewer, and browser viewer all
+  fetch `/api/ice` and use the returned servers, so peers can relay through NAT
+  instead of failing when only private/`.local` candidates exist. Transport ICE
+  config gained credentials (`IceServer { urls, username, credential }`).
+
+  This closes the second wall of the first real browser↔host session: Chrome
+  obfuscates its host candidate as an mDNS `.local` name (the fork drops it) and
+  the host had no relay, so no candidate pair formed. A shared TURN relay fixes it.
+
 ### Fixed
 - **Browser viewer WebRTC handshake.** The native host encodes the offer/answer
   `data` as a JSON `RTCSessionDescription` (`{"type","sdp"}`, matching `rtc`'s serde
