@@ -94,14 +94,6 @@ const STUN_DEFAULT_PORT: u16 = 3478;
 const STUN_READ_TIMEOUT: Duration = Duration::from_millis(800);
 /// How many times to (re)send a STUN Binding request before giving up.
 const STUN_MAX_ATTEMPTS: usize = 3;
-/// Max automatic ICE restarts the host attempts before declaring the session
-/// dead after a connection blip.
-const MAX_ICE_RESTARTS: u32 = 4;
-/// Delay between successive ICE-restart attempts (host side).
-const RESTART_INTERVAL: Duration = Duration::from_secs(2);
-/// How long the viewer waits for the host to re-establish the connection (via
-/// an ICE restart) before giving up and reporting a disconnect.
-const VIEWER_RECOVERY_GRACE: Duration = Duration::from_secs(12);
 
 /// Run the driver loop until [`DriverCmd::Shutdown`] or the command channel closes.
 pub(crate) fn run(
@@ -393,123 +385,133 @@ fn run_host(
 ) -> anyhow::Result<()> {
     let (socket, local_addr) = bind_socket(config.bind_addr)?;
 
-    // Media engine: register the configured send codec (H.264 or AV1).
-    let mut media_engine = MediaEngine::default();
-    let codec = codec_params(config.video_codec);
-    media_engine
-        .register_codec(codec.clone(), RtpCodecKind::Video)
-        .context("register video codec")?;
+    // One iteration per viewer session: build a fresh peer connection (offer +
+    // control data channel), serve it, and rebuild from scratch when it drops so
+    // a reconnecting/reloaded viewer always gets clean DTLS + a new data channel.
+    loop {
+        // Media engine: register the configured send codec (H.264 or AV1).
+        let mut media_engine = MediaEngine::default();
+        let codec = codec_params(config.video_codec);
+        media_engine
+            .register_codec(codec.clone(), RtpCodecKind::Video)
+            .context("register video codec")?;
 
-    // Interceptor chain. NACK + RTCP reports come from the shared helpers; on top
-    // of those we stack the congestion-control pair required for GCC:
-    //   GCC (innermost) ← TwccSender (outer, stamps the transport-wide seq no.)
-    // GccInterceptorBuilder hands back a `GccHandle` we poll each tick for the
-    // latest target bitrate. The header extension + feedback that let the viewer
-    // reply with TWCC are registered on the media engine below.
-    let registry = Registry::new();
-    let registry = configure_nack(registry, &mut media_engine);
-    let registry = configure_rtcp_reports(registry);
-    register_twcc_sender_headers(&mut media_engine).context("register TWCC headers")?;
-    let (gcc_builder, gcc_handle) = GccInterceptorBuilder::new();
-    let registry = registry
-        .with(gcc_builder.build())
-        .with(TwccSenderBuilder::new().build());
+        // Interceptor chain. NACK + RTCP reports come from the shared helpers; on top
+        // of those we stack the congestion-control pair required for GCC:
+        //   GCC (innermost) ← TwccSender (outer, stamps the transport-wide seq no.)
+        // GccInterceptorBuilder hands back a `GccHandle` we poll each tick for the
+        // latest target bitrate. The header extension + feedback that let the viewer
+        // reply with TWCC are registered on the media engine below.
+        let registry = Registry::new();
+        let registry = configure_nack(registry, &mut media_engine);
+        let registry = configure_rtcp_reports(registry);
+        register_twcc_sender_headers(&mut media_engine).context("register TWCC headers")?;
+        let (gcc_builder, gcc_handle) = GccInterceptorBuilder::new();
+        let registry = registry
+            .with(gcc_builder.build())
+            .with(TwccSenderBuilder::new().build());
 
-    let mut pc = RTCPeerConnectionBuilder::new()
-        .with_configuration(
-            RTCConfigurationBuilder::new()
-                .with_ice_servers(ice_servers(&config.ice_servers))
-                .build(),
-        )
-        .with_setting_engine(SettingEngine::default())
-        .with_media_engine(media_engine)
-        .with_interceptor_registry(registry)
-        .build()
-        .context("build host peer connection")?;
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_configuration(
+                RTCConfigurationBuilder::new()
+                    .with_ice_servers(ice_servers(&config.ice_servers))
+                    .build(),
+            )
+            .with_setting_engine(SettingEngine::default())
+            .with_media_engine(media_engine)
+            .with_interceptor_registry(registry)
+            .build()
+            .context("build host peer connection")?;
 
-    // Add the video send track (its SSRC drives the packetizer) and the reliable
-    // ordered control data channel *before* creating the offer, so both are
-    // negotiated in the initial SDP.
-    let video_ssrc: SSRC = rand::random();
-    let track = MediaStreamTrack::new(
-        "rmd-video".to_owned(),
-        "rmd-video-track".to_owned(),
-        "rmd-video-label".to_owned(),
-        RtpCodecKind::Video,
-        vec![RTCRtpEncodingParameters {
-            rtp_coding_parameters: RTCRtpCodingParameters {
-                ssrc: Some(video_ssrc),
+        // Add the video send track (its SSRC drives the packetizer) and the reliable
+        // ordered control data channel *before* creating the offer, so both are
+        // negotiated in the initial SDP.
+        let video_ssrc: SSRC = rand::random();
+        let track = MediaStreamTrack::new(
+            "rmd-video".to_owned(),
+            "rmd-video-track".to_owned(),
+            "rmd-video-label".to_owned(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(video_ssrc),
+                    ..Default::default()
+                },
+                codec: codec.rtp_codec.clone(),
                 ..Default::default()
-            },
-            codec: codec.rtp_codec.clone(),
-            ..Default::default()
-        }],
-    );
-    let video_sender_id = pc.add_track(track).context("add video track")?;
+            }],
+        );
+        let video_sender_id = pc.add_track(track).context("add video track")?;
 
-    let _ = pc
-        .create_data_channel(
-            "control",
-            Some(RTCDataChannelInit {
-                ordered: true, // reliable + ordered (no lifetime/retransmit limits)
-                ..Default::default()
+        let _ = pc
+            .create_data_channel(
+                "control",
+                Some(RTCDataChannelInit {
+                    ordered: true, // reliable + ordered (no lifetime/retransmit limits)
+                    ..Default::default()
+                }),
+            )
+            .context("create control data channel")?;
+
+        // Kick off signaling: create + apply the offer and surface it immediately,
+        // so the peer can start negotiating while we gather candidates.
+        let offer = pc.create_offer(None).context("create offer")?;
+        pc.set_local_description(offer.clone())
+            .context("set local offer")?;
+        emit_session(&event_tx, &offer)?;
+
+        // Gather host + server-reflexive candidates on the bound socket now (before
+        // the driver loop owns it) and trickle each. A local description exists, so
+        // they can be added to the agent eagerly.
+        for init in gather_local_candidates(&socket, local_addr, &config.ice_servers) {
+            pc.add_local_candidate(init.clone())
+                .context("add local candidate")?;
+            let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
+                init.candidate,
+            )));
+        }
+
+        // Packetizer for outbound encoded frames. The payloader is selected from the
+        // codec's MIME type (H264Payloader or Av1Payloader) by the fork.
+        let packetizer: Box<dyn Packetizer> = Box::new(new_packetizer(
+            RTP_OUTBOUND_MTU,
+            codec.payload_type,
+            video_ssrc,
+            codec.rtp_codec.payloader().context("video payloader")?,
+            Box::new(rtc::rtp::sequence::new_random_sequencer()),
+            VIDEO_CLOCK_RATE,
+        ));
+
+        let mut state = RoleState {
+            gcc: Some(gcc_handle),
+            video: Some(VideoSend {
+                sender_id: video_sender_id,
+                ssrc: video_ssrc,
+                packetizer,
+                last_ts_micros: None,
             }),
-        )
-        .context("create control data channel")?;
+            sample_builder: None,
+            data_channel_id: None,
+            pending_local_candidates: Vec::new(), // host adds its own eagerly above
+            remote_description_set: false,
+            pending_remote_candidates: Vec::new(),
+            bitrate_bps: bitrate_bps.clone(),
+            is_host: true,
+            negotiated_once: false,
+            rebuild: false,
+            pending_offer: None,
+        };
 
-    // Kick off signaling: create + apply the offer and surface it immediately,
-    // so the peer can start negotiating while we gather candidates.
-    let offer = pc.create_offer(None).context("create offer")?;
-    pc.set_local_description(offer.clone())
-        .context("set local offer")?;
-    emit_session(&event_tx, &offer)?;
-
-    // Gather host + server-reflexive candidates on the bound socket now (before
-    // the driver loop owns it) and trickle each. A local description exists, so
-    // they can be added to the agent eagerly.
-    for init in gather_local_candidates(&socket, local_addr, &config.ice_servers) {
-        pc.add_local_candidate(init.clone())
-            .context("add local candidate")?;
-        let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
-            init.candidate,
-        )));
-    }
-
-    // Packetizer for outbound encoded frames. The payloader is selected from the
-    // codec's MIME type (H264Payloader or Av1Payloader) by the fork.
-    let packetizer: Box<dyn Packetizer> = Box::new(new_packetizer(
-        RTP_OUTBOUND_MTU,
-        codec.payload_type,
-        video_ssrc,
-        codec.rtp_codec.payloader().context("video payloader")?,
-        Box::new(rtc::rtp::sequence::new_random_sequencer()),
-        VIDEO_CLOCK_RATE,
-    ));
-
-    let mut state = RoleState {
-        gcc: Some(gcc_handle),
-        video: Some(VideoSend {
-            sender_id: video_sender_id,
-            ssrc: video_ssrc,
-            packetizer,
-            last_ts_micros: None,
-        }),
-        sample_builder: None,
-        data_channel_id: None,
-        pending_local_candidates: Vec::new(), // host adds its own eagerly above
-        remote_description_set: false,
-        pending_remote_candidates: Vec::new(),
-        bitrate_bps,
-        is_host: true,
-        ice_servers: config.ice_servers.clone(),
-        negotiated_once: false,
-        recovering: false,
-        restart_attempts: 0,
-        recovery_next: None,
-        regather_pending: false,
-    };
-
-    event_loop(&mut pc, &socket, local_addr, &cmd_rx, &event_tx, &mut state)
+        match event_loop(
+            &mut pc, &socket, local_addr, &cmd_rx, &event_tx, &mut state, None,
+        )? {
+            LoopOutcome::Shutdown => return Ok(()),
+            LoopOutcome::Reconnect(_) => {
+                tracing::info!("transport(host): connection dropped; rebuilding session");
+                continue;
+            }
+        }
+    } // end session loop
 }
 
 /// Viewer: answerer + video receiver, default interceptors (incl. TWCC receiver).
@@ -521,83 +523,100 @@ fn run_viewer(
 ) -> anyhow::Result<()> {
     let (socket, local_addr) = bind_socket(config.bind_addr)?;
 
-    // The viewer receives H.264 (its SampleBuilder uses the H.264 depacketizer;
-    // AV1 has no pure-Rust decoder and is consumed only by the browser viewer).
-    let mut media_engine = MediaEngine::default();
-    media_engine
-        .register_codec(codec_params(VideoCodec::H264), RtpCodecKind::Video)
-        .context("register H264 codec")?;
+    // An offer to apply on the freshly-built PC after a viewer-side rebuild
+    // (`None` on the first pass and when we rebuild to await the host's offer).
+    let mut pending: Option<SignalMsg> = None;
+    loop {
+        // The viewer receives H.264 (its SampleBuilder uses the H.264 depacketizer;
+        // AV1 has no pure-Rust decoder and is consumed only by the browser viewer).
+        let mut media_engine = MediaEngine::default();
+        media_engine
+            .register_codec(codec_params(VideoCodec::H264), RtpCodecKind::Video)
+            .context("register H264 codec")?;
 
-    // Default interceptors give us NACK, RTCP reports, and — crucially for the
-    // host's GCC — the TWCC *receiver* that generates congestion feedback.
-    let registry = Registry::new();
-    let registry = register_default_interceptors(registry, &mut media_engine)
-        .context("default interceptors")?;
+        // Default interceptors give us NACK, RTCP reports, and — crucially for the
+        // host's GCC — the TWCC *receiver* that generates congestion feedback.
+        let registry = Registry::new();
+        let registry = register_default_interceptors(registry, &mut media_engine)
+            .context("default interceptors")?;
 
-    // As the answerer we take the DTLS server role (host becomes the client).
-    let mut setting_engine = SettingEngine::default();
-    setting_engine
-        .set_answering_dtls_role(RTCDtlsRole::Server)
-        .context("set answering DTLS role")?;
+        // As the answerer we take the DTLS server role (host becomes the client).
+        let mut setting_engine = SettingEngine::default();
+        setting_engine
+            .set_answering_dtls_role(RTCDtlsRole::Server)
+            .context("set answering DTLS role")?;
 
-    let mut pc = RTCPeerConnectionBuilder::new()
-        .with_configuration(
-            RTCConfigurationBuilder::new()
-                .with_ice_servers(ice_servers(&config.ice_servers))
-                .build(),
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_configuration(
+                RTCConfigurationBuilder::new()
+                    .with_ice_servers(ice_servers(&config.ice_servers))
+                    .build(),
+            )
+            .with_setting_engine(setting_engine)
+            .with_media_engine(media_engine)
+            .with_interceptor_registry(registry)
+            .build()
+            .context("build viewer peer connection")?;
+
+        // Receive one video track.
+        pc.add_transceiver_from_kind(
+            RtpCodecKind::Video,
+            Some(RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Recvonly,
+                ..Default::default()
+            }),
         )
-        .with_setting_engine(setting_engine)
-        .with_media_engine(media_engine)
-        .with_interceptor_registry(registry)
-        .build()
-        .context("build viewer peer connection")?;
+        .context("add recvonly video transceiver")?;
 
-    // Receive one video track.
-    pc.add_transceiver_from_kind(
-        RtpCodecKind::Video,
-        Some(RTCRtpTransceiverInit {
-            direction: RTCRtpTransceiverDirection::Recvonly,
-            ..Default::default()
-        }),
-    )
-    .context("add recvonly video transceiver")?;
+        // Gather the viewer's own candidates now, on the bound socket, before the
+        // driver loop owns it. They can only be added and surfaced once the viewer
+        // answers the offer (a local description must exist first), so they are
+        // stashed in RoleState and handled in `apply_signal`.
+        let pending_local_candidates =
+            gather_local_candidates(&socket, local_addr, &config.ice_servers);
 
-    // Gather the viewer's own candidates now, on the bound socket, before the
-    // driver loop owns it. They can only be added and surfaced once the viewer
-    // answers the offer (a local description must exist first), so they are
-    // stashed in RoleState and handled in `apply_signal`.
-    let pending_local_candidates =
-        gather_local_candidates(&socket, local_addr, &config.ice_servers);
+        // H.264 depacketizer + sample builder reassemble RTP into Annex-B access
+        // units. `H264Packet` defaults to `is_avc = false`, so it emits NAL units
+        // delimited by the 0x00000001 Annex-B start code — exactly what a decoder
+        // (e.g. openh264) expects.
+        let sample_builder = SampleBuilder::new(
+            SAMPLE_BUILDER_MAX_LATE,
+            H264Packet::default(),
+            VIDEO_CLOCK_RATE,
+        );
 
-    // H.264 depacketizer + sample builder reassemble RTP into Annex-B access
-    // units. `H264Packet` defaults to `is_avc = false`, so it emits NAL units
-    // delimited by the 0x00000001 Annex-B start code — exactly what a decoder
-    // (e.g. openh264) expects.
-    let sample_builder = SampleBuilder::new(
-        SAMPLE_BUILDER_MAX_LATE,
-        H264Packet::default(),
-        VIDEO_CLOCK_RATE,
-    );
+        let mut state = RoleState {
+            gcc: None,
+            video: None,
+            sample_builder: Some(sample_builder),
+            data_channel_id: None,
+            pending_local_candidates,
+            remote_description_set: false,
+            pending_remote_candidates: Vec::new(),
+            bitrate_bps: bitrate_bps.clone(),
+            is_host: false,
+            negotiated_once: false,
+            rebuild: false,
+            pending_offer: None,
+        };
 
-    let mut state = RoleState {
-        gcc: None,
-        video: None,
-        sample_builder: Some(sample_builder),
-        data_channel_id: None,
-        pending_local_candidates,
-        remote_description_set: false,
-        pending_remote_candidates: Vec::new(),
-        bitrate_bps,
-        is_host: false,
-        ice_servers: config.ice_servers.clone(),
-        negotiated_once: false,
-        recovering: false,
-        restart_attempts: 0,
-        recovery_next: None,
-        regather_pending: false,
-    };
-
-    event_loop(&mut pc, &socket, local_addr, &cmd_rx, &event_tx, &mut state)
+        match event_loop(
+            &mut pc,
+            &socket,
+            local_addr,
+            &cmd_rx,
+            &event_tx,
+            &mut state,
+            pending.take(),
+        )? {
+            LoopOutcome::Shutdown => return Ok(()),
+            LoopOutcome::Reconnect(offer) => {
+                tracing::info!("transport(viewer): session ended; rebuilding");
+                pending = offer.map(SignalMsg::Offer);
+                continue;
+            }
+        }
+    } // end session loop
 }
 
 /// Register the RTP header extension + RTCP feedback that TWCC needs on the
@@ -657,23 +676,29 @@ struct RoleState {
     /// Shared cell the encoder reads for its bitrate target.
     bitrate_bps: Arc<AtomicU32>,
 
-    // --- reconnect / ICE-restart bookkeeping ------------------------------
-    /// True on the host (offerer), the side that initiates ICE restart.
+    // --- reconnect bookkeeping --------------------------------------------
+    /// True on the host (offerer). The host rebuilds the session on connection
+    /// loss; the viewer rebuilds when a fresh offer / loss is seen.
     is_host: bool,
-    /// ICE servers — needed to re-gather srflx candidates on a restart.
-    ice_servers: Vec<IceServer>,
-    /// Whether the viewer has already answered an offer (so a subsequent offer
-    /// is a renegotiation/ICE-restart and it must re-gather local candidates).
+    /// Whether we've completed a negotiation on this peer connection. A *second*
+    /// offer (viewer) then means a new session → rebuild, since a browser reload
+    /// (or host rebuild) brings fresh DTLS/SCTP that can't graft onto this PC.
     negotiated_once: bool,
-    /// Active recovery window after a connection blip.
-    recovering: bool,
-    /// ICE-restart attempts made in the current recovery window (host).
-    restart_attempts: u32,
-    /// When to next act on recovery (restart, or give up). `None` when idle.
-    recovery_next: Option<Instant>,
-    /// Viewer: set when a restart offer requires re-gathering local candidates;
-    /// serviced in the event loop, which owns the socket.
-    regather_pending: bool,
+    /// Set when the event loop should tear down this peer connection and rebuild
+    /// a fresh one (new DTLS + data channel + offer). See [`LoopOutcome`].
+    rebuild: bool,
+    /// Viewer only: an offer to apply immediately on the rebuilt PC (the offer
+    /// that triggered the rebuild). `None` means "wait for the host's new offer".
+    pending_offer: Option<String>,
+}
+
+/// What the [`event_loop`] returns to its owner (`run_host` / `run_viewer`).
+enum LoopOutcome {
+    /// The transport handle was dropped or a shutdown was requested — exit.
+    Shutdown,
+    /// Rebuild a fresh peer connection and resume. The optional payload is an
+    /// offer to apply on the fresh PC (viewer, when a new offer triggered it).
+    Reconnect(Option<String>),
 }
 
 /// Emit a local offer/answer as a JSON-encoded signaling message.
@@ -703,14 +728,23 @@ fn event_loop<I: Interceptor>(
     cmd_rx: &Receiver<DriverCmd>,
     event_tx: &Sender<TransportEvent>,
     state: &mut RoleState,
-) -> anyhow::Result<()> {
+    initial_signal: Option<SignalMsg>,
+) -> anyhow::Result<LoopOutcome> {
     let mut connected = false;
     let mut read_buf = vec![0u8; 2048];
+
+    // On a viewer rebuild, apply the offer that triggered it to the fresh PC.
+    if let Some(msg) = initial_signal {
+        if let Err(e) = apply_signal(pc, event_tx, state, msg) {
+            tracing::warn!("transport: applying rebuild offer failed: {e:?}");
+        }
+    }
 
     loop {
         // 1. Drain application commands.
         if let CommandOutcome::Shutdown = drain_commands(pc, cmd_rx, event_tx, state) {
-            break;
+            let _ = pc.close();
+            return Ok(LoopOutcome::Shutdown);
         }
 
         // 2. Flush all pending outbound datagrams.
@@ -723,10 +757,12 @@ fn event_loop<I: Interceptor>(
         // 3. Surface connection-state and ICE-candidate events.
         drain_events(pc, event_tx, state, &mut connected);
 
-        // 3b. Drive reconnect/ICE-restart recovery, and service any pending
-        //     candidate re-gather (viewer, after a restart offer).
-        service_recovery(pc, socket, local_addr, state, event_tx, &mut connected)?;
-        service_regather(pc, socket, local_addr, state, event_tx);
+        // 3b. A lost connection (host) or a new-session offer (viewer) asks us to
+        //     rebuild a fresh peer connection rather than patch this one.
+        if state.rebuild {
+            let _ = pc.close();
+            return Ok(LoopOutcome::Reconnect(state.pending_offer.take()));
+        }
 
         // 4. Drain inbound media / data.
         drain_reads(pc, event_tx, state);
@@ -785,9 +821,6 @@ fn event_loop<I: Interceptor>(
             }
         }
     }
-
-    let _ = pc.close();
-    Ok(())
 }
 
 /// Whether the command drain asked the loop to keep running or shut down.
@@ -822,12 +855,10 @@ fn drain_commands<I: Interceptor>(
                 }
             }
             Ok(DriverCmd::IceRestart) => {
-                // Host-initiated recovery: schedule an immediate restart.
-                if state.is_host && !state.recovering {
-                    state.recovering = true;
-                    state.restart_attempts = 0;
-                    state.recovery_next = Some(Instant::now());
-                    tracing::info!("transport: ICE restart requested");
+                // Host-initiated recovery: rebuild the session with a fresh offer.
+                if state.is_host {
+                    state.rebuild = true;
+                    tracing::info!("transport: session rebuild requested");
                 }
             }
             Ok(DriverCmd::Shutdown) => return CommandOutcome::Shutdown,
@@ -907,6 +938,15 @@ fn apply_signal<I: Interceptor>(
 ) -> anyhow::Result<()> {
     match msg {
         SignalMsg::Offer(json) => {
+            // A second offer on an already-negotiated viewer PC is a *new* session
+            // (the host rebuilt, or the browser reloaded): its fresh DTLS can't be
+            // applied to this PC. Defer it to a fresh peer connection via rebuild.
+            if state.negotiated_once {
+                state.rebuild = true;
+                state.pending_offer = Some(json);
+                return Ok(());
+            }
+
             // Viewer path: apply the remote offer, answer it (which establishes
             // our local description), then add + trickle our gathered
             // candidates (add_local_candidate requires a local description).
@@ -921,20 +961,13 @@ fn apply_signal<I: Interceptor>(
                 .context("set local answer")?;
             emit_session(event_tx, &answer)?;
 
-            if state.negotiated_once {
-                // Renegotiation (ICE restart): our candidates from the first
-                // negotiation are stale. Re-gather fresh ones in the event loop,
-                // which owns the socket.
-                state.regather_pending = true;
-            } else {
-                state.negotiated_once = true;
-                for init in state.pending_local_candidates.drain(..) {
-                    pc.add_local_candidate(init.clone())
-                        .context("add local candidate")?;
-                    let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
-                        init.candidate,
-                    )));
-                }
+            state.negotiated_once = true;
+            for init in state.pending_local_candidates.drain(..) {
+                pc.add_local_candidate(init.clone())
+                    .context("add local candidate")?;
+                let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
+                    init.candidate,
+                )));
             }
             flush_remote_candidates(pc, state);
         }
@@ -980,100 +1013,6 @@ fn flush_remote_candidates<I: Interceptor>(
     }
 }
 
-/// Perform a host-side ICE restart: mark ICE for restart, create + apply a fresh
-/// offer, re-gather local candidates on the bound socket, and trickle everything
-/// to the peer. The viewer answers this like any offer (`apply_signal`).
-fn perform_ice_restart<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
-    socket: &UdpSocket,
-    local_addr: SocketAddr,
-    state: &RoleState,
-    event_tx: &Sender<TransportEvent>,
-) -> anyhow::Result<()> {
-    pc.restart_ice();
-    let offer = pc.create_offer(None).context("create restart offer")?;
-    pc.set_local_description(offer.clone())
-        .context("set restart local description")?;
-    emit_session(event_tx, &offer)?;
-    for init in gather_local_candidates(socket, local_addr, &state.ice_servers) {
-        pc.add_local_candidate(init.clone())
-            .context("add local candidate (restart)")?;
-        let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
-            init.candidate,
-        )));
-    }
-    Ok(())
-}
-
-/// Drive the recovery state machine: on the host, retry ICE restart on an
-/// interval up to a cap; on the viewer, wait out a grace window for the host to
-/// re-establish. When the host exhausts attempts (or the viewer's grace
-/// elapses), give up and report a disconnect.
-fn service_recovery<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
-    socket: &UdpSocket,
-    local_addr: SocketAddr,
-    state: &mut RoleState,
-    event_tx: &Sender<TransportEvent>,
-    connected: &mut bool,
-) -> anyhow::Result<()> {
-    if !state.recovering {
-        return Ok(());
-    }
-    let Some(at) = state.recovery_next else {
-        return Ok(());
-    };
-    let now = Instant::now();
-    if now < at {
-        return Ok(());
-    }
-
-    if state.is_host && state.restart_attempts < MAX_ICE_RESTARTS {
-        state.restart_attempts += 1;
-        tracing::info!(
-            attempt = state.restart_attempts,
-            "transport: initiating ICE restart"
-        );
-        if let Err(e) = perform_ice_restart(pc, socket, local_addr, state, event_tx) {
-            tracing::warn!("transport: ICE restart failed: {e:?}");
-        }
-        state.recovery_next = Some(now + RESTART_INTERVAL);
-    } else {
-        // Host out of attempts, or viewer grace elapsed: the session is dead.
-        state.recovering = false;
-        state.recovery_next = None;
-        if *connected {
-            *connected = false;
-            let _ = event_tx.send(TransportEvent::Disconnected);
-        }
-    }
-    Ok(())
-}
-
-/// Viewer: after answering a restart offer, gather fresh local candidates on the
-/// bound socket and trickle them (the first-negotiation candidates are stale).
-fn service_regather<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
-    socket: &UdpSocket,
-    local_addr: SocketAddr,
-    state: &mut RoleState,
-    event_tx: &Sender<TransportEvent>,
-) {
-    if !state.regather_pending {
-        return;
-    }
-    state.regather_pending = false;
-    for init in gather_local_candidates(socket, local_addr, &state.ice_servers) {
-        if let Err(e) = pc.add_local_candidate(init.clone()) {
-            tracing::debug!("transport: add local candidate (regather) failed: {e}");
-            continue;
-        }
-        let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
-            init.candidate,
-        )));
-    }
-}
-
 /// Drain connection-state changes and ICE candidates into events.
 fn drain_events<I: Interceptor>(
     pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
@@ -1085,41 +1024,25 @@ fn drain_events<I: Interceptor>(
         match event {
             RTCPeerConnectionEvent::OnConnectionStateChangeEvent(s) => match s {
                 RTCPeerConnectionState::Connected => {
-                    let recovered = state.recovering;
-                    if recovered {
-                        state.recovering = false;
-                        state.recovery_next = None;
-                        state.restart_attempts = 0;
-                        tracing::info!("transport: reconnected after ICE restart");
-                    }
-                    // Emit Connected on first connect, and again on recovery so
-                    // the host forces a fresh keyframe and the UI refreshes.
                     if !*connected {
                         *connected = true;
                         let _ = event_tx.send(TransportEvent::Connected);
-                    } else if recovered {
-                        let _ = event_tx.send(TransportEvent::Connected);
                     }
                 }
-                // Terminal close: no recovery.
-                RTCPeerConnectionState::Closed if *connected => {
+                // Connection lost. A browser reload (or any reconnect) brings a
+                // fresh DTLS/SCTP association that can't be grafted onto this peer
+                // connection, so we tear it down and rebuild rather than ICE-
+                // restart. The host emits a fresh offer immediately; the viewer
+                // rebuilds and waits for it.
+                RTCPeerConnectionState::Failed
+                | RTCPeerConnectionState::Disconnected
+                | RTCPeerConnectionState::Closed
+                    if *connected =>
+                {
                     *connected = false;
                     let _ = event_tx.send(TransportEvent::Disconnected);
-                }
-                // Transient blip / failure: enter recovery rather than tearing
-                // the session down. The host restarts ICE; the viewer waits for
-                // the host's new offer. Give-up is handled in `service_recovery`.
-                RTCPeerConnectionState::Failed | RTCPeerConnectionState::Disconnected
-                    if *connected && !state.recovering =>
-                {
-                    state.recovering = true;
-                    state.restart_attempts = 0;
-                    state.recovery_next = Some(if state.is_host {
-                        Instant::now() // host acts immediately
-                    } else {
-                        Instant::now() + VIEWER_RECOVERY_GRACE // viewer waits
-                    });
-                    tracing::warn!(state = ?s, "transport: connection lost; attempting recovery");
+                    state.rebuild = true;
+                    tracing::warn!(state = ?s, "transport: connection lost; rebuilding session");
                 }
                 _ => {}
             },
