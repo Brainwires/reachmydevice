@@ -91,6 +91,28 @@ fn discover_x_env() {
     }
 }
 
+/// Turn a raw X-connection failure into an actionable error that names the usual
+/// cause (no desktop session logged in) and both fixes (auto-login or log in).
+fn x_help_error(underlying: &str) -> CaptureError {
+    let user = std::env::var("USER").unwrap_or_else(|_| "<user>".to_string());
+    CaptureError::Backend(format!(
+        "X11 screen capture couldn't reach a desktop session ({underlying}).\n\n\
+         This almost always means no graphical session is logged in (the machine may be \
+         sitting at the login screen), so there's nothing to capture and its X cookie \
+         isn't yours. Fix it one of two ways:\n  \
+         1. Log in to the desktop as {user} (on the monitor, or via VNC), OR\n  \
+         2. Enable auto-login so a session starts at boot — for GDM, in \
+            /etc/gdm3/custom.conf set:\n       \
+            [daemon]\n       AutomaticLoginEnable=true\n       AutomaticLogin={user}\n       \
+            WaylandEnable=false      # X11 session; required for capture\n     \
+            then `sudo reboot`.\n\n  \
+         Notes: capture needs an Xorg (X11) session — a Wayland desktop is only \
+         partially visible (XWayland apps). Started over SSH? `rmdd` auto-detects \
+         DISPLAY/XAUTHORITY once a session exists; otherwise set them, or run \
+         `xhost +SI:localuser:{user}` in a desktop terminal."
+    ))
+}
+
 /// This process's real uid, for `/run/user/<uid>` — via `/proc/self` (no libc).
 fn self_uid() -> std::io::Result<u32> {
     use std::os::unix::fs::MetadataExt;
@@ -127,11 +149,7 @@ fn warn_if_wayland() {
 pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
     warn_if_wayland();
     ensure_x_env();
-    let (conn, _) = x11rb::connect(None).map_err(|e| {
-        CaptureError::Backend(format!(
-            "{e} (no reachable X server; under Wayland ensure XWayland is running)"
-        ))
-    })?;
+    let (conn, _) = x11rb::connect(None).map_err(|e| x_help_error(&e.to_string()))?;
     Ok(conn
         .setup()
         .roots
@@ -165,7 +183,7 @@ pub fn start_capture(
     ensure_x_env();
     // Validate the screen exists up front (surfaces errors to the caller).
     {
-        let (conn, _) = x11rb::connect(None).map_err(|e| CaptureError::Backend(format!("{e}")))?;
+        let (conn, _) = x11rb::connect(None).map_err(|e| x_help_error(&e.to_string()))?;
         if display_index >= conn.setup().roots.len() {
             return Err(CaptureError::NoSuchDisplay(display_index).into());
         }
@@ -182,7 +200,7 @@ pub fn start_capture(
             let (conn, _default_screen) = match x11rb::connect(None) {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::error!(error = %e, "X11 connect failed");
+                    tracing::error!("{}", x_help_error(&e.to_string()));
                     return;
                 }
             };
