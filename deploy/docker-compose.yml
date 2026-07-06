@@ -34,7 +34,12 @@ services:
       RMD_RZ_OPEN_REGISTRATION: ${RMD_RZ_OPEN_REGISTRATION:-false}
       # Shared secret used to mint short-lived TURN credentials (must match coturn).
       RMD_TURN_SECRET: ${TURN_SECRET}
-      RMD_TURN_HOST: ${RMD_DOMAIN}
+      # The address clients dial for STUN/TURN. This must be the coturn host's
+      # DIRECT public IP (or a grey-cloud/non-proxied hostname) — NOT a
+      # Cloudflare-proxied ${RMD_DOMAIN}, since a proxied domain never reaches the
+      # UDP relay. Leave unset to serve STUN-only (no relay).
+      RMD_TURN_HOST: ${RMD_TURN_HOST:-}
+      RMD_TURN_PORT: ${RMD_TURN_PORT:-3478}
     volumes:
       - rendezvous_data:/data
     # Not published directly; only reachable via caddy.
@@ -53,11 +58,15 @@ services:
       - --realm=${RMD_DOMAIN}
       - --use-auth-secret
       - --static-auth-secret=${TURN_SECRET}
-      - --no-cli
-      - --no-tlsv1
-      - --no-tlsv1_1
-      # STUN also works out of the box on 3478.
+      # Advertise the server's public IP as the relay address (required when the
+      # host is behind NAT / has multiple interfaces, e.g. a VPS).
+      - --external-ip=${RMD_TURN_EXTERNAL_IP}
+      # STUN also works out of the box on 3478. (Omit --no-tlsv1_1/--no-cli: some
+      # coturn images reject those flags; we don't expose TLS here anyway.)
     # Ports (host network): 3478/udp+tcp (STUN/TURN), 49160-49200/udp (relay).
+    # IMPORTANT: open these inbound at your provider's firewall too (e.g. IONOS
+    # Cloud Panel > Firewall Policies), not just the OS firewall — UDP 3478 and
+    # UDP 49160-49200. A host-only ufw allow is not enough behind a cloud firewall.
 
 volumes:
   caddy_data:

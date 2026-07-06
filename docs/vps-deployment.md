@@ -60,10 +60,30 @@ WebSocket at `wss://rmd.example.com/ws?token=<token>`. Set
 State is `rendezvous_data:/data/rmd.db` (SQLite). Snapshot the volume or
 run `sqlite3 rmd.db .backup` on a schedule.
 
+## Firewall — open the TURN ports at the PROVIDER, not just the OS
+
+The relay only works if inbound UDP reaches coturn. On a cloud VPS there are
+usually **two** firewalls; a host `ufw`/`iptables` allow is not enough if the
+provider's firewall (e.g. **IONOS Cloud Panel → Network → Firewall Policies**,
+AWS security groups, etc.) drops the port. Open, inbound, from any source:
+
+| Proto | Port(s)       | Purpose                     |
+|-------|---------------|-----------------------------|
+| UDP   | `3478`        | STUN / TURN                 |
+| TCP   | `3478`        | TURN-over-TCP fallback      |
+| UDP   | `49160-49200` | TURN relay range            |
+
+Verify from an external host: a STUN Binding to `<ip>:3478` should get a response.
+If it times out while coturn answers locally, the provider firewall is the cause.
+
+Set `RMD_TURN_HOST` / `RMD_TURN_EXTERNAL_IP` to the VPS's **direct** public IP —
+a Cloudflare-proxied `RMD_DOMAIN` never reaches the UDP relay.
+
 ## Notes / limitations (v1)
 - `coturn` uses `network_mode: host` because the TURN relay needs the host UDP
   port range; standard on a single-tenant VPS.
-- Short-lived TURN credential minting (HMAC of the shared secret) is the planned
-  next step (`/api/turn-credentials`); clients currently take STUN/TURN config at
-  connect.
+- **Ephemeral TURN credentials are minted by the rendezvous** at
+  `GET /api/ice` (device-token auth): HMAC-SHA1 of the shared secret over a
+  short-lived `<expiry>:rmd` username. The host, native viewer, and browser
+  viewer all fetch it; STUN-only when `RMD_TURN_SECRET`/`RMD_TURN_HOST` are unset.
 - Postgres is an optional swap for SQLite at higher scale (sqlx supports both).
