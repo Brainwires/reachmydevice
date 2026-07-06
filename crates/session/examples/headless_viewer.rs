@@ -48,8 +48,9 @@ fn main() -> anyhow::Result<()> {
         ice_servers: std::env::var("RMD_ICE")
             .map(|s| {
                 s.split(',')
-                    .map(|x| x.trim().to_string())
+                    .map(|x| x.trim())
                     .filter(|x| !x.is_empty())
+                    .map(|u| rmd_transport::IceServer::urls(vec![u.to_string()]))
                     .collect()
             })
             .unwrap_or_default(),

@@ -22,7 +22,9 @@
 //! locally and hands it to the generic [`event_loop`], which is monomorphised
 //! once per role.
 
-use crate::{DriverCmd, SignalMsg, TransportConfig, TransportEvent, TransportRole, VideoCodec};
+use crate::{
+    DriverCmd, IceServer, SignalMsg, TransportConfig, TransportEvent, TransportRole, VideoCodec,
+};
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
@@ -137,14 +139,16 @@ fn codec_params(codec: VideoCodec) -> RTCRtpCodecParameters {
 }
 
 /// Translate the app's ICE-server URL strings into `rtc`'s config type.
-fn ice_servers(urls: &[String]) -> Vec<RTCIceServer> {
-    if urls.is_empty() {
-        return vec![];
-    }
-    vec![RTCIceServer {
-        urls: urls.to_vec(),
-        ..Default::default()
-    }]
+fn ice_servers(servers: &[IceServer]) -> Vec<RTCIceServer> {
+    servers
+        .iter()
+        .filter(|s| !s.urls.is_empty())
+        .map(|s| RTCIceServer {
+            urls: s.urls.clone(),
+            username: s.username.clone().unwrap_or_default(),
+            credential: s.credential.clone().unwrap_or_default(),
+        })
+        .collect()
 }
 
 /// Bind the local UDP socket for the session and report its bound address.
@@ -169,7 +173,7 @@ fn bind_socket(bind_addr: SocketAddr) -> anyhow::Result<(UdpSocket, SocketAddr)>
 fn gather_local_candidates(
     socket: &UdpSocket,
     local_addr: SocketAddr,
-    ice_servers: &[String],
+    ice_servers: &[IceServer],
 ) -> Vec<RTCIceCandidateInit> {
     let mut candidates = Vec::new();
 
@@ -184,8 +188,9 @@ fn gather_local_candidates(
         }
     }
 
-    // Server-reflexive candidates: one STUN Binding exchange per `stun:` URL.
-    for url in ice_servers {
+    // Server-reflexive candidates: one STUN Binding exchange per `stun:` URL
+    // across every configured server.
+    for url in ice_servers.iter().flat_map(|s| &s.urls) {
         let Some(host_port) = parse_stun_url(url) else {
             continue; // not a stun: URL (e.g. turn:) — handled by ICE, not here
         };
@@ -655,8 +660,8 @@ struct RoleState {
     // --- reconnect / ICE-restart bookkeeping ------------------------------
     /// True on the host (offerer), the side that initiates ICE restart.
     is_host: bool,
-    /// ICE server URLs — needed to re-gather srflx candidates on a restart.
-    ice_servers: Vec<String>,
+    /// ICE servers — needed to re-gather srflx candidates on a restart.
+    ice_servers: Vec<IceServer>,
     /// Whether the viewer has already answered an offer (so a subsequent offer
     /// is a renegotiation/ICE-restart and it must re-gather local candidates).
     negotiated_once: bool,

@@ -17,7 +17,8 @@ use rmd_input as input;
 use rmd_protocol as proto;
 use rmd_protocol::pb::envelope::Payload;
 use rmd_transport::{
-    SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole, TransportSender,
+    IceServer, SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole,
+    TransportSender,
 };
 #[cfg(feature = "audio")]
 use std::sync::atomic::AtomicU64;
@@ -74,7 +75,7 @@ pub struct HostConfig {
     pub bitrate_bps: u32,
     pub device_name: String,
     /// ICE server URLs (STUN/TURN); empty for LAN/loopback.
-    pub ice_servers: Vec<String>,
+    pub ice_servers: Vec<IceServer>,
     /// Local UDP bind address for the transport (e.g. `0.0.0.0:0`, or
     /// `127.0.0.1:0` for a same-host loopback session).
     pub bind_addr: String,

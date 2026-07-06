@@ -61,6 +61,8 @@ pub fn router(state: AppState) -> Router {
             post(api::register_device).get(api::list_devices),
         )
         .route("/api/devices/{device_id}", delete(api::delete_device))
+        // ICE/TURN servers (STUN + ephemeral coturn creds) for an authed device.
+        .route("/api/ice", get(api::ice_servers))
         .route("/ws", get(signaling::ws_handler))
         // Stateless direct-pairing mailbox (no account) — QR/PAKE flow.
         .route("/pair", get(signaling::ws_pair_handler));

@@ -13,7 +13,8 @@ use rmd_codec as codec;
 use rmd_protocol as proto;
 use rmd_protocol::pb::envelope::Payload;
 use rmd_transport::{
-    SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole, TransportSender,
+    IceServer, SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole,
+    TransportSender,
 };
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -25,7 +26,7 @@ use std::time::Duration;
 pub struct ViewerConfig {
     pub device_name: String,
     /// ICE server URLs (STUN/TURN); empty for LAN/loopback.
-    pub ice_servers: Vec<String>,
+    pub ice_servers: Vec<IceServer>,
     /// Local UDP bind address (`0.0.0.0:0`, or `127.0.0.1:0` for loopback).
     pub bind_addr: String,
     /// Play host audio if the host streams it. Off by default.

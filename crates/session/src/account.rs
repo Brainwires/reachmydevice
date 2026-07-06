@@ -45,6 +45,27 @@ impl DeviceInfo {
     }
 }
 
+/// The `/api/ice` response: ICE servers the rendezvous minted for a device.
+#[derive(Deserialize)]
+struct IceConfig {
+    #[serde(default)]
+    ice_servers: Vec<rmd_transport::IceServer>,
+}
+
+/// Derive the REST origin (`http(s)://…`) from a `ws(s)://…/ws` signaling URL,
+/// so a host/viewer that only knows `RMD_RENDEZVOUS_URL` can reach `/api/ice`.
+pub fn rest_base_from_ws(ws_url: &str) -> String {
+    let s = ws_url.trim_end_matches('/');
+    let s = s.strip_suffix("/ws").unwrap_or(s);
+    if let Some(rest) = s.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = s.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        s.to_string()
+    }
+}
+
 /// Blocking client for the rendezvous account/device REST API.
 ///
 /// Cheap to [`Clone`] (an `Agent` is a reference-counted connection pool), so it
@@ -98,6 +119,15 @@ impl AccountClient {
             .post(&url)
             .send_json(ureq::json!({ "username": user, "password": pass })))?;
         Ok(())
+    }
+
+    /// Fetch ICE servers (STUN + TURN with ephemeral credentials) minted by the
+    /// rendezvous for this device `token` (`GET /api/ice`). Returns an empty list
+    /// if the deployment advertises none; errors only on transport/HTTP failure.
+    pub fn ice_servers(&self, token: &str) -> anyhow::Result<Vec<rmd_transport::IceServer>> {
+        let url = format!("{}/api/ice?token={}", self.base, token);
+        let resp = run(self.agent.get(&url).call())?;
+        Ok(resp.into_json::<IceConfig>()?.ice_servers)
     }
 
     /// List the user's registered devices (HTTP Basic auth).

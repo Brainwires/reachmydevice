@@ -25,6 +25,7 @@ fn two_devices_pair_over_the_stateless_relay() {
                 bind_addr: "127.0.0.1:0".parse().unwrap(),
                 database_url: db_url,
                 allow_open_registration: false, // pairing needs no account
+                turn: None,
             };
             let state = init_state(cfg).await.unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -74,6 +75,7 @@ fn mismatched_code_fails_to_pair() {
                 bind_addr: "127.0.0.1:0".parse().unwrap(),
                 database_url: db_url,
                 allow_open_registration: false,
+                turn: None,
             };
             let state = init_state(cfg).await.unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

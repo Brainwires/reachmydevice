@@ -47,12 +47,38 @@ pub enum VideoCodec {
     Av1,
 }
 
+/// A single ICE server: one or more URLs sharing an optional credential.
+///
+/// STUN servers carry no credential; a TURN server carries the `username` /
+/// `credential` pair (for coturn's `--use-auth-secret` these are the ephemeral
+/// `<expiry>:<id>` username and its HMAC). Mirrors the browser's `RTCIceServer`
+/// and the rendezvous `/api/ice` JSON, so the same shape flows everywhere.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IceServer {
+    pub urls: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+}
+
+impl IceServer {
+    /// A credential-less server (STUN, or a URL-only manual entry).
+    pub fn urls(urls: Vec<String>) -> Self {
+        Self {
+            urls,
+            username: None,
+            credential: None,
+        }
+    }
+}
+
 /// Transport setup.
 #[derive(Clone, Debug)]
 pub struct TransportConfig {
     pub role: TransportRole,
-    /// ICE server URLs, e.g. `stun:stun.l.google.com:19302` or a `turn:` URL.
-    pub ice_servers: Vec<String>,
+    /// ICE servers (STUN + optional credentialed TURN). See [`IceServer`].
+    pub ice_servers: Vec<IceServer>,
     /// Local UDP bind address (use port 0 to let the OS choose).
     pub bind_addr: SocketAddr,
     /// Initial encoder bitrate target (bits/sec); GCC adjusts from here.

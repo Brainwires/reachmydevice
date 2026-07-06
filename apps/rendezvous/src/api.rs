@@ -8,11 +8,13 @@
 use crate::auth;
 use crate::db::{now_unix, AppState};
 use crate::error::{AppError, AppResult};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use base64::Engine;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha1::Sha1;
 use sqlx::SqlitePool;
 
 // --- request/response bodies ----------------------------------------------
@@ -183,6 +185,60 @@ pub async fn delete_device(
         return Err(AppError::NotFound);
     }
     Ok(Json(serde_json::json!({ "status": "deleted" })))
+}
+
+// --- ICE / TURN ------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct IceQuery {
+    token: String,
+}
+
+/// `GET /api/ice?token=…` — the ICE servers a peer should use for this session.
+///
+/// When TURN is configured, returns a `stun:` entry plus a `turn:` entry with
+/// **ephemeral** coturn `--use-auth-secret` credentials: `username` is
+/// `<expiry-unix>:rmd` and `credential` is `base64(HMAC-SHA1(secret, username))`,
+/// valid for `ttl_secs`. Otherwise falls back to a public STUN so peers can at
+/// least gather server-reflexive candidates. Requires a valid device token, so
+/// only registered devices can obtain relay credentials.
+pub async fn ice_servers(
+    State(state): State<AppState>,
+    Query(q): Query<IceQuery>,
+) -> AppResult<Json<serde_json::Value>> {
+    // Authenticate the device (this also refreshes its `last_seen`).
+    if device_id_for_token(&state.pool, &q.token).await?.is_none() {
+        return Err(AppError::Unauthorized);
+    }
+
+    let mut servers: Vec<serde_json::Value> = Vec::new();
+    match &state.config.turn {
+        Some(turn) => {
+            let expiry = now_unix() as u64 + turn.ttl_secs;
+            let username = format!("{expiry}:rmd");
+            // HMAC accepts a key of any length, so this never fails.
+            let mut mac = Hmac::<Sha1>::new_from_slice(turn.secret.as_bytes())
+                .expect("HMAC accepts keys of any length");
+            mac.update(username.as_bytes());
+            let credential = base64::engine::general_purpose::STANDARD
+                .encode(mac.finalize().into_bytes());
+            let (host, port) = (&turn.host, turn.port);
+            servers.push(serde_json::json!({ "urls": [format!("stun:{host}:{port}")] }));
+            servers.push(serde_json::json!({
+                "urls": [
+                    format!("turn:{host}:{port}?transport=udp"),
+                    format!("turn:{host}:{port}?transport=tcp"),
+                ],
+                "username": username,
+                "credential": credential,
+            }));
+        }
+        None => {
+            servers.push(serde_json::json!({ "urls": ["stun:stun.l.google.com:19302"] }));
+        }
+    }
+
+    Ok(Json(serde_json::json!({ "ice_servers": servers })))
 }
 
 // --- auth helpers ----------------------------------------------------------

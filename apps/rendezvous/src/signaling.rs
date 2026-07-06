@@ -216,7 +216,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, device_id: String) {
     // the device is actually connected (last_seen is otherwise only set on connect).
     let hb_pool = state.pool.clone();
     let hb_dev = device_id.clone();
-    let mut heartbeat = tokio::spawn(async move {
+    let heartbeat = tokio::spawn(async move {
         let mut iv = tokio::time::interval(std::time::Duration::from_secs(30));
         iv.tick().await;
         loop {

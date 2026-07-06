@@ -18,6 +18,7 @@
 
 use rmd_session::rendezvous::RendezvousClient;
 use rmd_session::{run_host, HostConfig, SignalClient, Signaling};
+use rmd_transport::IceServer;
 
 #[cfg(feature = "tray")]
 mod tray;
@@ -29,15 +30,36 @@ fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
-fn ice_servers() -> Vec<String> {
-    std::env::var("RMD_ICE")
+/// Assemble the host's ICE servers: any manual `RMD_ICE` URLs first, then the
+/// STUN/TURN servers the rendezvous mints for this device (`/api/ice`) when in
+/// rendezvous mode. A fetch failure is logged and skipped — the session still
+/// runs, just without a relay (so cross-NAT viewers may not connect).
+fn ice_servers(rendezvous_url: Option<&str>, token: Option<&str>) -> Vec<IceServer> {
+    let mut servers: Vec<IceServer> = std::env::var("RMD_ICE")
         .map(|s| {
             s.split(',')
-                .map(|x| x.trim().to_string())
+                .map(|x| x.trim())
                 .filter(|x| !x.is_empty())
+                .map(|u| IceServer::urls(vec![u.to_string()]))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    if let (Some(url), Some(tok)) = (rendezvous_url, token) {
+        let base = rmd_session::account::rest_base_from_ws(url);
+        match rmd_session::AccountClient::new(&base).ice_servers(tok) {
+            Ok(mut fetched) if !fetched.is_empty() => {
+                tracing::info!(count = fetched.len(), "fetched ICE servers from rendezvous");
+                servers.append(&mut fetched);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                error = %e,
+                "could not fetch ICE servers from rendezvous; continuing without a relay"
+            ),
+        }
+    }
+    servers
 }
 
 /// Load authorized viewer `device_id`s for unattended access. Reads
@@ -121,11 +143,15 @@ fn video_codec_from_env() -> rmd_codec::VideoCodec {
 
 /// Build the signaling backend: rendezvous WebSocket if configured, else LAN relay.
 /// `peer` is the device to address (None for the host — it learns the viewer).
-fn build_signaling(peer: Option<String>) -> anyhow::Result<Box<dyn Signaling>> {
-    if let Ok(url) = std::env::var("RMD_RENDEZVOUS_URL") {
-        let token = read_token()?;
+fn build_signaling(
+    peer: Option<String>,
+    rendezvous_url: Option<&str>,
+    token: Option<&str>,
+) -> anyhow::Result<Box<dyn Signaling>> {
+    if let Some(url) = rendezvous_url {
+        let token = token.ok_or_else(|| anyhow::anyhow!("rendezvous mode requires a device token"))?;
         tracing::info!(%url, "signaling via rendezvous");
-        Ok(Box::new(RendezvousClient::connect(&url, &token, peer)?))
+        Ok(Box::new(RendezvousClient::connect(url, token, peer)?))
     } else {
         let addr =
             std::env::var("RMD_SIGNAL_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".to_string());
@@ -166,6 +192,15 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Read the rendezvous URL + device token once; both the ICE-server fetch and
+    // the signaling client use them (and `read_token` warns at most once).
+    let rendezvous_url = std::env::var("RMD_RENDEZVOUS_URL").ok();
+    let token = match &rendezvous_url {
+        Some(_) => Some(read_token()?),
+        None => None,
+    };
+    let token_str = token.as_deref().map(|z| z.as_str());
+
     let cfg = HostConfig {
         display_index: env_or("RMD_DISPLAY", 0),
         width: env_or("RMD_WIDTH", 1920),
@@ -175,7 +210,7 @@ fn main() -> anyhow::Result<()> {
         device_name: std::env::var("RMD_NAME").unwrap_or_else(|_| {
             std::env::var("HOSTNAME").unwrap_or_else(|_| "rmd-host".to_string())
         }),
-        ice_servers: ice_servers(),
+        ice_servers: ice_servers(rendezvous_url.as_deref(), token_str),
         bind_addr: std::env::var("RMD_BIND").unwrap_or_else(|_| "0.0.0.0:0".to_string()),
         enable_audio: std::env::var("RMD_AUDIO").is_ok(),
         video_codec: video_codec_from_env(),
@@ -195,7 +230,7 @@ fn main() -> anyhow::Result<()> {
         "starting ReachMyDevice host"
     );
     // The host is the offerer; it learns the viewer's id from the rendezvous hello.
-    let signaling = build_signaling(None)?;
+    let signaling = build_signaling(None, rendezvous_url.as_deref(), token_str)?;
 
     // Desktop tray companion when built with `--features tray` and requested via
     // `RMD_TRAY=1`; otherwise run headless (the default, and the only

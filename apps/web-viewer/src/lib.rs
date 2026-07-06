@@ -27,7 +27,8 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
     HtmlCanvasElement, HtmlVideoElement, MediaStream, MessageEvent, MouseEvent, RtcConfiguration,
     RtcDataChannel, RtcDataChannelEvent, RtcIceCandidateInit, RtcPeerConnection,
-    RtcPeerConnectionIceEvent, RtcSdpType, RtcSessionDescriptionInit, RtcTrackEvent, WheelEvent,
+    RtcPeerConnectionIceEvent, RtcSdpType, RtcSessionDescriptionInit, RtcTrackEvent, Response,
+    WheelEvent,
 };
 
 /// Runtime configuration, from URL query params on the page:
@@ -76,6 +77,40 @@ fn default_ws_base(window: &web_sys::Window) -> Option<String> {
     let host = loc.host().ok()?;
     let ws = if proto == "https:" { "wss" } else { "ws" };
     Some(format!("{ws}://{host}"))
+}
+
+/// Fetch the ICE servers for this session from the rendezvous `/api/ice`. The
+/// server returns objects already shaped like `RTCIceServer`
+/// (`{urls, username?, credential?}`), so the array is used verbatim. Falls back
+/// to a public STUN server if the request fails, so a same-LAN session can still
+/// try direct/reflexive connectivity.
+async fn fetch_ice_servers(window: &web_sys::Window, ws_base: &str, token: &str) -> js_sys::Array {
+    let http_base = ws_base
+        .replacen("wss://", "https://", 1)
+        .replacen("ws://", "http://", 1);
+    let url = format!("{}/api/ice?token={}", http_base.trim_end_matches('/'), token);
+    match fetch_ice_array(window, &url).await {
+        Ok(arr) if arr.length() > 0 => return arr,
+        Ok(_) => web_sys::console::warn_1(&"[rmd] /api/ice returned no servers".into()),
+        Err(e) => web_sys::console::warn_1(
+            &format!("[rmd] /api/ice failed ({e:?}); falling back to public STUN").into(),
+        ),
+    }
+    let ice = js_sys::Array::new();
+    let stun = js_sys::Object::new();
+    js_sys::Reflect::set(&stun, &"urls".into(), &"stun:stun.l.google.com:19302".into()).ok();
+    ice.push(&stun);
+    ice
+}
+
+/// Perform the `/api/ice` GET and extract the `ice_servers` array.
+async fn fetch_ice_array(window: &web_sys::Window, url: &str) -> Result<js_sys::Array, JsValue> {
+    let resp: Response = JsFuture::from(window.fetch_with_str(url)).await?.dyn_into()?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()).into());
+    }
+    let json = JsFuture::from(resp.json()?).await?;
+    js_sys::Reflect::get(&json, &"ice_servers".into())?.dyn_into::<js_sys::Array>()
 }
 
 /// Shared session state across the many web-sys callbacks.
@@ -136,16 +171,10 @@ async fn run() -> Result<(), String> {
     let _ = video.set_attribute("playsinline", "true");
 
     // --- WebRTC peer connection (answerer) --------------------------------
+    // Ask the rendezvous which ICE servers to use (STUN + TURN with ephemeral
+    // credentials). Without a relay, a cross-NAT host won't connect.
     let rtc_cfg = RtcConfiguration::new();
-    let ice = js_sys::Array::new();
-    let stun = js_sys::Object::new();
-    js_sys::Reflect::set(
-        &stun,
-        &"urls".into(),
-        &"stun:stun.l.google.com:19302".into(),
-    )
-    .ok();
-    ice.push(&stun);
+    let ice = fetch_ice_servers(&window, &cfg.server, &cfg.token).await;
     rtc_cfg.set_ice_servers(&ice);
     let pc =
         RtcPeerConnection::new_with_configuration(&rtc_cfg).map_err(|e| format!("pc: {e:?}"))?;

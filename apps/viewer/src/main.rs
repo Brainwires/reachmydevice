@@ -36,6 +36,7 @@ use rmd_session::{
     AccountClient, DeviceIdentity, DeviceInfo, FileEvent, SignalClient, Signaling, ViewerConfig,
     ViewerSession, ViewerUpdate,
 };
+use rmd_transport::IceServer;
 
 use egui_wgpu::ScreenDescriptor;
 use winit::application::ApplicationHandler;
@@ -179,7 +180,7 @@ struct App {
     device_name: String,
     viewer_token: Option<String>,
     known_peers_path: PathBuf,
-    ice_servers: Vec<String>,
+    ice_servers: Vec<IceServer>,
 
     // direct pairing (QR/PAKE)
     pair_code: String,
@@ -245,11 +246,12 @@ impl App {
         let this_device_id = identity.device_id();
 
         let device_name = std::env::var("RMD_NAME").unwrap_or_else(|_| "rmd-viewer".into());
-        let ice_servers = std::env::var("RMD_ICE")
+        let ice_servers: Vec<IceServer> = std::env::var("RMD_ICE")
             .map(|s| {
                 s.split(',')
-                    .map(|x| x.trim().to_string())
+                    .map(|x| x.trim())
                     .filter(|x| !x.is_empty())
+                    .map(|u| IceServer::urls(vec![u.to_string()]))
                     .collect()
             })
             .unwrap_or_default();
@@ -325,9 +327,22 @@ impl App {
     /// Start a [`ViewerSession`] over the given signaling backend and move to the
     /// "establishing" state. Errors surface in the UI banner.
     fn start_session(&mut self, signaling: Box<dyn Signaling>) {
+        // Effective ICE = manual `RMD_ICE` base + whatever TURN/STUN the rendezvous
+        // mints for this device. Without a relay, cross-NAT hosts may not connect.
+        let mut ice = self.ice_servers.clone();
+        if let (Some(account), Some(token)) = (&self.account, &self.viewer_token) {
+            match account.ice_servers(token) {
+                Ok(mut fetched) if !fetched.is_empty() => {
+                    tracing::info!(count = fetched.len(), "fetched ICE servers from rendezvous");
+                    ice.append(&mut fetched);
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "could not fetch ICE servers from rendezvous"),
+            }
+        }
         let cfg = ViewerConfig {
             device_name: self.device_name.clone(),
-            ice_servers: self.ice_servers.clone(),
+            ice_servers: ice,
             bind_addr: self.bind_addr.clone(),
             enable_audio: self.enable_audio,
             // Share our identity so we can prove it (bound to the DTLS session)

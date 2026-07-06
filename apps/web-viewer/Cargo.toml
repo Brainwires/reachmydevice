@@ -41,6 +41,7 @@ features = [
   "Location",
   "UrlSearchParams",
   "Url",
+  "Response",
   "WebSocket",
   "BinaryType",
   "MessageEvent",
