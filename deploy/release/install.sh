@@ -1,19 +1,25 @@
 #!/bin/sh
-# ReachMyDevice installer — downloads the latest signed release for your OS/arch,
-# verifies it, and installs the binaries into ~/.local/bin (override with
-# RMD_PREFIX). POSIX sh; safe to pipe:
+# ReachMyDevice installer. Re-runnable: on rerun it upgrades when a newer version
+# is available, or reports that the latest is already installed.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Brainwires/reachmydevice/main/deploy/release/install.sh | sh
+#   curl -fsSL https://reachmy.dev/install.sh | sh
+#
+# It offers two install methods:
+#   * prebuilt  — download the latest signed release for your OS/arch (default)
+#   * source    — build from source (runs a system-requirements check first)
+# When run interactively it prompts; when piped it uses the prebuilt binaries.
+#
+# Installs the client `rmd` + the host daemon `rmdd` into ~/.local/bin (no sudo)
+# and adds that directory to your PATH. Then validates the binaries run.
 #
 # Env overrides:
-#   RMD_PREFIX=/usr/local     install prefix (binaries go in $PREFIX/bin)
-#   RMD_VERSION=v0.1.0        pin a specific release (default: latest)
-#   RMD_GH_REPO=owner/repo    source repo (default: Brainwires/reachmydevice)
-#
-# Verification: if `minisign` is installed the release signature is checked
-# against ReachMyDevice's pinned public key (below). Otherwise the SHA-256 checksum
-# is verified (integrity, via HTTPS transport authenticity) and a note is printed
-# on how to get full signature verification.
+#   RMD_MODE=prebuilt|source   install method (default: prompt, else prebuilt)
+#   RMD_PREFIX=/custom         install prefix (binaries go in $PREFIX/bin)
+#   RMD_VERSION=v0.2.0         pin a specific release (prebuilt mode)
+#   RMD_SRC=/path/to/checkout  build from an existing checkout (source mode)
+#   RMD_FORCE=1                reinstall even if already up to date
+#   RMD_NO_PATH=1              don't modify shell rc files
+#   RMD_GH_REPO=owner/repo     source repo (default: Brainwires/reachmydevice)
 
 set -eu
 
@@ -21,131 +27,203 @@ GH_REPO="${RMD_GH_REPO:-Brainwires/reachmydevice}"
 PREFIX="${RMD_PREFIX:-$HOME/.local}"
 BINDIR="$PREFIX/bin"
 
-# --- ReachMyDevice minisign public key (pinned) --------------------------------
-# Filled in by deploy/release/setup-keys.sh at release-signing setup time.
-# Until then it stays the sentinel and install falls back to checksum-only.
+# Pinned minisign public key (filled by deploy/release/setup-keys.sh).
 MINISIGN_PUB="RWQnk2aLGipco6JBuLuYSY8TCxq9PCnKfwJqXyWRWEGrsW71VOB47bxl"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 
-need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
-need uname; need tar
-DL=""
-if command -v curl >/dev/null 2>&1; then DL="curl -fsSL"; elif command -v wget >/dev/null 2>&1; then DL="wget -qO-"; else die "need curl or wget"; fi
+need() { command -v "$1" >/dev/null 2>&1; }
+have_cc() { need cc || need clang || need gcc; }
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+fetch() { if need curl; then curl -fsSL "$1" -o "$2"; else wget -q "$1" -O "$2"; fi; }
+fetch_stdout() { if need curl; then curl -fsSL "$1"; else wget -qO- "$1"; fi; }
+
+need uname || die "uname not found"
+need curl || need wget || die "need curl or wget"
 
 # --- Detect platform -------------------------------------------------------
 OS="$(uname -s)"; MACH="$(uname -m)"
 case "$OS" in
   Linux)  PLAT="linux" ;;
   Darwin) PLAT="macos" ;;
-  MINGW*|MSYS*|CYGWIN*|Windows_NT)
-    die "Windows is build-from-source only (no prebuilt binaries).
-    Install Rust + protoc, then:
-      git clone --recurse-submodules https://github.com/$GH_REPO
-      cd rmd && cargo build --release -p rmd-host -p rmd-viewer
-    See https://github.com/$GH_REPO#build" ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT) die "Windows is build-from-source only — see https://github.com/$GH_REPO#build" ;;
   *) die "unsupported OS: $OS" ;;
 esac
 case "$MACH" in
-  x86_64|amd64) ARCH="x86_64" ;;
+  x86_64|amd64)  ARCH="x86_64" ;;
   arm64|aarch64) ARCH="arm64" ;;
   *) ARCH="$MACH" ;;
 esac
-
-# Prebuilt slugs we may publish. Whichever the Release actually contains is
-# used; a missing one falls through to a clear build-from-source error below.
 SLUG="$PLAT-$ARCH"
-case "$SLUG" in
-  linux-x86_64|macos-x86_64|macos-arm64) : ;;
-  *) die "no prebuilt binary for $SLUG. Build from source:
-      git clone --recurse-submodules https://github.com/$GH_REPO
-      cd rmd && cargo build --release -p rmd-host -p rmd-viewer
-    See https://github.com/$GH_REPO#build" ;;
-esac
+PREBUILT_OK=0
+case "$SLUG" in linux-x86_64|macos-x86_64|macos-arm64) PREBUILT_OK=1 ;; esac
 
-# --- Resolve version -------------------------------------------------------
-API="https://api.github.com/repos/$GH_REPO"
-if [ -n "${RMD_VERSION:-}" ]; then
-  TAG="$RMD_VERSION"; case "$TAG" in v*) : ;; *) TAG="v$TAG" ;; esac
-else
-  say "Resolving latest release of $GH_REPO"
-  TAG="$($DL "$API/releases/latest" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/')"
-  [ -n "$TAG" ] || die "could not resolve latest release (is one published yet?)"
-fi
-VER="${TAG#v}"
-say "Installing ReachMyDevice $TAG ($SLUG)"
-
-TARBALL="rmd-$VER-$SLUG.tar.gz"
-BASE="https://github.com/$GH_REPO/releases/download/$TAG"
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-cd "$TMP"
-
-fetch() { # url dest
-  if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
-  else wget -q "$1" -O "$2"; fi
-}
-say "Downloading $TARBALL"
-fetch "$BASE/$TARBALL" "$TARBALL" || die "no $SLUG build in release $TAG.
-    This platform may not have a prebuilt binary yet — build from source:
-      git clone --recurse-submodules https://github.com/$GH_REPO
-      cd rmd && cargo build --release -p rmd-host -p rmd-viewer
-    See https://github.com/$GH_REPO#build"
-
-# --- Verify ----------------------------------------------------------------
-verified=""
-case "$MINISIGN_PUB" in
-  RWQ_RMD_PUBKEY_PLACEHOLDER) : ;;   # not yet configured
-  *)
-    if command -v minisign >/dev/null 2>&1; then
-      fetch "$BASE/$TARBALL.minisig" "$TARBALL.minisig" || die "signature download failed"
-      minisign -Vm "$TARBALL" -P "$MINISIGN_PUB" >/dev/null 2>&1 \
-        && { verified="minisign"; say "Signature OK (minisign)"; } \
-        || die "SIGNATURE VERIFICATION FAILED — aborting"
-    fi ;;
-esac
-if [ -z "$verified" ]; then
-  # Checksum fallback: integrity + HTTPS transport authenticity.
-  if fetch "$BASE/SHA256SUMS" SHA256SUMS 2>/dev/null; then
-    want="$(grep " $TARBALL\$" SHA256SUMS | awk '{print $1}')"
-    if command -v sha256sum >/dev/null 2>&1; then got="$(sha256sum "$TARBALL" | awk '{print $1}')"
-    else got="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"; fi
-    [ -n "$want" ] && [ "$want" = "$got" ] || die "CHECKSUM MISMATCH — aborting"
-    verified="sha256"; say "Checksum OK (sha256)"
-    warn "Install 'minisign' for full signature verification (brew install minisign / cargo install minisign)."
-  else
-    warn "No checksums available — proceeding on HTTPS transport trust only."
+# --- Choose install method -------------------------------------------------
+MODE="${RMD_MODE:-}"
+if [ -z "$MODE" ]; then
+  if [ "$PREBUILT_OK" = 1 ] && [ -r /dev/tty ]; then
+    printf 'Install method:\n  1) Prebuilt binaries (recommended)\n  2) Build from source\nChoose [1]: '
+    read ans </dev/tty 2>/dev/null || ans=""
+    case "$ans" in 2|s|source) MODE=source ;; *) MODE=prebuilt ;; esac
+  elif [ "$PREBUILT_OK" = 1 ]; then MODE=prebuilt
+  else MODE=source
   fi
 fi
+[ "$MODE" = source ] || [ "$PREBUILT_OK" = 1 ] || { warn "no prebuilt binary for $SLUG — building from source"; MODE=source; }
 
-# --- Install ---------------------------------------------------------------
-tar xzf "$TARBALL"
-SRC="rmd-$VER-$SLUG/bin"
-[ -d "$SRC" ] || die "unexpected archive layout"
-mkdir -p "$BINDIR"
-installed=""
-# Install under the Unix-style command names: the host daemon is `rmdd`, the
-# client/viewer is `rmd`. Accept both the new archive layout (bin/rmdd, bin/rmd)
-# and the pre-rename one (bin/rmd-host, bin/rmd-viewer).
-install_pref() { # destname newsrc oldsrc
-  if   [ -f "$SRC/$2" ]; then install -m 0755 "$SRC/$2" "$BINDIR/$1"; installed="$installed $1"
-  elif [ -f "$SRC/$3" ]; then install -m 0755 "$SRC/$3" "$BINDIR/$1"; installed="$installed $1"; fi
+# --- Installed version (for the re-runnable upgrade check) ------------------
+installed_version() { # -> prints version string or empty
+  for b in rmd rmdd; do
+    if [ -x "$BINDIR/$b" ]; then "$BINDIR/$b" --version 2>/dev/null | awk '{print $2; exit}'; return; fi
+  done
+  for b in rmd rmdd; do
+    if need "$b"; then "$b" --version 2>/dev/null | awk '{print $2; exit}'; return; fi
+  done
 }
-install_pref rmdd rmdd rmd-host
-install_pref rmd  rmd  rmd-viewer
-if [ -f "$SRC/rmd-rendezvous" ]; then
-  install -m 0755 "$SRC/rmd-rendezvous" "$BINDIR/rmd-rendezvous"; installed="$installed rmd-rendezvous"
-fi
-say "Installed:$installed -> $BINDIR"
+skip_if_current() { # target-version
+  cur="$(installed_version || true)"
+  if [ -n "$cur" ] && [ "$cur" = "$1" ] && [ -z "${RMD_FORCE:-}" ]; then
+    say "ReachMyDevice $cur is already installed and up to date. Nothing to do."
+    say "(Re-run with RMD_FORCE=1 to reinstall.)"
+    exit 0
+  fi
+  if [ -n "$cur" ]; then say "Upgrading ReachMyDevice $cur -> $1"; else say "Installing ReachMyDevice $1"; fi
+}
 
-case ":$PATH:" in
-  *":$BINDIR:"*) say "$BINDIR is on your PATH." ;;
-  *) warn "$BINDIR is not on your PATH — add it so you can run \`rmd\`/\`rmdd\` directly:
-      export PATH=\"$BINDIR:\$PATH\"   (add to ~/.zshrc or ~/.bashrc to persist)" ;;
+installed=""
+
+# --- Prebuilt path ---------------------------------------------------------
+install_prebuilt() {
+  API="https://api.github.com/repos/$GH_REPO"
+  if [ -n "${RMD_VERSION:-}" ]; then TAG="$RMD_VERSION"; case "$TAG" in v*) : ;; *) TAG="v$TAG" ;; esac
+  else
+    say "Resolving latest release of $GH_REPO"
+    TAG="$(fetch_stdout "$API/releases/latest" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/')"
+    [ -n "$TAG" ] || die "could not resolve the latest release"
+  fi
+  VER="${TAG#v}"
+  skip_if_current "$VER"
+  say "Prebuilt install ($SLUG), release $TAG"
+
+  TARBALL="rmd-$VER-$SLUG.tar.gz"
+  BASE="https://github.com/$GH_REPO/releases/download/$TAG"
+  cd "$TMP"
+  say "Downloading $TARBALL"
+  fetch "$BASE/$TARBALL" "$TARBALL" || die "no $SLUG build in $TAG — try RMD_MODE=source"
+
+  # Verify: minisign signature if available, else SHA-256 checksum.
+  verified=""
+  if need minisign && fetch "$BASE/$TARBALL.minisig" "$TARBALL.minisig" 2>/dev/null; then
+    minisign -Vm "$TARBALL" -P "$MINISIGN_PUB" >/dev/null 2>&1 \
+      && { verified=minisign; say "Signature OK (minisign)"; } || die "SIGNATURE VERIFICATION FAILED"
+  fi
+  if [ -z "$verified" ] && fetch "$BASE/SHA256SUMS" SHA256SUMS 2>/dev/null; then
+    want="$(grep " $TARBALL\$" SHA256SUMS | awk '{print $1}')"
+    if need sha256sum; then got="$(sha256sum "$TARBALL" | awk '{print $1}')"; else got="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"; fi
+    [ -n "$want" ] && [ "$want" = "$got" ] || die "CHECKSUM MISMATCH"
+    verified=sha256; say "Checksum OK (sha256)"
+    need minisign || warn "Install 'minisign' (or rsign2) for full signature verification."
+  fi
+  [ -n "$verified" ] || warn "No signature/checksum available — proceeding on HTTPS trust only."
+
+  tar xzf "$TARBALL"
+  SRC="rmd-$VER-$SLUG/bin"; [ -d "$SRC" ] || die "unexpected archive layout"
+  mkdir -p "$BINDIR"
+  # Install under the Unix names; accept both new (rmdd/rmd) and pre-rename layouts.
+  if   [ -f "$SRC/rmdd" ];     then install -m 0755 "$SRC/rmdd" "$BINDIR/rmdd"; installed="$installed rmdd"
+  elif [ -f "$SRC/rmd-host" ]; then install -m 0755 "$SRC/rmd-host" "$BINDIR/rmdd"; installed="$installed rmdd"; fi
+  if   [ -f "$SRC/rmd" ];        then install -m 0755 "$SRC/rmd" "$BINDIR/rmd"; installed="$installed rmd"
+  elif [ -f "$SRC/rmd-viewer" ]; then install -m 0755 "$SRC/rmd-viewer" "$BINDIR/rmd"; installed="$installed rmd"; fi
+  say "Installed:$installed -> $BINDIR"
+}
+
+# --- Source path -----------------------------------------------------------
+check_source_reqs() {
+  say "Checking build requirements"
+  missing=""
+  need cargo || missing="$missing rust(cargo)"
+  need git   || missing="$missing git"
+  have_cc    || missing="$missing c-compiler"
+  if [ "$PLAT" = linux ]; then
+    if need pkg-config; then
+      pkg-config --exists x11 xtst xext 2>/dev/null || missing="$missing x11-dev-libs"
+    else missing="$missing pkg-config"; fi
+  fi
+  need nasm || warn "nasm not found — recommended for the default H.264 codec build."
+  if [ -n "$missing" ]; then
+    die "missing build requirements:$missing
+
+  Install them, then re-run:
+    Rust (all platforms):  https://rustup.rs   (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh)
+    macOS  C compiler + git:  xcode-select --install
+    Linux (Debian/Ubuntu):  sudo apt-get install -y build-essential pkg-config git nasm \\
+                              libx11-dev libxext-dev libxtst-dev libxdamage-dev libxcb1-dev \\
+                              libxkbcommon-dev libwayland-dev"
+  fi
+  say "All build requirements present."
+}
+install_source() {
+  check_source_reqs
+  SRCDIR="${RMD_SRC:-}"
+  if [ -z "$SRCDIR" ]; then
+    SRCDIR="$TMP/src"
+    say "Cloning $GH_REPO (with submodules)…"
+    git clone --depth 1 --recurse-submodules "https://github.com/$GH_REPO" "$SRCDIR" >/dev/null 2>&1 \
+      || die "git clone failed"
+  else
+    ( cd "$SRCDIR" && git submodule update --init --recursive >/dev/null 2>&1 || true )
+  fi
+  VER="$(grep -m1 -E '^version *= *"' "$SRCDIR/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')"
+  [ -n "$VER" ] || VER="source"
+  skip_if_current "$VER"
+  say "Building rmdd + rmd from source (release) — this takes a few minutes…"
+  ( cd "$SRCDIR" && cargo build --release -p rmd-host -p rmd-viewer ) || die "cargo build failed"
+  mkdir -p "$BINDIR"
+  install -m 0755 "$SRCDIR/target/release/rmdd" "$BINDIR/rmdd"
+  install -m 0755 "$SRCDIR/target/release/rmd"  "$BINDIR/rmd"
+  installed="rmdd rmd"
+  say "Installed: rmdd rmd -> $BINDIR"
+}
+
+# --- Run the chosen method -------------------------------------------------
+case "$MODE" in
+  prebuilt) install_prebuilt ;;
+  source)   install_source ;;
+  *) die "unknown RMD_MODE: $MODE (use prebuilt|source)" ;;
 esac
 
+# --- Ensure ~/.local/bin is on PATH (no sudo) ------------------------------
+PATH_NOTE=""
+case ":$PATH:" in
+  *":$BINDIR:"*) say "$BINDIR is already on your PATH." ;;
+  *)
+    if [ -n "${RMD_NO_PATH:-}" ]; then
+      warn "$BINDIR is not on your PATH. Add:  export PATH=\"$BINDIR:\$PATH\""
+    else
+      case "${SHELL:-}" in */zsh) RC="$HOME/.zshrc" ;; */bash) RC="$HOME/.bashrc" ;; *) RC="$HOME/.profile" ;; esac
+      LINE="export PATH=\"$BINDIR:\$PATH\""
+      if [ -f "$RC" ] && grep -qF "$BINDIR" "$RC" 2>/dev/null; then :; else
+        printf '\n# Added by the ReachMyDevice installer\n%s\n' "$LINE" >> "$RC"
+        say "Added $BINDIR to your PATH in $RC"
+      fi
+      PATH_NOTE="Open a new terminal (or run: source $RC) to use rmd/rmdd."
+    fi
+    export PATH="$BINDIR:$PATH" ;;   # so validation below works this session
+esac
+
+# --- Validate --------------------------------------------------------------
+say "Validating install"
+ok=1
+for b in $installed; do
+  if v="$("$BINDIR/$b" --version 2>/dev/null)"; then say "  ✓ $v  ($BINDIR/$b)"; else warn "  ✗ $b failed to run"; ok=0; fi
+done
+[ "$ok" = 1 ] || die "validation failed — the binaries did not run"
+
 if [ "$PLAT" = macos ]; then
-  warn "Unsigned build: if macOS blocks a binary, run:  xattr -d com.apple.quarantine $BINDIR/rmd $BINDIR/rmdd"
+  warn "Unsigned build: if macOS blocks a binary, run:  xattr -dr com.apple.quarantine $BINDIR/rmd $BINDIR/rmdd"
 fi
-say "Done. Run  rmd  to view a device — or  rmdd  on the machine you want to control."
+say "Done.  Run  rmd  to view a device — or  rmdd  on the machine you want to control."
+[ -z "$PATH_NOTE" ] || say "$PATH_NOTE"

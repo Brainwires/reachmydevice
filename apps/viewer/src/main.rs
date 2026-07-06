@@ -57,6 +57,26 @@ const PING_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_SERVER: &str = "https://app.reachmy.dev";
 
 fn main() {
+    // Lightweight flags before opening a window, so `--version` works headless.
+    for a in std::env::args().skip(1) {
+        match a.as_str() {
+            "--version" | "-V" => {
+                println!("rmd {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
+            "--help" | "-h" => {
+                println!(
+                    "rmd {} — ReachMyDevice viewer/client\n\n\
+                     A windowed viewer. Sign in and pick a host from the device list,\n\
+                     or pair directly. Server via RMD_SERVER (default https://app.reachmy.dev).",
+                    env!("CARGO_PKG_VERSION")
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),

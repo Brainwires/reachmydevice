@@ -135,6 +135,31 @@ fn build_signaling(peer: Option<String>) -> anyhow::Result<Box<dyn Signaling>> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Lightweight flags before any setup, so `--version` works for install checks.
+    for a in std::env::args().skip(1) {
+        match a.as_str() {
+            "--version" | "-V" => {
+                println!("rmdd {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                println!(
+                    "rmdd {} — ReachMyDevice host agent (daemon)\n\n\
+                     Configured via environment variables:\n  \
+                     RMD_RENDEZVOUS_URL  wss://<host>/ws (rendezvous signaling)\n  \
+                     RMD_TOKEN           this device's bearer token\n  \
+                     RMD_NAME            device name (default: hostname)\n  \
+                     RMD_CODEC           h264 (default) | av1\n  \
+                     RMD_ICE             STUN/TURN URL(s)\n\n\
+                     Run with no args after setting the env to start the host.",
+                    env!("CARGO_PKG_VERSION")
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
