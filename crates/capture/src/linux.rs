@@ -18,8 +18,97 @@ use rmd_protocol::monotonic_micros;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::sync::Once;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt, ImageFormat};
+
+/// Resolve `DISPLAY`/`XAUTHORITY` so `rmdd` can capture the local desktop even
+/// when started over SSH (which inherits neither). Idempotent (runs once).
+///
+/// If the current environment already connects, it's left untouched (respects a
+/// user-set `DISPLAY`/`XAUTHORITY`). Otherwise it tries `:0`/`:1` and searches the
+/// usual Xauthority cookie locations, using the first (display, cookie) pair that
+/// actually authenticates against the running X server.
+fn ensure_x_env() {
+    static INIT: Once = Once::new();
+    INIT.call_once(discover_x_env);
+}
+
+fn discover_x_env() {
+    // Fast path: the current env already reaches a server.
+    if x11rb::connect(None).is_ok() {
+        return;
+    }
+
+    let display_set = std::env::var("DISPLAY").ok().filter(|s| !s.is_empty());
+    let displays: Vec<String> = match &display_set {
+        Some(d) => vec![d.clone()],
+        None => vec![":0".to_string(), ":1".to_string()],
+    };
+
+    // Candidate cookie files, most-specific first.
+    let mut cookies: Vec<PathBuf> = Vec::new();
+    if let Some(x) = std::env::var_os("XAUTHORITY") {
+        cookies.push(x.into());
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        cookies.push(Path::new(&home).join(".Xauthority"));
+    }
+    if let Ok(uid) = self_uid() {
+        let run = PathBuf::from(format!("/run/user/{uid}"));
+        collect_auth_files(&run, &mut cookies); // .mutter-Xwaylandauth.*, xauth_*
+        collect_auth_files(&run.join("gdm"), &mut cookies);
+    }
+    for p in [
+        "/var/run/lightdm/root/:0",
+        "/var/lib/lightdm/.Xauthority",
+        "/var/run/sddm/xauth",
+    ] {
+        cookies.push(PathBuf::from(p));
+    }
+
+    for d in &displays {
+        for c in &cookies {
+            if !c.exists() {
+                continue;
+            }
+            std::env::set_var("DISPLAY", d);
+            std::env::set_var("XAUTHORITY", c);
+            if x11rb::connect(None).is_ok() {
+                tracing::info!(display = %d, xauthority = %c.display(),
+                    "auto-discovered X session for capture (set DISPLAY/XAUTHORITY yourself to override)");
+                return;
+            }
+        }
+    }
+
+    // Nothing authenticated — restore the caller's DISPLAY so the eventual error
+    // message is about their setup, not our probing.
+    match display_set {
+        Some(d) => std::env::set_var("DISPLAY", d),
+        None => std::env::remove_var("DISPLAY"),
+    }
+}
+
+/// This process's real uid, for `/run/user/<uid>` — via `/proc/self` (no libc).
+fn self_uid() -> std::io::Result<u32> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(std::fs::metadata("/proc/self")?.uid())
+}
+
+/// Add any Xauthority-like files in `dir` (e.g. `.mutter-Xwaylandauth.*`, `xauth_*`).
+fn collect_auth_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            if n.contains("auth") || n.contains("Xauth") {
+                out.push(e.path());
+            }
+        }
+    }
+}
 
 /// Warn honestly when running under Wayland: X11 capture works via XWayland but
 /// may miss native-Wayland windows/overlays; full Wayland needs the PipeWire
@@ -37,6 +126,7 @@ fn warn_if_wayland() {
 /// Enumerate X screens as displays.
 pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
     warn_if_wayland();
+    ensure_x_env();
     let (conn, _) = x11rb::connect(None).map_err(|e| {
         CaptureError::Backend(format!(
             "{e} (no reachable X server; under Wayland ensure XWayland is running)"
@@ -72,6 +162,7 @@ pub fn start_capture(
     display_index: usize,
     sink: FrameSink,
 ) -> anyhow::Result<Box<dyn CaptureSession>> {
+    ensure_x_env();
     // Validate the screen exists up front (surfaces errors to the caller).
     {
         let (conn, _) = x11rb::connect(None).map_err(|e| CaptureError::Backend(format!("{e}")))?;
