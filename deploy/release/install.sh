@@ -131,8 +131,10 @@ case "$MACH" in
   *) ARCH="$MACH" ;;
 esac
 SLUG="$PLAT-$ARCH"
+# Platforms we publish prebuilt binaries for. linux-arm64 covers arm64 SBCs
+# (Orange Pi 5B, Raspberry Pi 4/5 on a 64-bit OS).
 PREBUILT_OK=0
-case "$SLUG" in linux-x86_64|macos-x86_64|macos-arm64) PREBUILT_OK=1 ;; esac
+case "$SLUG" in linux-x86_64|linux-arm64|macos-x86_64|macos-arm64) PREBUILT_OK=1 ;; esac
 
 # Uninstall short-circuits everything else (needs $PLAT + $BINDIR, now set).
 if [ -n "$DO_UNINSTALL" ]; then uninstall; fi
@@ -149,7 +151,7 @@ if [ -z "$MODE" ]; then
   else
     MODE=source
     warn "No prebuilt binary is published for $SLUG — falling back to a source build."
-    warn "Prebuilt platforms: linux-x86_64, macos-x86_64, macos-arm64.  (Pass --source to force a build.)"
+    warn "Prebuilt platforms: linux-x86_64, linux-arm64, macos-x86_64, macos-arm64.  (Pass --source to force a build.)"
   fi
 fi
 

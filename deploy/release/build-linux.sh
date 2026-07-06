@@ -20,8 +20,16 @@
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-TARGET="x86_64-unknown-linux-gnu"
-ARCH="x86_64"
+# Build for the host's arch by default (biscuits=x86_64, an Orange Pi/RPi=arm64);
+# override with RMD_LINUX_ARCH=x86_64|arm64. For a portable arm64 binary that also
+# runs on Raspberry Pi OS, run this inside a Debian *bookworm* arm64 environment
+# (older glibc) rather than a bleeding-edge distro.
+ARCH="${RMD_LINUX_ARCH:-$(uname -m)}"
+case "$ARCH" in
+  x86_64|amd64)  ARCH="x86_64"; TARGET="x86_64-unknown-linux-gnu" ;;
+  aarch64|arm64) ARCH="arm64";  TARGET="aarch64-unknown-linux-gnu" ;;
+  *) echo "unsupported linux arch: $ARCH (use x86_64 or arm64)" >&2; exit 1 ;;
+esac
 VERSION="$(resolve_version "${1:-}")"
 BINS=(rmd-host rmd-viewer rmd-rendezvous)   # cargo package names
 # Unix-style command name each package's binary is built + shipped as.
