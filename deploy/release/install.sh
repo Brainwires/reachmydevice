@@ -42,6 +42,79 @@ fetch() { if need curl; then curl -fsSL "$1" -o "$2"; else wget -q "$1" -O "$2";
 fetch_stdout() { if need curl; then curl -fsSL "$1"; else wget -qO- "$1"; fi; }
 
 need uname || die "uname not found"
+
+usage() {
+  cat <<EOF
+ReachMyDevice installer — installs the client 'rmd' + host daemon 'rmdd'.
+
+Usage:
+  curl -fsSL https://reachmy.dev/install.sh | sh                 # install (prompts method)
+  curl -fsSL https://reachmy.dev/install.sh | sh -s -- [options]
+  ./install.sh [options]
+
+Options:
+  --prebuilt     install prebuilt signed binaries (default)
+  --source       build from source (runs a system-requirements check first)
+  --force        reinstall even if already up to date
+  --uninstall    remove rmd/rmdd, the installer's PATH entry, and any service unit
+  --help, -h     show this help
+
+Env: RMD_PREFIX (default ~/.local), RMD_VERSION, RMD_SRC, RMD_NO_PATH,
+     RMD_PURGE (also remove ~/.config/rmd on uninstall), RMD_GH_REPO.
+
+Installs into \$RMD_PREFIX/bin (default ~/.local/bin) — no sudo. Re-running
+upgrades to the latest version, or reports that you're already up to date.
+EOF
+}
+
+# Parse flags (also settable via env). Args arrive via `sh -s -- <flags>` when piped.
+DO_UNINSTALL=""
+for a in "$@"; do
+  case "$a" in
+    --help|-h)   usage; exit 0 ;;
+    --uninstall) DO_UNINSTALL=1 ;;
+    --source)    RMD_MODE=source ;;
+    --prebuilt)  RMD_MODE=prebuilt ;;
+    --force)     RMD_FORCE=1 ;;
+    *) warn "ignoring unknown option: $a" ;;
+  esac
+done
+
+# Remove binaries, the PATH entry we added, and any service unit. Keeps ~/.config/rmd
+# unless RMD_PURGE is set (it holds device tokens / keys).
+uninstall() {
+  say "Uninstalling ReachMyDevice"
+  removed=""
+  for b in rmd rmdd rmd-rendezvous; do
+    if [ -e "$BINDIR/$b" ]; then rm -f "$BINDIR/$b"; removed="$removed $b"; fi
+  done
+  [ -n "$removed" ] && say "Removed:$removed from $BINDIR" || say "No binaries in $BINDIR"
+  for RC in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
+    [ -f "$RC" ] || continue
+    if grep -qF "Added by the ReachMyDevice installer" "$RC" 2>/dev/null; then
+      tmp="$(mktemp)"
+      awk 'skip==1 && index($0,".local/bin"){skip=0; next}
+           /# Added by the ReachMyDevice installer/{skip=1; next} {print}' "$RC" > "$tmp" && mv "$tmp" "$RC"
+      say "Removed PATH entry from $RC"
+    fi
+  done
+  case "$PLAT" in
+    macos)
+      PL="$HOME/Library/LaunchAgents/com.brainwires.rmd-host.plist"
+      [ -f "$PL" ] && { launchctl unload "$PL" 2>/dev/null || true; rm -f "$PL"; say "Removed launchd agent"; } ;;
+    linux)
+      U="$HOME/.config/systemd/user/rmd-host.service"
+      [ -f "$U" ] && { systemctl --user disable --now rmd-host 2>/dev/null || true; rm -f "$U"; systemctl --user daemon-reload 2>/dev/null || true; say "Removed systemd unit"; } ;;
+  esac
+  CFG="${XDG_CONFIG_HOME:-$HOME/.config}/rmd"
+  if [ -d "$CFG" ]; then
+    if [ -n "${RMD_PURGE:-}" ]; then rm -rf "$CFG"; say "Removed config $CFG"
+    else say "Kept config $CFG  (RMD_PURGE=1 to also remove device tokens/keys)"; fi
+  fi
+  say "Uninstall complete."
+  exit 0
+}
+
 need curl || need wget || die "need curl or wget"
 
 # --- Detect platform -------------------------------------------------------
@@ -101,8 +174,10 @@ install_prebuilt() {
   if [ -n "${RMD_VERSION:-}" ]; then TAG="$RMD_VERSION"; case "$TAG" in v*) : ;; *) TAG="v$TAG" ;; esac
   else
     say "Resolving latest release of $GH_REPO"
-    TAG="$(fetch_stdout "$API/releases/latest" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/')"
-    [ -n "$TAG" ] || die "could not resolve the latest release"
+    # Use /releases (newest-first) rather than /releases/latest so that
+    # pre-releases are included; take the first tag_name.
+    TAG="$(fetch_stdout "$API/releases" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/')"
+    [ -n "$TAG" ] || die "could not resolve a release (private repo needs a public download source — see below)"
   fi
   VER="${TAG#v}"
   skip_if_current "$VER"
