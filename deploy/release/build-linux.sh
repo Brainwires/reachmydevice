@@ -47,9 +47,21 @@ git submodule update --init --recursive >/dev/null 2>&1 || true
 reset_dist
 
 # --- 1. Compile ------------------------------------------------------------
-log "Building release binaries (${BINS[*]})"
+# Cross-compile to a foreign arch with `cross` (Docker; see Cross.toml), which
+# pulls in the :arch dev libs; build natively with cargo otherwise.
+BUILDER="cargo"
+case "$(uname -m)-$ARCH" in
+  x86_64-arm64|amd64-arm64|aarch64-x86_64) BUILDER="cross" ;;
+esac
+if [[ "$BUILDER" == cross ]]; then
+  require_cmd cross "cargo install cross  (needs Docker)"
+  log "Cross-compiling to $TARGET with cross"
+else
+  log "Building natively for $TARGET"
+fi
+log "Release binaries (${BINS[*]})"
 PKGARGS=(); for b in "${BINS[@]}"; do PKGARGS+=(-p "$b"); done
-cargo build --release --target "$TARGET" "${PKGARGS[@]}"
+"$BUILDER" build --release --target "$TARGET" "${PKGARGS[@]}"
 
 BINDIR="target/$TARGET/release"
 
