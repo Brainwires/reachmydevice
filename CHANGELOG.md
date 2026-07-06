@@ -2,6 +2,21 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
+## [Unreleased]
+
+### Fixed
+- **Browser viewer WebRTC handshake.** The native host encodes the offer/answer
+  `data` as a JSON `RTCSessionDescription` (`{"type","sdp"}`, matching `rtc`'s serde
+  form), which the native viewer decodes symmetrically. The WASM viewer had broken
+  that contract in both directions — passing the whole JSON blob into
+  `setRemoteDescription` (Chrome rejected it with `Expect line: v=`) and replying
+  with raw SDP the host couldn't parse. It now unwraps the SDP on receive and wraps
+  the answer on send, matching the native peer. First bug surfaced by a real
+  simultaneous host+browser session; the fork's SDP marshaling was correct.
+- **Rendezvous keepalive.** The signaling `/ws` now sends a WebSocket Ping every 30s
+  so Cloudflare's ~100s idle timeout no longer silently drops a long-idle host, and a
+  `last_seen` heartbeat keeps the console's online indicator fresh.
+
 ## [0.2.1] - 2026-07-06
 
 Distribution + first-run polish (all publicly installable now that the repo is public).
