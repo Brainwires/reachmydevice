@@ -212,10 +212,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, device_id: String) {
         }
     });
 
-    // When either task ends, tear down the other and unregister.
+    // Heartbeat: refresh last_seen every 30s so the "online" dot stays green while
+    // the device is actually connected (last_seen is otherwise only set on connect).
+    let hb_pool = state.pool.clone();
+    let hb_dev = device_id.clone();
+    let mut heartbeat = tokio::spawn(async move {
+        let mut iv = tokio::time::interval(std::time::Duration::from_secs(30));
+        iv.tick().await;
+        loop {
+            iv.tick().await;
+            crate::api::touch_last_seen(&hb_pool, &hb_dev).await;
+        }
+    });
+
+    // When either I/O task ends, tear down the others and unregister.
     tokio::select! {
-        _ = &mut send_task => recv_task.abort(),
-        _ = &mut recv_task => send_task.abort(),
+        _ = &mut send_task => { recv_task.abort(); heartbeat.abort(); }
+        _ = &mut recv_task => { send_task.abort(); heartbeat.abort(); }
     }
     state.hub.unregister(&device_id, &tx).await;
     tracing::info!(device = %device_id, "signaling disconnected");

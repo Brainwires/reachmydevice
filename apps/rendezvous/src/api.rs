@@ -225,6 +225,16 @@ fn basic_auth(headers: &HeaderMap) -> AppResult<(String, String)> {
     Ok((user.to_string(), pass.to_string()))
 }
 
+/// Refresh a device's `last_seen` (a heartbeat while it's connected to `/ws`), so
+/// the console/viewer "online" indicator stays accurate for a long-lived host.
+pub async fn touch_last_seen(pool: &SqlitePool, device_id: &str) {
+    let _ = sqlx::query("UPDATE devices SET last_seen = ? WHERE device_id = ?")
+        .bind(now_unix())
+        .bind(device_id)
+        .execute(pool)
+        .await;
+}
+
 /// Resolve a device bearer token → its `device_id`, if valid and unexpired.
 /// Also stamps `last_seen`. Used by the signaling WebSocket auth.
 pub async fn device_id_for_token(pool: &SqlitePool, token: &str) -> AppResult<Option<String>> {
