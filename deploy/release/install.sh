@@ -199,18 +199,23 @@ install_prebuilt() {
   say "Downloading $TARBALL"
   fetch "$BASE/$TARBALL" "$TARBALL" || die "no $SLUG build in $TAG — try RMD_MODE=source"
 
-  # Verify: minisign signature if available, else SHA-256 checksum.
+  # Verify the download. Both paths authenticate it: a SHA-256 checksum published
+  # over HTTPS (integrity + transport authenticity) is the zero-dependency default;
+  # if a verifier (minisign or rsign2) happens to be installed we additionally check
+  # the offline-key signature. No external tool is *required*.
   verified=""
   if need minisign && fetch "$BASE/$TARBALL.minisig" "$TARBALL.minisig" 2>/dev/null; then
     minisign -Vm "$TARBALL" -P "$MINISIGN_PUB" >/dev/null 2>&1 \
-      && { verified=minisign; say "Signature OK (minisign)"; } || die "SIGNATURE VERIFICATION FAILED"
+      && { verified=signature; say "Verified: minisign signature."; } || die "SIGNATURE VERIFICATION FAILED — aborting"
+  elif need rsign && fetch "$BASE/$TARBALL.minisig" "$TARBALL.minisig" 2>/dev/null; then
+    rsign verify -P "$MINISIGN_PUB" -x "$TARBALL.minisig" "$TARBALL" >/dev/null 2>&1 \
+      && { verified=signature; say "Verified: rsign2 signature."; } || die "SIGNATURE VERIFICATION FAILED — aborting"
   fi
   if [ -z "$verified" ] && fetch "$BASE/SHA256SUMS" SHA256SUMS 2>/dev/null; then
     want="$(grep " $TARBALL\$" SHA256SUMS | awk '{print $1}')"
     if need sha256sum; then got="$(sha256sum "$TARBALL" | awk '{print $1}')"; else got="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"; fi
-    [ -n "$want" ] && [ "$want" = "$got" ] || die "CHECKSUM MISMATCH"
-    verified=sha256; say "Checksum OK (sha256)"
-    need minisign || warn "Install 'minisign' (or rsign2) for full signature verification."
+    [ -n "$want" ] && [ "$want" = "$got" ] || die "CHECKSUM MISMATCH — refusing to install"
+    verified=checksum; say "Verified: SHA-256 checksum (published over HTTPS)."
   fi
   [ -n "$verified" ] || warn "No signature/checksum available — proceeding on HTTPS trust only."
 
