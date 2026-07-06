@@ -182,10 +182,12 @@ install_prebuilt() {
   if [ -n "${RMD_VERSION:-}" ]; then TAG="$RMD_VERSION"; case "$TAG" in v*) : ;; *) TAG="v$TAG" ;; esac
   else
     say "Resolving latest release of $GH_REPO"
-    # Use /releases (newest-first) rather than /releases/latest so that
-    # pre-releases are included; take the first tag_name.
-    TAG="$(fetch_stdout "$API/releases" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/')"
-    [ -n "$TAG" ] || die "could not resolve a release (private repo needs a public download source — see below)"
+    # Use /releases (newest-first) rather than /releases/latest so pre-releases are
+    # included. Capture the whole response first, then parse — piping straight into
+    # `grep -m1` closes the pipe early and makes curl print a spurious write error.
+    rel_json="$(fetch_stdout "$API/releases" || true)"
+    TAG="$(printf '%s' "$rel_json" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/')"
+    [ -n "$TAG" ] || die "could not resolve a release from $GH_REPO"
   fi
   VER="${TAG#v}"
   skip_if_current "$VER"
