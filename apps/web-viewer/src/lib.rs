@@ -377,6 +377,22 @@ pub enum SignalMsg {
     Candidate(String),
 }
 
+/// Unwrap the SDP from the native peer's JSON `RTCSessionDescription` wire form
+/// (`{"type","sdp"}`). Falls back to treating the payload as raw SDP, so a peer
+/// that ever sends bare SDP still works.
+fn sdp_from_wire(wire: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(wire)
+        .ok()
+        .and_then(|v| v.get("sdp").and_then(|s| s.as_str()).map(str::to_owned))
+        .unwrap_or_else(|| wire.to_owned())
+}
+
+/// Encode an SDP as the JSON `RTCSessionDescription` wire form the native host
+/// decodes. `json!` handles escaping the SDP's CRLFs correctly.
+fn wrap_description(kind: &str, sdp: &str) -> String {
+    serde_json::json!({ "type": kind, "sdp": sdp }).to_string()
+}
+
 /// Handle a `SignalMsg` from the host: apply the offer + answer it, or add a
 /// trickled ICE candidate.
 fn wire_relay_callbacks(session: &Rc<Session>) {
@@ -393,7 +409,12 @@ fn wire_relay_callbacks(session: &Rc<Session>) {
 
 async fn handle_signal(session: &Rc<Session>, msg: SignalMsg) -> Result<(), String> {
     match msg {
-        SignalMsg::Offer(sdp) => {
+        SignalMsg::Offer(wire) => {
+            // The native host encodes the description as a JSON RTCSessionDescription
+            // (`{"type","sdp"}`, matching `rtc`'s serde form); unwrap it to the raw
+            // SDP the browser's setRemoteDescription expects. Passing the JSON blob
+            // straight in makes Chrome fail with "Expect line: v=".
+            let sdp = sdp_from_wire(&wire);
             let desc = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
             desc.set_sdp(&sdp);
             JsFuture::from(session.pc.set_remote_description(&desc))
@@ -411,9 +432,13 @@ async fn handle_signal(session: &Rc<Session>, msg: SignalMsg) -> Result<(), Stri
             JsFuture::from(session.pc.set_local_description(&adesc))
                 .await
                 .map_err(|e| format!("set_local(answer): {e:?}"))?;
-            session
-                .relay
-                .send_signal(&session.host_id, &SignalMsg::Answer(answer_sdp));
+            // Reply in the same JSON RTCSessionDescription form the host decodes
+            // (`serde_json::from_str::<RTCSessionDescription>`); a raw SDP would
+            // fail its parse.
+            session.relay.send_signal(
+                &session.host_id,
+                &SignalMsg::Answer(wrap_description("answer", &answer_sdp)),
+            );
         }
         SignalMsg::Answer(_) => { /* viewer is the answerer; ignore */ }
         SignalMsg::Candidate(cand) => {
