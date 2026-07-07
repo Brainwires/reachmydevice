@@ -60,7 +60,10 @@ pub fn router(state: AppState) -> Router {
             "/api/devices",
             post(api::register_device).get(api::list_devices),
         )
-        .route("/api/devices/{device_id}", delete(api::delete_device))
+        .route(
+            "/api/devices/{device_id}",
+            delete(api::delete_device).patch(api::rename_device),
+        )
         // ICE/TURN servers (STUN + ephemeral coturn creds) for an authed device.
         .route("/api/ice", get(api::ice_servers))
         .route("/ws", get(signaling::ws_handler))

@@ -187,6 +187,37 @@ pub async fn delete_device(
     Ok(Json(serde_json::json!({ "status": "deleted" })))
 }
 
+#[derive(Deserialize)]
+pub struct RenameDevice {
+    name: String,
+}
+
+/// `PATCH /api/devices/:device_id` — rename a device (Basic auth). Only the
+/// display name changes; the token, key, and role are untouched.
+pub async fn rename_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(device_id): Path<String>,
+    Json(body): Json<RenameDevice>,
+) -> AppResult<Json<serde_json::Value>> {
+    let (username, password) = basic_auth(&headers)?;
+    let user_id = authenticate_user(&state, &username, &password).await?;
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("name required".into()));
+    }
+    let res = sqlx::query("UPDATE devices SET name = ? WHERE user_id = ? AND device_id = ?")
+        .bind(name)
+        .bind(user_id)
+        .bind(&device_id)
+        .execute(&state.pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "status": "renamed" })))
+}
+
 // --- ICE / TURN ------------------------------------------------------------
 
 #[derive(Deserialize)]

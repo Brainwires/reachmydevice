@@ -87,6 +87,7 @@
   const ICON={
     connect:'<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><path d="M10.5 7.5l4 2.5-4 2.5z" fill="currentColor" stroke="none"/></svg>',
     cmd:'<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3"/><path d="M13 15h4"/></svg>',
+    edit:'<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg>',
     del:'<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2"/><path d="M6 7l1 13a2 2 0 002 2h6a2 2 0 002-2l1-13"/><path d="M10 11v6M14 11v6"/></svg>'};
 
   // ================= Session mode (?token&host present) =====================
@@ -191,6 +192,7 @@
         <div class="acts">
           ${canView?`<button class="iconbtn" data-act="connect" data-id="${esc(d.device_id)}" title="Connect — view this device">${ICON.connect}</button>`:''}
           ${canView?`<button class="iconbtn ghost" data-act="cmd" data-id="${esc(d.device_id)}" data-name="${esc(d.name)}" data-role="${esc(d.role)}" title="Show run command (issues a fresh token)">${ICON.cmd}</button>`:''}
+          <button class="iconbtn ghost" data-act="rename" data-id="${esc(d.device_id)}" data-name="${esc(d.name)}" title="Rename this device">${ICON.edit}</button>
           <button class="iconbtn danger" data-act="del" data-id="${esc(d.device_id)}" title="Remove this device">${ICON.del}</button>
         </div></div>`;}).join('');
     // No host to view yet → onboarding call-to-action (download/install + register).
@@ -241,6 +243,13 @@
     } else if(ds.act==='cmd'){
       try{ const t=await issueToken(ds.id,ds.name,ds.role); commandPanel('Run “'+ds.name+'” — new token issued',t); renderDevices(); }
       catch(e){ alert('Failed to issue a token: '+(e.message||e)); }
+    } else if(ds.act==='rename'){
+      const name=prompt('Rename device:',ds.name); if(name===null) return;
+      const nm=name.trim(); if(!nm||nm===ds.name) return;
+      const r=await api('/api/devices/'+encodeURIComponent(ds.id),{method:'PATCH',
+        headers:{authorization:auth,'content-type':'application/json'},body:JSON.stringify({name:nm})});
+      if(!r.ok){ alert('Rename failed ('+r.status+')'); return; }
+      panelHtml=''; renderDevices();
     } else if(ds.act==='del'){
       if(!confirm('Remove this device? Any tokens it holds stop working.')) return;
       const r=await api('/api/devices/'+encodeURIComponent(ds.id),{method:'DELETE',headers:{authorization:auth}});
