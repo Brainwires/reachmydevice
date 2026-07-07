@@ -2,6 +2,41 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
+## [0.2.3] - 2026-07-07
+
+Web-app polish, on-demand capture, and reliable reconnects.
+
+### Added
+- **Rename devices** in the web app (pencil button per host) — new
+  `PATCH /api/devices/:id` updates the display name only (token/key/role kept).
+- **Rotate the view 90°** in the browser session (handy on phones: view a
+  landscape desktop in landscape on a portrait screen). Cycles 0/90/180/270°;
+  pointer coordinates are un-rotated so input still lands correctly.
+- **Auto-refresh the device list** when the tab/window regains focus, so online
+  dots reflect reality without a manual Refresh.
+
+### Changed
+- **One web UI.** `app.reachmy.dev` now redirects to the web app at `/app/` (the
+  WASM viewer — sign in, manage devices, connect); the legacy static
+  `console.html` is retired. The landing page has a single "Open the web app" CTA.
+- **Device list is an address book** — only connectable hosts are shown;
+  viewer-only clients (this browser and others) are hidden.
+
+### Fixed
+- **Screen capture is now on-demand.** `rmdd` opened the ScreenCaptureKit/X11
+  stream at launch and kept it open, so macOS showed "your screen is being
+  shared" even with nobody connected. Capture now starts on the first viewer
+  connect and stops on disconnect. Also adds the missing `Drop` impls so dropping
+  a capture session actually stops the stream (macOS + Linux).
+- **Reliable reconnects.** A reloaded viewer sometimes couldn't reconnect (needing
+  an `rmdd` restart): the host re-offered the instant the connection dropped, but
+  the reloaded browser re-attaches to `/ws` a moment later and the relay doesn't
+  buffer for an offline peer, so the offer was lost. The host now caches the
+  current offer + trickled candidates and replays them on the viewer's `hello`
+  (every page load) — offer-on-(re)join.
+- **Installer noise.** `install.sh` no longer prints a spurious
+  `printf: write error: Broken pipe` while resolving the release.
+
 ## [0.2.2] - 2026-07-06
 
 The browser viewer works end-to-end: a browser connects to a native host over the
