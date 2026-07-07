@@ -114,6 +114,13 @@ async fn run(
 
     // Outbound messages we can't address yet (host, before it knows the viewer).
     let mut pending: Vec<SignalMsg> = Vec::new();
+    // The current offer + its trickled candidates (host side). Replayed to the
+    // viewer whenever it announces via `hello`, so a reconnecting/reloaded viewer
+    // that re-attaches to `/ws` *after* the host emitted its reconnect offer still
+    // receives it — the relay doesn't buffer for a momentarily-offline peer, so
+    // otherwise the offer is lost and the handshake deadlocks.
+    let mut last_offer: Option<SignalMsg> = None;
+    let mut sent_candidates: Vec<SignalMsg> = Vec::new();
 
     // The viewer (which knows the target upfront) re-announces until the host is
     // online and replies; otherwise an early `hello` sent before the host's socket
@@ -134,6 +141,13 @@ async fn run(
             // Session wants to send a signaling message.
             maybe = out_rx.recv() => {
                 let Some(msg) = maybe else { break; }; // sender dropped
+                // Cache the latest offer + candidates so we can replay them to a
+                // (re)announcing viewer. A new offer supersedes the old candidates.
+                match &msg {
+                    SignalMsg::Offer(_) => { last_offer = Some(msg.clone()); sent_candidates.clear(); }
+                    SignalMsg::Candidate(_) => sent_candidates.push(msg.clone()),
+                    _ => {}
+                }
                 match &peer {
                     Some(to) => {
                         let text = serde_json::to_string(&Outbound { to, payload: Payload::Signal { msg } })?;
@@ -151,8 +165,9 @@ async fn run(
                     continue;
                 };
                 received_any = true;
+                let first_contact = peer.is_none();
                 // Learn/lock the peer id on first contact and flush anything buffered.
-                if peer.is_none() {
+                if first_contact {
                     peer = Some(inbound.from.clone());
                     for msg in pending.drain(..) {
                         let text = serde_json::to_string(&Outbound {
@@ -162,10 +177,34 @@ async fn run(
                         write.send(Message::text(text)).await?;
                     }
                 }
-                if let Payload::Signal { msg } = inbound.payload {
-                    if in_tx.send(msg).is_err() {
-                        break; // consumer gone
+                match inbound.payload {
+                    Payload::Signal { msg } => {
+                        if in_tx.send(msg).is_err() {
+                            break; // consumer gone
+                        }
                     }
+                    // A `hello` *after* first contact = the viewer re-announced
+                    // (e.g. a page refresh). Replay the current offer + candidates
+                    // so the reconnect handshake completes even though the offer
+                    // was first emitted while the viewer was between page loads.
+                    Payload::Hello if !first_contact => {
+                        if let (Some(to), Some(offer)) = (peer.as_ref(), last_offer.as_ref()) {
+                            for m in std::iter::once(offer).chain(sent_candidates.iter()) {
+                                let text = serde_json::to_string(&Outbound {
+                                    to,
+                                    payload: Payload::Signal { msg: m.clone() },
+                                })?;
+                                write.send(Message::text(text)).await?;
+                            }
+                            tracing::info!(
+                                candidates = sent_candidates.len(),
+                                "rendezvous: viewer re-announced; replayed offer"
+                            );
+                        }
+                    }
+                    // First-contact `hello`: the buffered flush above already sent
+                    // the offer + candidates.
+                    Payload::Hello => {}
                 }
             }
         }
