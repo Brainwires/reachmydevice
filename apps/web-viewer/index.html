@@ -259,6 +259,12 @@
     renderDevices();
   }
   window.addEventListener('hashchange',route);
+  // Re-check device/host status when the tab or window regains focus (returning
+  // from another app/tab), so the online dots reflect reality without a manual
+  // Refresh. Only re-fetches on the device list, and only while visible.
+  const refreshIfDevices=()=>{ if(auth && !document.hidden && location.hash==='#/devices') renderDevices(); };
+  document.addEventListener('visibilitychange',refreshIfDevices);
+  window.addEventListener('focus',refreshIfDevices);
   if(!location.hash) location.hash = auth?'#/devices':'#/login'; else route();
 })();
 </script>
