@@ -2,6 +2,24 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
+## [Unreleased]
+
+### Added
+- **Explicit `RMD_TURN_ENABLED` switch (relay off by default).** TURN relay uses
+  the rendezvous server's bandwidth (media relays through it when peers can't
+  connect directly), so enabling it is now one deliberate operator decision:
+  `/api/ice` hands out TURN only when `RMD_TURN_ENABLED=1` **and** a secret +
+  host are set — a dangling secret alone no longer enables relay. Default (and
+  any fresh deploy) is **STUN-only, peer-to-peer, zero relay bandwidth**. The
+  active mode is logged at startup.
+- **Security-event logging + fail2ban integration.** The rendezvous emits a
+  stable `rmd_security: auth-fail ip=… path=… method=…` line on every auth
+  failure (bad device token on `/ws` or `/api/ice`, bad HTTP Basic on the account
+  API), with the real client IP from `CF-Connecting-IP`/`X-Forwarded-For`.
+  `deploy/fail2ban/` ships a ready filter + jail + README. Layered on the
+  existing per-IP rate limiter and per-account login throttle; scoped to
+  auth-abuse hardening (not volumetric-DDoS mitigation).
+
 ## [0.2.3] - 2026-07-07
 
 Web-app polish, on-demand capture, and reliable reconnects.
