@@ -170,6 +170,14 @@ pub struct LinuxCaptureSession {
 
 impl CaptureSession for LinuxCaptureSession {
     fn stop(self: Box<Self>) {
+        // Dropping signals the capture thread to exit (see `Drop`).
+    }
+}
+
+impl Drop for LinuxCaptureSession {
+    fn drop(&mut self) {
+        // Tell the capture thread to stop, so dropping the session actually ends
+        // the X11 grab (not just an explicit `stop()` call).
         self.stop.store(true, Ordering::Relaxed);
     }
 }

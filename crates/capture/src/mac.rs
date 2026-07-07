@@ -219,9 +219,16 @@ pub struct MacCaptureSession {
 
 impl CaptureSession for MacCaptureSession {
     fn stop(self: Box<Self>) {
-        // Fire-and-forget stop; the completion handler carries any error, which
-        // is non-fatal at teardown.
-        // SAFETY: FFI; `None` handler is permitted.
+        // Dropping stops the stream (see `Drop`); nothing else to do.
+    }
+}
+
+impl Drop for MacCaptureSession {
+    fn drop(&mut self) {
+        // Stop the SCStream so capture actually ends — and the OS "screen is
+        // being shared" indicator clears — whether the session was dropped or
+        // stopped explicitly. Fire-and-forget; teardown errors are non-fatal.
+        // SAFETY: FFI; a `None` completion handler is permitted.
         unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
     }
 }
