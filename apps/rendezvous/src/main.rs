@@ -16,6 +16,14 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = Config::from_env();
     let addr = cfg.bind_addr;
+    match &cfg.turn {
+        Some(t) => tracing::warn!(
+            host = %t.host, port = t.port,
+            "TURN relay ENABLED — media that can't go peer-to-peer relays through \
+             this server and uses its bandwidth"
+        ),
+        None => tracing::info!("TURN relay disabled (STUN-only, peer-to-peer)"),
+    }
     let state = init_state(cfg).await?;
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

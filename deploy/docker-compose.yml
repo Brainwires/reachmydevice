@@ -32,6 +32,11 @@ services:
       DATABASE_URL: sqlite:/data/rmd.db?mode=rwc
       # Closed by default; set to 1/true only to provision the first account.
       RMD_RZ_OPEN_REGISTRATION: ${RMD_RZ_OPEN_REGISTRATION:-false}
+      # TURN relay is OFF by default. Turn it on ONLY if you accept that relayed
+      # media flows through — and uses the bandwidth of — this server (it's the
+      # fallback for peers that can't connect directly). STUN-only stays fully
+      # peer-to-peer.
+      RMD_TURN_ENABLED: ${RMD_TURN_ENABLED:-false}
       # Shared secret used to mint short-lived TURN credentials (must match coturn).
       RMD_TURN_SECRET: ${TURN_SECRET}
       # The address clients dial for STUN/TURN. This must be the coturn host's

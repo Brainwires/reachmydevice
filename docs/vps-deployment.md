@@ -82,8 +82,15 @@ a Cloudflare-proxied `RMD_DOMAIN` never reaches the UDP relay.
 ## Notes / limitations (v1)
 - `coturn` uses `network_mode: host` because the TURN relay needs the host UDP
   port range; standard on a single-tenant VPS.
-- **Ephemeral TURN credentials are minted by the rendezvous** at
+- **TURN relay is OFF by default** and controlled entirely by the relay operator.
+  It's enabled only with `RMD_TURN_ENABLED=1` **and** `RMD_TURN_SECRET` +
+  `RMD_TURN_HOST` set on the rendezvous. Otherwise `/api/ice` returns STUN-only:
+  connections stay **peer-to-peer** and no media touches this server. Enable it
+  only if you accept that relayed media (the fallback for peers that can't
+  connect directly) flows through — and uses the bandwidth of — this server.
+  The startup log states which mode is active.
+- **Ephemeral TURN credentials** (when enabled) are minted by the rendezvous at
   `GET /api/ice` (device-token auth): HMAC-SHA1 of the shared secret over a
   short-lived `<expiry>:rmd` username. The host, native viewer, and browser
-  viewer all fetch it; STUN-only when `RMD_TURN_SECRET`/`RMD_TURN_HOST` are unset.
+  viewer all fetch it.
 - Postgres is an optional swap for SQLite at higher scale (sqlx supports both).

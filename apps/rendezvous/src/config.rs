@@ -50,25 +50,41 @@ impl Config {
         let allow_open_registration = std::env::var("RMD_RZ_OPEN_REGISTRATION")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
-        // TURN is enabled only when both a shared secret and a public host are
-        // configured; otherwise `/api/ice` returns STUN-only.
-        let turn = match (
-            std::env::var("RMD_TURN_SECRET").ok().filter(|s| !s.is_empty()),
-            std::env::var("RMD_TURN_HOST").ok().filter(|s| !s.is_empty()),
-        ) {
-            (Some(secret), Some(host)) => Some(TurnConfig {
-                secret,
-                host,
-                port: std::env::var("RMD_TURN_PORT")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(3478),
-                ttl_secs: std::env::var("RMD_TURN_TTL")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(43_200),
-            }),
-            _ => None,
+        // TURN relay is OFF by default. Enabling it is a deliberate operator
+        // decision because relayed media flows through — and uses the bandwidth
+        // of — this server. It requires `RMD_TURN_ENABLED=1` **and** a shared
+        // secret + public host; otherwise `/api/ice` returns STUN-only (peer-to-
+        // peer, no relay). A dangling secret alone never enables relay.
+        let turn_enabled = std::env::var("RMD_TURN_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        let turn = if turn_enabled {
+            match (
+                std::env::var("RMD_TURN_SECRET").ok().filter(|s| !s.is_empty()),
+                std::env::var("RMD_TURN_HOST").ok().filter(|s| !s.is_empty()),
+            ) {
+                (Some(secret), Some(host)) => Some(TurnConfig {
+                    secret,
+                    host,
+                    port: std::env::var("RMD_TURN_PORT")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(3478),
+                    ttl_secs: std::env::var("RMD_TURN_TTL")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(43_200),
+                }),
+                _ => {
+                    tracing::warn!(
+                        "RMD_TURN_ENABLED is set but RMD_TURN_SECRET/RMD_TURN_HOST are \
+                         missing — TURN relay stays disabled (STUN-only)"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
         };
         Self {
             bind_addr,
