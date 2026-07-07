@@ -344,11 +344,16 @@ where
                 tracing::warn!("★ REMOTE SESSION ACTIVE ★");
                 connected.store(true, Ordering::Relaxed);
                 force_keyframe.store(true, Ordering::Relaxed);
+                // Start grabbing the screen only now that someone is watching.
+                capture_ctl.resume();
                 on_status(HostStatus::Active);
             }
             TransportEvent::Disconnected => {
                 tracing::warn!("remote session ended");
                 connected.store(false, Ordering::Relaxed);
+                // Stop capturing so nothing is grabbed (and the OS screen-share
+                // indicator clears) while no viewer is connected.
+                capture_ctl.pause();
                 on_status(HostStatus::Ended);
             }
             TransportEvent::Data(bytes) => {
@@ -381,12 +386,17 @@ struct CaptureController {
     frame_tx: mpsc::Sender<capture::Frame>,
     displays: Vec<capture::DisplayInfo>,
     current: usize,
-    /// Kept alive to keep capturing; dropped (then replaced) on a display switch.
-    _handle: Box<dyn capture::CaptureSession>,
+    /// The live capture session while a viewer is connected. `None` while idle —
+    /// capturing is stopped so nothing is grabbed (and macOS drops its
+    /// "screen is being shared" indicator) when no one is controlling.
+    handle: Option<Box<dyn capture::CaptureSession>>,
     force_keyframe: Arc<AtomicBool>,
 }
 
 impl CaptureController {
+    /// Prepare the controller **without** starting capture. Enumerates displays
+    /// (metadata only — no capture stream, so no sharing indicator) and waits for
+    /// [`resume`](Self::resume) when a viewer connects.
     fn start(
         config: capture::CaptureConfig,
         display_index: usize,
@@ -394,15 +404,37 @@ impl CaptureController {
         force_keyframe: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
         let displays = capture::list_displays().unwrap_or_default();
-        let handle = capture::start_capture(config.clone(), display_index, frame_tx.clone())?;
         Ok(Self {
             config,
             frame_tx,
             displays,
             current: display_index,
-            _handle: handle,
+            handle: None,
             force_keyframe,
         })
+    }
+
+    /// Start capturing the current display (viewer connected). Idempotent.
+    fn resume(&mut self) {
+        if self.handle.is_some() {
+            return;
+        }
+        match capture::start_capture(self.config.clone(), self.current, self.frame_tx.clone()) {
+            Ok(h) => {
+                self.handle = Some(h);
+                self.force_keyframe.store(true, Ordering::Relaxed);
+                tracing::info!(display = self.current, "capture started (viewer connected)");
+            }
+            Err(e) => tracing::error!(error=%e, "failed to start capture on viewer connect"),
+        }
+    }
+
+    /// Stop capturing (viewer disconnected) — drops the session, so the OS-level
+    /// screen-capture indicator goes away while idle. Idempotent.
+    fn pause(&mut self) {
+        if self.handle.take().is_some() {
+            tracing::info!("capture stopped (no viewer connected)");
+        }
     }
 
     /// The host's displays as protocol descriptors (id = enumeration index).
@@ -429,10 +461,15 @@ impl CaptureController {
             tracing::warn!(id, "select_display: no such display");
             return;
         }
+        self.current = idx;
+        // Only (re)start the stream if we're currently capturing (a viewer is
+        // connected); otherwise just remember the choice for the next `resume`.
+        if self.handle.is_none() {
+            return;
+        }
         match capture::start_capture(self.config.clone(), idx, self.frame_tx.clone()) {
             Ok(handle) => {
-                self._handle = handle; // dropping the old session stops it
-                self.current = idx;
+                self.handle = Some(handle); // dropping the old session stops it
                 self.force_keyframe.store(true, Ordering::Relaxed);
                 tracing::info!(display = idx, "switched captured display");
             }
