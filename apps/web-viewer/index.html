@@ -58,12 +58,15 @@
   #stage{position:fixed;inset:0;display:grid;place-items:center;background:#000;}
   #screen{max-width:100vw;max-height:100vh;width:auto;height:auto;background:#000;outline:none;
     transition:transform .2s;}
-  /* 90°/270° rotation: fit the landscape frame to a portrait screen by
-     constraining against the swapped viewport axis, then rotate. */
+  /* Rotated views are centered explicitly (fixed + translate) and rotated about
+     their center — grid centering doesn't reliably center a rotated child. The
+     box is still sized to the video's aspect (constrained against the swapped
+     viewport axis for 90°/270°) so pointer mapping stays exact. */
+  #screen.rot1,#screen.rot2,#screen.rot3{position:fixed;top:50%;left:50%;}
   #screen.rot1,#screen.rot3{max-width:100vh;max-height:100vw;}
-  #screen.rot1{transform:rotate(90deg);}
-  #screen.rot2{transform:rotate(180deg);}
-  #screen.rot3{transform:rotate(-90deg);}
+  #screen.rot1{transform:translate(-50%,-50%) rotate(90deg);}
+  #screen.rot2{transform:translate(-50%,-50%) rotate(180deg);}
+  #screen.rot3{transform:translate(-50%,-50%) rotate(-90deg);}
   #overlay{position:fixed;inset:0;display:grid;place-items:center;pointer-events:none;transition:opacity .3s;}
   #overlay .box{background:rgba(15,17,21,.85);border:1px solid var(--border);border-radius:14px;
     padding:24px 30px;text-align:center;max-width:80vw;}
