@@ -98,16 +98,19 @@ pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> anyhow
 }
 
 /// Host-aware `/`: the apex domain gets the public landing page; every other host
-/// (the `app.` console subdomain, localhost, an IP) gets the web console.
-async fn root(headers: HeaderMap) -> axum::response::Html<&'static str> {
+/// (the `app.` subdomain, localhost, an IP) is redirected to the web app at
+/// `/app/` — the WASM viewer, which is now the single sign-in / device-management
+/// / connect UI. It supersedes the old static `console.html` (kept in the tree
+/// only for reference; it lacked the browser Connect flow).
+async fn root(headers: HeaderMap) -> axum::response::Response {
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if is_apex_host(host) {
-        axum::response::Html(include_str!("landing.html"))
+        axum::response::Html(include_str!("landing.html")).into_response()
     } else {
-        axum::response::Html(include_str!("console.html"))
+        axum::response::Redirect::temporary("/app/").into_response()
     }
 }
 
