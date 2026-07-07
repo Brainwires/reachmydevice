@@ -79,6 +79,17 @@ If it times out while coturn answers locally, the provider firewall is the cause
 Set `RMD_TURN_HOST` / `RMD_TURN_EXTERNAL_IP` to the VPS's **direct** public IP —
 a Cloudflare-proxied `RMD_DOMAIN` never reaches the UDP relay.
 
+## Auth hardening (fail2ban, optional)
+
+The rendezvous already rate-limits per IP and throttles per-account logins. For
+an extra layer, it logs a stable line on every auth failure
+(`WARN rmd_security: auth-fail ip=… path=… method=…`), and
+[`deploy/fail2ban/`](../deploy/fail2ban/README.md) ships a ready filter + jail to
+ban abusive IPs. This hardens the **auth-abuse** surface only — it is not a
+volumetric-DDoS mitigation (a flood saturates the link upstream of any host
+firewall). Behind Cloudflare, ban at the edge (fail2ban's `cloudflare` action),
+since a host `iptables` ban would only hit the proxy — see the README.
+
 ## Notes / limitations (v1)
 - `coturn` uses `network_mode: host` because the TURN relay needs the host UDP
   port range; standard on a single-tenant VPS.

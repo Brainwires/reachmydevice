@@ -20,6 +20,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod security;
 pub mod signaling;
 pub mod throttle;
 
@@ -84,7 +85,8 @@ pub fn router(state: AppState) -> Router {
             .route("/app/", get(webviewer_unavailable))
     };
 
-    app.layer(GovernorLayer { config: governor })
+    app.layer(axum::middleware::from_fn(security::log_auth_failures))
+        .layer(GovernorLayer { config: governor })
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
 }
