@@ -317,9 +317,18 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             let rect = video.get_bounding_client_rect();
             let w = rect.width().max(1.0);
             let h = rect.height().max(1.0);
-            let x = (ev.client_x() as f64 - rect.left()) / w;
-            let y = (ev.client_y() as f64 - rect.top()) / h;
-            (x, y)
+            // Position within the on-screen (possibly rotated) video box.
+            let bx = (ev.client_x() as f64 - rect.left()) / w;
+            let by = (ev.client_y() as f64 - rect.top()) / h;
+            // Un-rotate to the host's source coordinates using the view's
+            // quarter-turn count (`data-rot`, set by the rotate button). CSS
+            // rotate(90deg) is clockwise; these are its inverses.
+            match video.get_attribute("data-rot").as_deref() {
+                Some("1") => (by, 1.0 - bx),
+                Some("2") => (1.0 - bx, 1.0 - by),
+                Some("3") => (1.0 - by, bx),
+                _ => (bx, by),
+            }
         }
     };
 
