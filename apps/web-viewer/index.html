@@ -175,11 +175,14 @@
     let all=[]; try{ all=await listDevices(); }
     catch(r){ auth=null; sessionStorage.clear(); return go('#/login'); }
     // Heal: if this browser's viewer device was deleted, drop the stale token so
-    // Connect re-mints one. Then hide our own identity from the list.
+    // Connect re-mints one.
     const myDev=localStorage.getItem(VDEV());
     if(myDev && !all.some(d=>d.device_id===myDev)){ localStorage.removeItem(VTOK()); localStorage.removeItem(VDEV()); }
-    const devices=all.filter(d=>d.device_id!==myDev);
-    const hostCount=devices.filter(d=>['host','both'].includes((d.role||'').toLowerCase())).length;
+    // The list is an address book of things you can connect TO — i.e. hosts.
+    // Viewer-only clients (this browser and any others) aren't connectable, so
+    // they're hidden rather than shown as dead rows.
+    const devices=all.filter(d=>['host','both'].includes((d.role||'').toLowerCase()));
+    const hostCount=devices.length;
     const rows=devices.map(d=>{
       const s=fmtSeen(d.last_seen), canView=['host','both'].includes((d.role||'').toLowerCase());
       return `<div class="dev"><div class="dot ${s.on?'on':''}"></div>
