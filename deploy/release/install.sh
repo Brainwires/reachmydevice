@@ -183,10 +183,11 @@ install_prebuilt() {
   else
     say "Resolving latest release of $GH_REPO"
     # Use /releases (newest-first) rather than /releases/latest so pre-releases are
-    # included. Capture the whole response first, then parse — piping straight into
-    # `grep -m1` closes the pipe early and makes curl print a spurious write error.
+    # included. `grep` (no -m1) reads all of printf's output before `head` takes the
+    # first line — using `grep -m1` here closes the pipe early and makes printf
+    # print a spurious "write error: Broken pipe".
     rel_json="$(fetch_stdout "$API/releases" || true)"
-    TAG="$(printf '%s' "$rel_json" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/')"
+    TAG="$(printf '%s' "$rel_json" | grep '"tag_name"' | head -n1 | sed -E 's/.*"tag_name" *: *"([^"]+)".*/\1/')"
     [ -n "$TAG" ] || die "could not resolve a release from $GH_REPO"
   fi
   VER="${TAG#v}"
