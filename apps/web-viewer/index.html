@@ -128,6 +128,10 @@
   // ================= Connect app (device management) ========================
   $('connect').classList.remove('hidden');
   let auth=sessionStorage.getItem('rmd_va'), user=sessionStorage.getItem('rmd_vu')||'', mode='login';
+  // Whether the server currently accepts new-account sign-ups. Fail-open (show
+  // the option) until the /api/registration probe says otherwise, so an older
+  // rendezvous without that endpoint behaves as before.
+  let signupOpen=true, signupChecked=false;
   const el=$('cardBody');
   const basic=(u,p)=>'Basic '+btoa(u+':'+p);
   const passOf=()=>{ try{ return atob((auth||'').slice(6)).split(':').slice(1).join(':'); }catch(e){ return ''; } };
@@ -158,17 +162,29 @@
     <div class="logo">RMD</div><strong style="font-size:15px">ReachMyDevice</strong></div>${inner}
     <div class="foot">The browser decodes H.264; media is end-to-end encrypted (DTLS-SRTP).</div>`; }
 
+  // One-time probe of whether sign-up is open; hides the create-account control
+  // when the server has registration closed.
+  async function checkSignup(){
+    if(signupChecked) return; signupChecked=true;
+    try{ const r=await api('/api/registration'); if(r.ok){ const j=await r.json(); signupOpen=(j.open!==false); } }catch(e){}
+    if(!signupOpen && (location.hash==='#/login'||location.hash===''||!auth)) renderLogin();
+  }
   // ---- Login / create account ----
   function renderLogin(){
+    checkSignup();
+    if(!signupOpen && mode==='register') mode='login';  // signups closed → sign-in only
+    const tog = signupOpen
+      ? `<button class="ghost" id="tog" style="margin-left:auto">${mode==='login'?'Create account':'Have an account? Sign in'}</button>`
+      : '';
     frame(`
       <h1>${mode==='login'?'Sign in':'Create an account'}</h1>
       <p class="sub">${mode==='login'?'Sign in to view or manage your devices.':'Create a ReachMyDevice account.'}</p>
       <label>Username</label><input id="u" autocomplete="username" value="${esc(user)}">
       <label>Password</label><input id="p" type="password" autocomplete="current-password">
       <div class="err" id="e"></div>
-      <div class="row"><button id="go">${mode==='login'?'Sign in':'Create account'}</button>
-        <button class="ghost" id="tog" style="margin-left:auto">${mode==='login'?'Create account':'Have an account? Sign in'}</button></div>`);
-    $('go').onclick=submitAuth; $('tog').onclick=()=>{mode=mode==='login'?'register':'login'; renderLogin();};
+      <div class="row"><button id="go">${mode==='login'?'Sign in':'Create account'}</button>${tog}</div>`);
+    $('go').onclick=submitAuth;
+    if($('tog'))$('tog').onclick=()=>{mode=mode==='login'?'register':'login'; renderLogin();};
     $('p').addEventListener('keydown',e=>{if(e.key==='Enter')submitAuth();});
     if(!user)$('u').focus();
   }
