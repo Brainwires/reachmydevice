@@ -4,6 +4,37 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-07-08
+
+Connection passwords, an encrypted host settings store, and a rendezvous
+sign-up fix.
+
+### Added
+- **Connection password (RealVNC-style).** A host can require a shared password
+  that a viewer must enter before the session is authorized — independent of, and
+  composable with, the device-identity allowlist. Set it with `rmdd set password
+  <value>`. The host asks only when one is set: it replies to the first Hello with
+  a `password_required` ack, the viewer prompts (native egui field / browser
+  prompt) and re-sends the Hello with the password over the existing connection
+  (no reconnect). Wrong passwords re-prompt. Protocol bumped to MINOR 6
+  (`Hello.password`, `HelloAck.password_required`; backward-compatible).
+- **Encrypted host settings store + `rmdd set|unset|list`.** Secret host settings
+  live in `~/.config/rmd/settings.enc`, encrypted at rest (XChaCha20-Poly1305)
+  under a key derived from the device identity — no extra passphrase, `0600`.
+  `rmdd list` prints keys only. The device **token** now reads from the store
+  (`rmdd set token …`), falling back to the `0600` token file / `RMD_TOKEN`.
+- **Runtime sign-up toggle (rendezvous).** `open_registration` is now a DB-backed
+  setting (seeded from `RMD_RZ_OPEN_REGISTRATION`), flippable without a redeploy
+  via `POST /api/admin/registration` (guarded by `RMD_RZ_ADMIN_TOKEN`); `GET
+  /api/registration` reports the current state.
+
+### Fixed
+- **First-account bootstrap (rendezvous).** `POST /api/register` refused *all*
+  sign-ups when registration was closed — including the very first account on an
+  empty server, making a fresh deploy un-bootstrappable without forcing
+  registration open. The first account now always bootstraps (atomically);
+  once any user exists, the `open_registration` setting is enforced.
+
 ## [0.2.4] - 2026-07-08
 
 Security release: the host now actually enforces unattended-access
