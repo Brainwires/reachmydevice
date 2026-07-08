@@ -4,6 +4,22 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+### Security
+- **Enforce authorization on the host control channel (was bypassable).** The
+  unattended-access gate (`RMD_REQUIRE_AUTH` + authorized-device list) was only
+  used to shape the `HelloAck` reply — it did not gate the dangerous handlers, so
+  a peer that completed DTLS could inject keyboard/mouse, drop files, set the
+  clipboard, switch displays, and receive the screen stream **without** (or
+  despite a rejected) authorization. Authorization is now a per-session state:
+  until an accepted `Hello` sets it, every non-`Hello` message is dropped, no
+  screen is captured or streamed, and no input is injected; it resets on each
+  (re)connect. This makes `RMD_REQUIRE_AUTH` actually restrict who can control the
+  host. (Host is still trusted-LAN-oriented by default — the rendezvous device
+  token remains the access credential; use the allowlist for internet exposure.)
+- **Viewer refuses a session with an unverifiable host identity.** When the
+  host's `HelloAck` identity proof fails verification (possible MITM), the viewer
+  now hard-fails (no `Paired`) instead of logging a warning and continuing.
+
 ### Added
 - **Explicit `RMD_TURN_ENABLED` switch (relay off by default).** TURN relay uses
   the rendezvous server's bandwidth (media relays through it when peers can't

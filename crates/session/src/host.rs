@@ -206,9 +206,13 @@ where
         frame_tx,
         force_keyframe.clone(),
     )?;
-    // Whether a viewer is connected. Video is only encoded/sent while true, so we
-    // don't blast RTP before DTLS-SRTP is ready (and we save CPU when idle).
+    // Whether a viewer's DTLS session is up. Tracks connection lifecycle.
     let connected = Arc::new(AtomicBool::new(false));
+    // Whether the connected viewer has been AUTHORIZED (sent a Hello we accepted).
+    // This is the security boundary: no screen is encoded/streamed, no input is
+    // injected, and no file/clipboard/display action is applied until it's true.
+    // Reset to false on every (re)connect, so each session must re-authorize.
+    let authorized = Arc::new(AtomicBool::new(false));
 
     // Unattended-access policy.
     let access = AccessControl {
@@ -232,11 +236,13 @@ where
     };
 
     // Encode thread: frames -> H.264 -> transport, with GCC-driven bitrate.
+    // Gated on `authorized`, so screen content is never streamed to a peer that
+    // has completed DTLS but not been authorized.
     spawn_encode_thread(
         &cfg,
         transport.sender(),
         force_keyframe.clone(),
-        connected.clone(),
+        authorized.clone(),
         frame_rx,
     )?;
 
@@ -273,10 +279,10 @@ where
     #[cfg(feature = "audio")]
     let _audio = if cfg.enable_audio {
         let sender = transport.sender();
-        let connected = connected.clone();
+        let authorized = authorized.clone();
         let seq = Arc::new(AtomicU64::new(0));
         match AudioCapture::start(48_000, move |pkt| {
-            if connected.load(Ordering::Relaxed) {
+            if authorized.load(Ordering::Relaxed) {
                 let s = seq.fetch_add(1, Ordering::Relaxed);
                 sender.send_data(Bytes::from(proto::encode(&proto::audio_frame(pkt, s))));
             }
@@ -310,6 +316,9 @@ where
     // Our own DTLS fingerprint, from the offer we emit — the value the host signs
     // into its identity proof so the viewer can authenticate this endpoint.
     let mut local_fingerprint: Option<String> = None;
+    // Tracks the authorized-state edge so we surface "session active" only once,
+    // when the viewer actually becomes authorized (not merely DTLS-connected).
+    let mut was_authorized = false;
 
     // Control / event loop: forward peer signaling in, react to transport events.
     loop {
@@ -340,17 +349,18 @@ where
                 }
             }
             TransportEvent::Connected => {
-                // Visible session indicator (also surfaced to the tray companion).
-                tracing::warn!("★ REMOTE SESSION ACTIVE ★");
+                // DTLS is up, but the viewer is NOT trusted yet — it must send a
+                // Hello we accept. Until then no capture, no video, no input.
                 connected.store(true, Ordering::Relaxed);
-                force_keyframe.store(true, Ordering::Relaxed);
-                // Start grabbing the screen only now that someone is watching.
-                capture_ctl.resume();
-                on_status(HostStatus::Active);
+                authorized.store(false, Ordering::Relaxed);
+                was_authorized = false;
+                tracing::info!("viewer connected (DTLS); awaiting authorization");
             }
             TransportEvent::Disconnected => {
                 tracing::warn!("remote session ended");
                 connected.store(false, Ordering::Relaxed);
+                authorized.store(false, Ordering::Relaxed);
+                was_authorized = false;
                 // Stop capturing so nothing is grabbed (and the OS screen-share
                 // indicator clears) while no viewer is connected.
                 capture_ctl.pause();
@@ -365,12 +375,20 @@ where
                     &mut files,
                     &mut capture_ctl,
                     &access,
+                    &authorized,
                     remote_fingerprint.as_deref().unwrap_or_default().as_bytes(),
                     cfg.identity.as_deref(),
                     local_fingerprint.as_deref().unwrap_or_default().as_bytes(),
                     &cfg.device_name,
                     to_proto_codec(cfg.video_codec),
                 );
+                // The viewer just became authorized (accepted Hello) — surface the
+                // active session once, and start streaming.
+                if authorized.load(Ordering::Relaxed) && !was_authorized {
+                    was_authorized = true;
+                    tracing::warn!("★ REMOTE SESSION ACTIVE ★");
+                    on_status(HostStatus::Active);
+                }
             }
             TransportEvent::Video { .. } => {} // host does not receive video
         }
@@ -482,7 +500,7 @@ fn spawn_encode_thread(
     cfg: &HostConfig,
     sender: TransportSender,
     force_keyframe: Arc<AtomicBool>,
-    connected: Arc<AtomicBool>,
+    authorized: Arc<AtomicBool>,
     frame_rx: mpsc::Receiver<capture::Frame>,
 ) -> anyhow::Result<()> {
     let enc_cfg = codec::EncoderConfig {
@@ -503,9 +521,10 @@ fn spawn_encode_thread(
                 }
             };
             while let Ok(frame) = frame_rx.recv() {
-                // Only encode/send while a viewer is connected (avoids sending RTP
-                // before DTLS-SRTP is up, and saves CPU when idle).
-                if !connected.load(Ordering::Relaxed) {
+                // Only encode/send once the viewer is authorized (never stream the
+                // screen to an unauthorized peer; also avoids RTP before SRTP is up
+                // and saves CPU when idle).
+                if !authorized.load(Ordering::Relaxed) {
                     continue;
                 }
                 // Track the GCC target so the stream adapts to the link.
@@ -541,6 +560,7 @@ fn handle_control(
     files: &mut FileTransfers,
     capture_ctl: &mut CaptureController,
     access: &AccessControl,
+    authorized: &AtomicBool,
     channel_binding: &[u8],
     host_identity: Option<&crate::identity::DeviceIdentity>,
     local_fingerprint: &[u8],
@@ -557,7 +577,19 @@ fn handle_control(
     let Some(payload) = env.payload else {
         return;
     };
-    // File-transfer payloads are handled by the transfer manager.
+
+    // AUTHORIZATION GATE. Only a `Hello` is processed before the viewer is
+    // authorized; every other message (input injection, file transfer, clipboard,
+    // display switch, keyframe/ping) is dropped until an accepted Hello sets
+    // `authorized`. This is what actually enforces `require_authorization` — the
+    // HelloAck alone gates nothing.
+    if !matches!(payload, Payload::Hello(_)) && !authorized.load(Ordering::Relaxed) {
+        tracing::debug!("dropping control message from unauthorized viewer");
+        return;
+    }
+
+    // File-transfer payloads are handled by the transfer manager (only reached
+    // once authorized, per the gate above).
     if files.handle(&payload) {
         return;
     }
@@ -571,6 +603,10 @@ fn handle_control(
                 .and_then(|()| access.authorize(&h, channel_binding));
             match decision {
                 Ok(()) => {
+                    // Authorize this session: unblocks input/capture/video/file/
+                    // clipboard handling and starts the screen stream.
+                    authorized.store(true, Ordering::Relaxed);
+                    capture_ctl.resume();
                     // Prove the host's identity bound to this DTLS session so the
                     // viewer can authenticate the real endpoint (closes A2 MITM).
                     let ack = match host_identity {
@@ -590,6 +626,9 @@ fn handle_control(
                     tracing::info!(viewer = %h.device_name, "viewer accepted");
                 }
                 Err(reason) => {
+                    // Stay unauthorized: the peer's subsequent messages keep being
+                    // dropped, and no screen is streamed.
+                    authorized.store(false, Ordering::Relaxed);
                     let ack = proto::hello_ack_reject(reason.clone());
                     transport.send_data(Bytes::from(proto::encode(&ack)));
                     tracing::warn!(%reason, viewer = %h.device_name, "rejected viewer");

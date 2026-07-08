@@ -265,35 +265,47 @@ impl ViewerSession {
                                                 tracing::warn!(reason=%ack.reason, "host rejected pairing");
                                             }
                                             // Verify the host's identity proof, bound
-                                            // to the host's DTLS fingerprint.
-                                            if !ack.host_public_key.is_empty()
+                                            // to the host's DTLS fingerprint. An
+                                            // INVALID proof means we're talking to an
+                                            // imposter/MITM host: refuse the session
+                                            // (do not pair) rather than continue.
+                                            let host_ok = if !ack.host_public_key.is_empty()
                                                 && !ack.host_proof.is_empty()
                                             {
                                                 let binding = host_fingerprint
                                                     .clone()
                                                     .unwrap_or_default();
-                                                let update = match crate::identity::verify_access_proof(
+                                                match crate::identity::verify_access_proof(
                                                     &ack.host_public_key,
                                                     &ack.host_proof,
                                                     binding.as_bytes(),
                                                 ) {
-                                                    Ok(device_id) => ViewerUpdate::HostIdentity {
-                                                        public_key: ack.host_public_key.clone(),
-                                                        device_id,
-                                                        verified: true,
-                                                    },
+                                                    Ok(device_id) => {
+                                                        let _ = updates_tx.send(ViewerUpdate::HostIdentity {
+                                                            public_key: ack.host_public_key.clone(),
+                                                            device_id,
+                                                            verified: true,
+                                                        });
+                                                        true
+                                                    }
                                                     Err(e) => {
-                                                        tracing::warn!(error=%e, "host identity proof INVALID — possible MITM");
-                                                        ViewerUpdate::HostIdentity {
+                                                        tracing::error!(error=%e, "host identity proof INVALID — refusing session (possible MITM)");
+                                                        let _ = updates_tx.send(ViewerUpdate::HostIdentity {
                                                             public_key: ack.host_public_key.clone(),
                                                             device_id: String::new(),
                                                             verified: false,
-                                                        }
+                                                        });
+                                                        false
                                                     }
-                                                };
-                                                let _ = updates_tx.send(update);
-                                            }
-                                            let _ = updates_tx.send(ViewerUpdate::Paired(ack.accepted));
+                                                }
+                                            } else {
+                                                // Host presented no identity proof; nothing to verify.
+                                                true
+                                            };
+                                            // Only proceed when the host both accepted us
+                                            // AND proved its identity.
+                                            let _ = updates_tx
+                                                .send(ViewerUpdate::Paired(host_ok && ack.accepted));
                                         }
                                         // Pong echoes the timestamp we stamped into our Ping;
                                         // the elapsed monotonic time is the data-channel RTT.
