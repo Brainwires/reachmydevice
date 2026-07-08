@@ -305,6 +305,15 @@ case ":$PATH:" in
     export PATH="$BINDIR:$PATH" ;;   # so validation below works this session
 esac
 
+# --- macOS: clear the Gatekeeper quarantine flag ---------------------------
+# The binaries are unsigned/un-notarized, so downloading them sets
+# com.apple.quarantine and macOS blocks execution. We've already verified the
+# download (minisign / SHA-256), so clear it on exactly what we installed. xattr
+# is non-interactive and a no-op when the flag isn't present. (No effect elsewhere.)
+if [ "$PLAT" = macos ]; then
+  for b in $installed; do xattr -dr com.apple.quarantine "$BINDIR/$b" 2>/dev/null || true; done
+fi
+
 # --- Validate --------------------------------------------------------------
 say "Validating install"
 ok=1
@@ -313,8 +322,5 @@ for b in $installed; do
 done
 [ "$ok" = 1 ] || die "validation failed — the binaries did not run"
 
-if [ "$PLAT" = macos ]; then
-  warn "Unsigned build: if macOS blocks a binary, run:  xattr -dr com.apple.quarantine $BINDIR/rmd $BINDIR/rmdd"
-fi
 say "Done.  Run  rmd  to view a device — or  rmdd  on the machine you want to control."
 [ -z "$PATH_NOTE" ] || say "$PATH_NOTE"
