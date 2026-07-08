@@ -4,6 +4,11 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-07-08
+
+Security release: the host now actually enforces unattended-access
+authorization, and the viewer refuses a host it can't authenticate.
+
 ### Security
 - **Enforce authorization on the host control channel (was bypassable).** The
   unattended-access gate (`RMD_REQUIRE_AUTH` + authorized-device list) was only
@@ -35,6 +40,14 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
   `deploy/fail2ban/` ships a ready filter + jail + README. Layered on the
   existing per-IP rate limiter and per-account login throttle; scoped to
   auth-abuse hardening (not volumetric-DDoS mitigation).
+
+### Tests
+- **Authorization-gate regression coverage (both halves).** An exhaustive test
+  pins the control-gate allowlist (only `Hello` is processed before auth; input,
+  clipboard, file, keyframe, display-switch, ping, view-only, and audio are all
+  dropped), and an integration test runs the real encode thread over a loopback
+  WebRTC transport to prove an unauthorized peer receives zero video until
+  authorization flips on — so a future refactor can't silently re-open the hole.
 
 ## [0.2.3] - 2026-07-07
 
