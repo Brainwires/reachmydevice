@@ -285,15 +285,38 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
         cb.forget();
     }
 
-    // Inbound control (HelloAck, DisplayList, Pong…) — logged for now.
+    // Inbound control (HelloAck, DisplayList, Pong…).
     {
+        // Clone the channel so we can re-send a password-bearing Hello.
+        let dc_msg = dc.clone();
         let cb = Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| {
             if let Ok(buf) = ev.data().dyn_into::<js_sys::ArrayBuffer>() {
                 let bytes = js_sys::Uint8Array::new(&buf).to_vec();
                 if let Ok(env) = rmd_protocol::decode(&bytes) {
                     if let Some(rmd_protocol::pb::envelope::Payload::HelloAck(ack)) = env.payload {
-                        if !ack.accepted {
+                        if ack.password_required {
+                            // Host wants a connection password (or ours was wrong):
+                            // prompt and re-send the Hello with it (not via the URL).
+                            match prompt_password() {
+                                Some(pw) => {
+                                    let hello = rmd_protocol::with_password(
+                                        rmd_protocol::hello(
+                                            "web-viewer",
+                                            rmd_protocol::Role::Viewer,
+                                            0,
+                                        ),
+                                        pw,
+                                    );
+                                    let _ = dc_msg
+                                        .send_with_u8_array(&rmd_protocol::encode(&hello));
+                                    set_status("checking password…");
+                                }
+                                None => set_status("connection password required"),
+                            }
+                        } else if !ack.accepted {
                             set_status(&format!("rejected: {}", ack.reason));
+                        } else {
+                            set_status("connected");
                         }
                     }
                 }
@@ -302,6 +325,16 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
         dc.set_binary_type(web_sys::RtcDataChannelType::Arraybuffer);
         dc.set_onmessage(Some(cb.as_ref().unchecked_ref()));
         cb.forget();
+    }
+}
+
+/// Prompt the user for the host's connection password (browser dialog). Returns
+/// `None` if they cancel or leave it blank. Kept out of the URL/history.
+fn prompt_password() -> Option<String> {
+    let win = web_sys::window()?;
+    match win.prompt_with_message("This host requires a connection password:") {
+        Ok(Some(s)) if !s.is_empty() => Some(s),
+        _ => None,
     }
 }
 

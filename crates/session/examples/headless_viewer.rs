@@ -73,6 +73,9 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("[headless] connected");
                 }
                 ViewerUpdate::Paired(ok) => eprintln!("[headless] paired={ok}"),
+                ViewerUpdate::PasswordRequired { reason } => {
+                    eprintln!("[headless] host requires a connection password: {reason}")
+                }
                 ViewerUpdate::Frame(f) => {
                     frames += 1;
                     if first.is_none() {

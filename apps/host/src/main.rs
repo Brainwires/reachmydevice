@@ -85,10 +85,13 @@ fn authorized_device_ids() -> Vec<String> {
 /// Load (or first-run create) this host's device identity, used to prove the
 /// host's identity to viewers (bound to the DTLS session). Encrypted at rest when
 /// `RMD_KEY_PASSPHRASE` is set.
+fn identity_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::path::PathBuf::from(home).join(".config/rmd/identity.key")
+}
+
 fn load_host_identity() -> Option<std::sync::Arc<rmd_session::DeviceIdentity>> {
-    let home = std::env::var("HOME").ok()?;
-    let path = std::path::PathBuf::from(home).join(".config/rmd/identity.key");
-    match rmd_session::DeviceIdentity::load_or_create(&path) {
+    match rmd_session::DeviceIdentity::load_or_create(&identity_path()) {
         Ok(id) => {
             tracing::info!(device_id = %id.device_id(), "host identity loaded");
             Some(std::sync::Arc::new(id))
@@ -100,10 +103,19 @@ fn load_host_identity() -> Option<std::sync::Arc<rmd_session::DeviceIdentity>> {
     }
 }
 
-/// Read the device bearer token, preferring a `0600` file over the environment
-/// (env vars leak via `ps e` / `/proc/<pid>/environ`). File path from
-/// `RMD_TOKEN_FILE`, else `~/.config/rmd/token`.
-fn read_token() -> anyhow::Result<zeroize::Zeroizing<String>> {
+/// Read the device bearer token. Preference order: the encrypted settings store
+/// (`rmdd set token …`), then a `0600` file (`RMD_TOKEN_FILE` or
+/// `~/.config/rmd/token`), then `RMD_TOKEN` env (which leaks via `ps e` /
+/// `/proc/<pid>/environ`, so it warns).
+fn read_token(
+    settings: Option<&rmd_session::settings::SettingsStore>,
+) -> anyhow::Result<zeroize::Zeroizing<String>> {
+    if let Some(tok) = settings
+        .and_then(|s| s.get(rmd_session::settings::KEY_TOKEN))
+        .filter(|t| !t.is_empty())
+    {
+        return Ok(zeroize::Zeroizing::new(tok.to_string()));
+    }
     let path = std::env::var("RMD_TOKEN_FILE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -125,6 +137,55 @@ fn read_token() -> anyhow::Result<zeroize::Zeroizing<String>> {
         "no device token: create {} (0600) or set RMD_TOKEN_FILE / RMD_TOKEN",
         path.display()
     )
+}
+
+/// Handle the `rmdd set|unset|list` settings subcommands. These load (or
+/// first-run create) the device identity, open the encrypted settings store, and
+/// mutate it — then exit without starting a session. `list` prints keys only,
+/// never values.
+fn run_settings_command(args: &[String]) -> anyhow::Result<()> {
+    use rmd_session::settings::SettingsStore;
+    let id = rmd_session::DeviceIdentity::load_or_create(&identity_path())?;
+    let path = SettingsStore::default_path();
+    let mut store = SettingsStore::load(&id, &path)?;
+    match args[0].as_str() {
+        "set" => {
+            let key = args
+                .get(1)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("usage: rmdd set <key> <value>"))?;
+            let value = args
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("usage: rmdd set <key> <value>"))?;
+            store.set(key.clone(), value.clone());
+            store.save(&id, &path)?;
+            println!("set '{key}' ({})", path.display());
+        }
+        "unset" => {
+            let key = args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("usage: rmdd unset <key>"))?;
+            if store.remove(key) {
+                store.save(&id, &path)?;
+                println!("unset '{key}'");
+            } else {
+                println!("no such setting: '{key}'");
+            }
+        }
+        "list" => {
+            let keys: Vec<&str> = store.keys().collect();
+            if keys.is_empty() {
+                println!("(no settings stored)");
+            } else {
+                println!("settings ({}):", path.display());
+                for k in keys {
+                    println!("  {k}");
+                }
+            }
+        }
+        other => anyhow::bail!("unknown subcommand '{other}' (expected set | unset | list)"),
+    }
+    Ok(())
 }
 
 /// Video codec from `RMD_CODEC` (`h264` default, or `av1`). AV1 is the pure-Rust
@@ -171,13 +232,21 @@ fn main() -> anyhow::Result<()> {
             "--help" | "-h" => {
                 println!(
                     "rmdd {} — ReachMyDevice host agent (daemon)\n\n\
-                     Configured via environment variables:\n  \
+                     Commands:\n  \
+                     rmdd                 start the host\n  \
+                     rmdd set <k> <v>     store a secret setting (encrypted at rest)\n  \
+                     rmdd unset <k>       remove a setting\n  \
+                     rmdd list            list setting keys (values never printed)\n\n\
+                     Settings (via `rmdd set`):\n  \
+                     token      device bearer token (rendezvous mode)\n  \
+                     password   connection password a viewer must enter\n\n\
+                     Env (session):\n  \
                      RMD_RENDEZVOUS_URL  wss://<host>/ws (rendezvous signaling)\n  \
-                     RMD_TOKEN           this device's bearer token\n  \
                      RMD_NAME            device name (default: hostname)\n  \
                      RMD_CODEC           h264 (default) | av1\n  \
                      RMD_ICE             STUN/TURN URL(s)\n\n\
-                     Run with no args after setting the env to start the host.",
+                     Note: `set <k> <v>` takes the value inline, so it can appear in \
+                     shell history; clear it or use a subshell if that matters.",
                     env!("CARGO_PKG_VERSION")
                 );
                 return Ok(());
@@ -186,20 +255,57 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Settings subcommands (`rmdd set|unset|list …`) run and exit before any
+    // session setup, like the flags above.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(
+        args.first().map(String::as_str),
+        Some("set") | Some("unset") | Some("list")
+    ) {
+        return run_settings_command(&args);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
+    // Load the device identity once, then open the encrypted settings store with
+    // it (both the host-identity presentation and the settings share the identity).
+    let identity = load_host_identity();
+    let settings = identity.as_ref().and_then(|id| {
+        match rmd_session::settings::SettingsStore::load(
+            id.as_ref(),
+            &rmd_session::settings::SettingsStore::default_path(),
+        ) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not open settings store; ignoring it");
+                None
+            }
+        }
+    });
+
     // Read the rendezvous URL + device token once; both the ICE-server fetch and
-    // the signaling client use them (and `read_token` warns at most once).
+    // the signaling client use them (token comes from the settings store / file /
+    // env, in that order).
     let rendezvous_url = std::env::var("RMD_RENDEZVOUS_URL").ok();
     let token = match &rendezvous_url {
-        Some(_) => Some(read_token()?),
+        Some(_) => Some(read_token(settings.as_ref())?),
         None => None,
     };
     let token_str = token.as_deref().map(|z| z.as_str());
+
+    // Optional connection password (RealVNC-style). From the settings store only.
+    let connect_password = settings
+        .as_ref()
+        .and_then(|s| s.get(rmd_session::settings::KEY_PASSWORD))
+        .filter(|p| !p.is_empty())
+        .map(str::to_string);
+    if connect_password.is_some() {
+        tracing::info!("connection password required for this host");
+    }
 
     let cfg = HostConfig {
         display_index: env_or("RMD_DISPLAY", 0),
@@ -221,7 +327,8 @@ fn main() -> anyhow::Result<()> {
         authorized_device_ids: authorized_device_ids(),
         // The host's own identity, presented (DTLS-bound) to viewers so they can
         // authenticate this endpoint. Persisted under the config dir.
-        identity: load_host_identity(),
+        identity,
+        connect_password,
     };
 
     tracing::info!(

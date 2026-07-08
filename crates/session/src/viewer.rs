@@ -58,6 +58,12 @@ pub enum ViewerUpdate {
     Frame(codec::DecodedFrame),
     /// The host accepted (`true`) or rejected the pairing (version handshake).
     Paired(bool),
+    /// The host needs a connection password (or the one we sent was wrong). The
+    /// UI should prompt the user and call [`ViewerSession::submit_password`]; the
+    /// session then re-sends its Hello with the password (no reconnect).
+    PasswordRequired {
+        reason: String,
+    },
     /// Round-trip latency measured from a data-channel `Ping`/`Pong` exchange.
     Latency(Duration),
     /// A file-transfer event (incoming offer, progress, completion, failure).
@@ -74,12 +80,43 @@ pub enum ViewerUpdate {
     },
 }
 
+/// Build the viewer's `Hello`: authenticated (identity proof bound to our DTLS
+/// fingerprint) when we have an identity, else anonymous — optionally carrying a
+/// connection `password`. Called on connect (no password) and again when the host
+/// asks for a password.
+fn build_viewer_hello(
+    device_name: &str,
+    identity: Option<&Arc<crate::identity::DeviceIdentity>>,
+    local_fingerprint: Option<&str>,
+    password: Option<&str>,
+) -> proto::Envelope {
+    let base = if let Some(id) = identity {
+        let binding = local_fingerprint.unwrap_or_default();
+        let proof = id.access_proof(binding.as_bytes());
+        proto::hello_authenticated(
+            device_name,
+            proto::Role::Viewer,
+            0,
+            id.public_key_bytes().to_vec(),
+            proof.to_vec(),
+        )
+    } else {
+        proto::hello(device_name, proto::Role::Viewer, 0)
+    };
+    match password {
+        Some(pw) if !pw.is_empty() => proto::with_password(base, pw),
+        _ => base,
+    }
+}
+
 /// Running viewer session.
 pub struct ViewerSession {
     sender: TransportSender,
     updates: Receiver<ViewerUpdate>,
     /// Queue a local file to send to the host.
     file_cmd: Sender<PathBuf>,
+    /// Submit a connection password (re-sends the Hello with it).
+    pass_cmd: Sender<String>,
     /// Count of audio frames received from the host over the data channel
     /// (incremented regardless of whether playback is enabled).
     audio_rx: Arc<std::sync::atomic::AtomicU64>,
@@ -146,6 +183,8 @@ impl ViewerSession {
         // the UI thread via `file_cmd`; events surface as `ViewerUpdate::File`.
         let (file_cmd_tx, file_cmd_rx) = mpsc::channel::<PathBuf>();
         let (file_ev_tx, file_ev_rx) = mpsc::channel::<FileEvent>();
+        // Password submissions from the UI (reject-then-retry connection password).
+        let (pass_cmd_tx, pass_cmd_rx) = mpsc::channel::<String>();
         let mut files = {
             let sender = transport.sender();
             let out = Arc::new(move |env: proto::Envelope| {
@@ -212,6 +251,17 @@ impl ViewerSession {
                                 tracing::warn!(error=%e, "failed to start file send");
                             }
                         }
+                        // A password the user just entered → re-send the Hello with
+                        // it over the still-open transport (no reconnect).
+                        while let Ok(pw) = pass_cmd_rx.try_recv() {
+                            let hello = build_viewer_hello(
+                                &device_name,
+                                identity.as_ref(),
+                                local_fingerprint.as_deref(),
+                                Some(&pw),
+                            );
+                            transport.send_data(Bytes::from(proto::encode(&hello)));
+                        }
                         while let Ok(ev) = file_ev_rx.try_recv() {
                             let _ = updates_tx.send(ViewerUpdate::File(ev));
                         }
@@ -233,21 +283,15 @@ impl ViewerSession {
                             TransportEvent::Connected => {
                                 // Introduce ourselves; host validates our version and
                                 // (if it enforces unattended access) our identity proof,
-                                // which is bound to this session's DTLS fingerprint.
-                                let hello = if let Some(id) = identity.as_ref() {
-                                    let binding =
-                                        local_fingerprint.clone().unwrap_or_default();
-                                    let proof = id.access_proof(binding.as_bytes());
-                                    proto::hello_authenticated(
-                                        &device_name,
-                                        proto::Role::Viewer,
-                                        0,
-                                        id.public_key_bytes().to_vec(),
-                                        proof.to_vec(),
-                                    )
-                                } else {
-                                    proto::hello(&device_name, proto::Role::Viewer, 0)
-                                };
+                                // which is bound to this session's DTLS fingerprint. No
+                                // password yet — if the host wants one it replies with
+                                // password_required and we re-send below.
+                                let hello = build_viewer_hello(
+                                    &device_name,
+                                    identity.as_ref(),
+                                    local_fingerprint.as_deref(),
+                                    None,
+                                );
                                 transport.send_data(Bytes::from(proto::encode(&hello)));
                                 let _ = updates_tx.send(ViewerUpdate::Connected);
                             }
@@ -260,6 +304,15 @@ impl ViewerSession {
                             TransportEvent::Data(bytes) => {
                                 if let Ok(env) = proto::decode(&bytes) {
                                     match env.payload {
+                                        Some(Payload::HelloAck(ack)) if ack.password_required => {
+                                            // Host needs a connection password (or ours
+                                            // was wrong). Ask the UI to prompt; we resend
+                                            // the Hello when it calls submit_password.
+                                            tracing::info!(reason=%ack.reason, "host requires a connection password");
+                                            let _ = updates_tx.send(ViewerUpdate::PasswordRequired {
+                                                reason: ack.reason.clone(),
+                                            });
+                                        }
                                         Some(Payload::HelloAck(ack)) => {
                                             if !ack.accepted {
                                                 tracing::warn!(reason=%ack.reason, "host rejected pairing");
@@ -351,8 +404,17 @@ impl ViewerSession {
             sender,
             updates,
             file_cmd: file_cmd_tx,
+            pass_cmd: pass_cmd_tx,
             audio_rx,
         })
+    }
+
+    /// Submit a connection password in response to
+    /// [`ViewerUpdate::PasswordRequired`]. The session re-sends its Hello carrying
+    /// the password over the existing transport (no reconnect); a wrong password
+    /// yields another `PasswordRequired`.
+    pub fn submit_password(&self, password: impl Into<String>) {
+        let _ = self.pass_cmd.send(password.into());
     }
 
     /// Number of audio frames received from the host so far (over the real data

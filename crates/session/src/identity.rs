@@ -79,8 +79,9 @@ fn unwrap_seed(blob: &[u8], passphrase: &[u8]) -> anyhow::Result<Zeroizing<[u8; 
     Ok(Zeroizing::new(seed))
 }
 
-/// Restrict the identity file to the current user (unix `0600`; Windows ACL).
-fn restrict_perms(path: &Path) -> anyhow::Result<()> {
+/// Restrict a file to the current user (unix `0600`; Windows ACL). Reused by the
+/// settings store, which holds the same class of at-rest secrets.
+pub(crate) fn restrict_perms(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -206,6 +207,19 @@ impl DeviceIdentity {
     /// Sign a message with the device's private key (64-byte ed25519 signature).
     pub fn sign(&self, msg: &[u8]) -> [u8; 64] {
         self.signing.sign(msg).to_bytes()
+    }
+
+    /// Derive a 32-byte subkey from the device's secret key via HKDF-SHA256.
+    /// Used to encrypt device-local at-rest data (the settings store) with a key
+    /// bound to this identity and needing no separate passphrase — the data is as
+    /// protected as the identity key file itself. The secret never leaves here.
+    pub fn derive_subkey(&self, info: &[u8]) -> Zeroizing<[u8; 32]> {
+        let ikm = Zeroizing::new(self.signing.to_bytes());
+        let hk = hkdf::Hkdf::<Sha256>::new(None, ikm.as_ref());
+        let mut okm = Zeroizing::new([0u8; 32]);
+        hk.expand(info, okm.as_mut())
+            .expect("hkdf-sha256 expand of 32 bytes never fails");
+        okm
     }
 
     /// Produce the unattended-access proof: a signature over

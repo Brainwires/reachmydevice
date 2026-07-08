@@ -19,6 +19,7 @@ pub mod pairing;
 pub mod pairing_client;
 pub mod power;
 pub mod rendezvous;
+pub mod settings;
 pub mod signal;
 pub mod viewer;
 

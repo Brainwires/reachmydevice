@@ -97,6 +97,11 @@ pub struct HostConfig {
     /// bound to the session's DTLS fingerprint — in its `HelloAck`, so the viewer
     /// can authenticate the real endpoint (closes first-connect MITM).
     pub identity: Option<std::sync::Arc<crate::identity::DeviceIdentity>>,
+    /// Optional connection password (RealVNC-style shared secret). When set, a
+    /// viewer must supply the matching password in its `Hello` before the session
+    /// is authorized; when `None`, no password is required. Independent of the
+    /// device-identity allowlist — both can apply. Set via `rmdd set password`.
+    pub connect_password: Option<String>,
 }
 
 impl Default for HostConfig {
@@ -115,6 +120,7 @@ impl Default for HostConfig {
             require_authorization: false,
             authorized_device_ids: Vec::new(),
             identity: None,
+            connect_password: None,
         }
     }
 }
@@ -381,6 +387,7 @@ where
                     local_fingerprint.as_deref().unwrap_or_default().as_bytes(),
                     &cfg.device_name,
                     to_proto_codec(cfg.video_codec),
+                    cfg.connect_password.as_deref(),
                 );
                 // The viewer just became authorized (accepted Hello) — surface the
                 // active session once, and start streaming.
@@ -563,6 +570,28 @@ fn authorization_permits(payload: &Payload, authorized: bool) -> bool {
     authorized || matches!(payload, Payload::Hello(_))
 }
 
+/// Whether a viewer's supplied connection password satisfies the host's. `None`
+/// configured → no password required (always ok). Constant-time comparison.
+fn verify_connect_password(configured: Option<&str>, supplied: &str) -> bool {
+    match configured {
+        None => true,
+        Some(expected) => ct_eq(expected.as_bytes(), supplied.as_bytes()),
+    }
+}
+
+/// Constant-time byte comparison (length may leak; a password's length is not the
+/// secret). Avoids a timing oracle on the password compare.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 // This dispatcher legitimately depends on the whole session's control surface
 // (transport, injector, clipboard, files, capture, access, identity, codec); the
 // authorization gate added one more. Splitting it would only scatter that state.
@@ -581,6 +610,7 @@ fn handle_control(
     local_fingerprint: &[u8],
     device_name: &str,
     host_codec: proto::VideoCodec,
+    connect_password: Option<&str>,
 ) {
     let env = match proto::decode(bytes) {
         Ok(e) => e,
@@ -616,6 +646,18 @@ fn handle_control(
                 .map_err(|e| format!("{e}"))
                 .and_then(|()| check_codec_compatible(&h, host_codec))
                 .and_then(|()| access.authorize(&h, channel_binding));
+            // 4. Connection password (RealVNC-style). Checked separately from the
+            // chain above so a missing/wrong password gets a *distinguishable* ack
+            // (`password_required`), prompting the viewer to ask + retry — but only
+            // once the device-identity checks passed, so we never prompt an
+            // otherwise-rejected peer.
+            if decision.is_ok() && !verify_connect_password(connect_password, &h.password) {
+                authorized.store(false, Ordering::Relaxed);
+                let ack = proto::hello_ack_password_required("connection password required");
+                transport.send_data(Bytes::from(proto::encode(&ack)));
+                tracing::warn!(viewer = %h.device_name, "viewer needs a connection password");
+                return;
+            }
             match decision {
                 Ok(()) => {
                     // Authorize this session: unblocks input/capture/video/file/
@@ -687,7 +729,9 @@ fn log_file_event(ev: FileEvent) {
 
 #[cfg(test)]
 mod tests {
-    use super::{authorization_permits, check_codec_compatible, AccessControl};
+    use super::{
+        authorization_permits, check_codec_compatible, verify_connect_password, AccessControl,
+    };
     use crate::identity::DeviceIdentity;
     use rmd_protocol as proto;
     use rmd_protocol::pb::envelope::Payload;
@@ -788,6 +832,19 @@ mod tests {
             _ => unreachable!(),
         };
         assert!(access.authorize(&bare, fp).is_err());
+    }
+
+    #[test]
+    fn connect_password_gate() {
+        // No password configured → any supplied value passes (feature off).
+        assert!(verify_connect_password(None, ""));
+        assert!(verify_connect_password(None, "whatever"));
+        // Configured → exact match required (case-sensitive, constant-time).
+        assert!(verify_connect_password(Some("taco"), "taco"));
+        assert!(!verify_connect_password(Some("taco"), "Taco"));
+        assert!(!verify_connect_password(Some("taco"), ""));
+        assert!(!verify_connect_password(Some("taco"), "tacos"));
+        assert!(!verify_connect_password(Some("taco"), "tac"));
     }
 
     #[test]

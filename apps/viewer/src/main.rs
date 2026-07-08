@@ -123,6 +123,9 @@ enum ConnState {
     Confirm(Tofu),
     /// Session started; waiting for the data channel / pairing.
     Establishing,
+    /// The host asked for a connection password; prompt the user. `retry` is set
+    /// after a wrong attempt.
+    NeedPassword { retry: bool },
 }
 
 /// TOFU verdict for the host we're about to connect to.
@@ -194,6 +197,10 @@ struct App {
     conn: ConnState,
     session: Option<ViewerSession>,
     paired: Option<bool>,
+    /// Connection-password entry (host with a password set).
+    host_password: String,
+    /// Whether we've already submitted a password this session (→ "wrong password").
+    pw_submitted: bool,
     /// Whether the host's DTLS-bound identity proof verified this session.
     host_verified: Option<bool>,
     latency: Option<Duration>,
@@ -287,6 +294,8 @@ impl App {
             conn: ConnState::Establishing,
             session: None,
             paired: None,
+            host_password: String::new(),
+            pw_submitted: false,
             host_verified: None,
             latency: None,
             last_ping: Instant::now(),
@@ -353,6 +362,8 @@ impl App {
             Ok(session) => {
                 self.session = Some(session);
                 self.paired = None;
+                self.host_password.clear();
+                self.pw_submitted = false;
                 self.latency = None;
                 self.last_ping = Instant::now();
                 self.conn = ConnState::Establishing;
@@ -413,6 +424,16 @@ impl App {
                     self.error = Some("host rejected pairing (protocol version mismatch)".into());
                     self.leave_session();
                 }
+            }
+            ViewerUpdate::PasswordRequired { reason } => {
+                // Host wants a connection password (or ours was wrong). Prompt.
+                if !reason.is_empty() {
+                    tracing::info!(%reason, "host requires a connection password");
+                }
+                let retry = self.pw_submitted;
+                self.host_password.clear();
+                self.conn = ConnState::NeedPassword { retry };
+                self.screen = Screen::Connecting;
             }
             ViewerUpdate::HostIdentity {
                 device_id,
@@ -1071,15 +1092,21 @@ impl App {
                 .map(|h| h.name.clone())
                 .unwrap_or_else(|| "host".into());
 
-            // Read the connection state into owned values so the UI closures can
-            // still call `&mut self` action methods below.
-            let confirm_tofu = match &self.conn {
-                ConnState::Confirm(tofu) => Some(*tofu),
-                ConnState::Establishing => None,
+            // Snapshot the connection sub-state into owned values so the UI
+            // closures can still call `&mut self` action methods below.
+            enum View {
+                Confirm(Tofu),
+                Password { retry: bool },
+                Establishing,
+            }
+            let view = match &self.conn {
+                ConnState::Confirm(tofu) => View::Confirm(*tofu),
+                ConnState::NeedPassword { retry } => View::Password { retry: *retry },
+                ConnState::Establishing => View::Establishing,
             };
 
-            match confirm_tofu {
-                Some(tofu) => {
+            match view {
+                View::Confirm(tofu) => {
                     ui.vertical_centered(|ui| {
                         ui.heading(format!("Connect to {host_name}"));
                     });
@@ -1147,7 +1174,49 @@ impl App {
                         }
                     }
                 }
-                None => {
+                View::Password { retry } => {
+                    ui.vertical_centered(|ui| {
+                        ui.heading(format!("Password for {host_name}"));
+                    });
+                    ui.add_space(12.0);
+                    if retry {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(230, 60, 60),
+                            "Wrong password — try again.",
+                        );
+                    } else {
+                        ui.label("This host requires a connection password.");
+                    }
+                    ui.add_space(8.0);
+                    let mut submit = false;
+                    ui.horizontal(|ui| {
+                        ui.label("Password");
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.host_password)
+                                .password(true)
+                                .desired_width(220.0),
+                        );
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            submit = true;
+                        }
+                    });
+                    ui.add_space(12.0);
+                    let mut cancel = false;
+                    ui.horizontal(|ui| {
+                        if ui.button("Connect").clicked() {
+                            submit = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                    if cancel {
+                        self.leave_session();
+                    } else if submit {
+                        self.action_submit_host_password();
+                    }
+                }
+                View::Establishing => {
                     ui.vertical_centered(|ui| {
                         ui.add_space(24.0);
                         ui.spinner();
@@ -1160,6 +1229,20 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Submit the entered connection password: hand it to the session (which
+    /// re-sends the Hello with it) and show the spinner while the host verifies.
+    fn action_submit_host_password(&mut self) {
+        if self.host_password.is_empty() {
+            return;
+        }
+        let pw = std::mem::take(&mut self.host_password);
+        self.pw_submitted = true;
+        if let Some(s) = &self.session {
+            s.submit_password(pw);
+        }
+        self.conn = ConnState::Establishing;
     }
 
     fn ui_session(&mut self, root: &mut egui::Ui) {

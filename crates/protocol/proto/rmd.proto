@@ -69,6 +69,12 @@ message Hello {
   // A native viewer sends [H264]; a browser viewer sends e.g. [AV1, H264]. Empty
   // is treated as [H264] for backward compatibility with MINOR<3 peers.
   repeated VideoCodec supported_video_codecs = 6;
+  // Connection password (added MINOR 6), RealVNC-style. Sent by a viewer when a
+  // host has one set; travels inside the E2E-encrypted, DTLS-fingerprint-bound
+  // data channel. Empty on the first Hello; the host replies with a HelloAck
+  // whose `password_required=true`, then the viewer prompts and re-sends a Hello
+  // carrying the password.
+  string password = 7;
 }
 
 // Response to Hello. `accepted=false` carries a human-readable `reason`
@@ -90,6 +96,11 @@ message HelloAck {
   // the viewer configures the right decoder / detects an undecodable mismatch.
   // UNSPECIFIED is treated as H264 for MINOR<3 hosts.
   VideoCodec video_codec = 7;
+  // Set (added MINOR 6) when the host rejected this Hello because it needs a
+  // connection password (or the supplied one was wrong). The viewer distinguishes
+  // this from other rejections, prompts the user, and re-sends a Hello with the
+  // password. `reason` still carries a human-readable message.
+  bool password_required = 8;
 }
 
 // --- Input (viewer -> host) ------------------------------------------------

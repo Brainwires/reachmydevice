@@ -33,8 +33,10 @@ pub const PROTOCOL_MAJOR: u32 = 1;
 /// MINOR 3 replaced `FileComplete.sha256_prefix` (64-bit) with a full `sha256`;
 /// MINOR 4 added the host identity proof to `HelloAck` (first-connect MITM);
 /// MINOR 5 added video-codec negotiation (`Hello.supported_video_codecs`,
-///   `HelloAck.video_codec`) for the AV1 (browser) / H.264 split.
-pub const PROTOCOL_MINOR: u32 = 5;
+///   `HelloAck.video_codec`) for the AV1 (browser) / H.264 split;
+/// MINOR 6 added the connection password (`Hello.password`,
+///   `HelloAck.password_required`).
+pub const PROTOCOL_MINOR: u32 = 6;
 
 /// Errors from encoding/decoding or handshake validation.
 #[derive(Debug, thiserror::Error)]
@@ -112,6 +114,7 @@ pub fn hello(device_name: impl Into<String>, role: Role, features: u64) -> Envel
         public_key: Vec::new(),
         signature: Vec::new(),
         supported_video_codecs: native_supported_codecs(),
+        password: String::new(),
     }))
 }
 
@@ -132,7 +135,18 @@ pub fn hello_authenticated(
         public_key,
         signature,
         supported_video_codecs: native_supported_codecs(),
+        password: String::new(),
     }))
+}
+
+/// Attach a connection `password` to a `Hello` envelope (no-op on other
+/// payloads). The viewer builds its normal Hello, then wraps it with this on the
+/// re-send after the host asks for a password.
+pub fn with_password(mut env: Envelope, password: impl Into<String>) -> Envelope {
+    if let Some(pb::envelope::Payload::Hello(h)) = env.payload.as_mut() {
+        h.password = password.into();
+    }
+    env
 }
 
 /// An accepting `HelloAck` (no host identity proof — LAN/dev). `video_codec` is
@@ -150,6 +164,7 @@ pub fn hello_ack_ok(
         host_public_key: Vec::new(),
         host_proof: Vec::new(),
         video_codec: video_codec as i32,
+        password_required: false,
     }))
 }
 
@@ -170,6 +185,7 @@ pub fn hello_ack_ok_signed(
         host_public_key,
         host_proof,
         video_codec: video_codec as i32,
+        password_required: false,
     }))
 }
 
@@ -183,6 +199,22 @@ pub fn hello_ack_reject(reason: impl Into<String>) -> Envelope {
         host_public_key: Vec::new(),
         host_proof: Vec::new(),
         video_codec: VideoCodec::Unspecified as i32,
+        password_required: false,
+    }))
+}
+
+/// A rejecting `HelloAck` that specifically signals a connection password is
+/// required (or the supplied one was wrong), so the viewer prompts and retries.
+pub fn hello_ack_password_required(reason: impl Into<String>) -> Envelope {
+    envelope(pb::envelope::Payload::HelloAck(HelloAck {
+        accepted: false,
+        reason: reason.into(),
+        device_name: String::new(),
+        features: 0,
+        host_public_key: Vec::new(),
+        host_proof: Vec::new(),
+        video_codec: VideoCodec::Unspecified as i32,
+        password_required: true,
     }))
 }
 
@@ -330,6 +362,33 @@ mod tests {
                 assert_eq!(h.device_name, "mac-mini");
                 assert_eq!(h.role, Role::Host as i32);
             }
+            other => panic!("wrong payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connection_password_round_trips() {
+        // with_password attaches the password; empty until set.
+        let plain = hello("web-viewer", Role::Viewer, 0);
+        match plain.payload.clone().unwrap() {
+            pb::envelope::Payload::Hello(h) => assert!(h.password.is_empty()),
+            _ => unreachable!(),
+        }
+        let env = decode(&encode(&with_password(plain, "taco"))).unwrap();
+        match env.payload.unwrap() {
+            pb::envelope::Payload::Hello(h) => assert_eq!(h.password, "taco"),
+            other => panic!("wrong payload: {other:?}"),
+        }
+
+        // hello_ack_password_required sets the distinguishing flag; reject doesn't.
+        let req = decode(&encode(&hello_ack_password_required("need password"))).unwrap();
+        match req.payload.unwrap() {
+            pb::envelope::Payload::HelloAck(a) => assert!(a.password_required && !a.accepted),
+            other => panic!("wrong payload: {other:?}"),
+        }
+        let rej = decode(&encode(&hello_ack_reject("bad version"))).unwrap();
+        match rej.payload.unwrap() {
+            pb::envelope::Payload::HelloAck(a) => assert!(!a.password_required),
             other => panic!("wrong payload: {other:?}"),
         }
     }
