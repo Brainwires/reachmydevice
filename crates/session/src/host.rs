@@ -552,6 +552,21 @@ fn spawn_encode_thread(
 
 /// Handle one control-channel message from the viewer.
 #[allow(clippy::too_many_arguments)]
+/// The authorization gate, as a pure predicate so a regression test can pin the
+/// exact allowlist. Before a viewer is authorized (its `Hello` accepted), ONLY a
+/// `Hello` may be processed; every other control message — input injection, file
+/// transfer, clipboard, keyframe, display switch, ping — must be dropped. This is
+/// what actually enforces `require_authorization`; the HelloAck alone gates
+/// nothing. A future refactor that widens this (e.g. lets `Input` through before
+/// authorization) re-opens the pre-auth-RCE hole, so it is tested exhaustively.
+fn authorization_permits(payload: &Payload, authorized: bool) -> bool {
+    authorized || matches!(payload, Payload::Hello(_))
+}
+
+// This dispatcher legitimately depends on the whole session's control surface
+// (transport, injector, clipboard, files, capture, access, identity, codec); the
+// authorization gate added one more. Splitting it would only scatter that state.
+#[allow(clippy::too_many_arguments)]
 fn handle_control(
     bytes: &[u8],
     transport: &Transport,
@@ -583,7 +598,7 @@ fn handle_control(
     // display switch, keyframe/ping) is dropped until an accepted Hello sets
     // `authorized`. This is what actually enforces `require_authorization` — the
     // HelloAck alone gates nothing.
-    if !matches!(payload, Payload::Hello(_)) && !authorized.load(Ordering::Relaxed) {
+    if !authorization_permits(&payload, authorized.load(Ordering::Relaxed)) {
         tracing::debug!("dropping control message from unauthorized viewer");
         return;
     }
@@ -672,10 +687,54 @@ fn log_file_event(ev: FileEvent) {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_codec_compatible, AccessControl};
+    use super::{authorization_permits, check_codec_compatible, AccessControl};
     use crate::identity::DeviceIdentity;
     use rmd_protocol as proto;
+    use rmd_protocol::pb::envelope::Payload;
     use std::collections::HashSet;
+
+    fn hello_payload() -> Payload {
+        proto::hello("v", proto::Role::Viewer, 0).payload.unwrap()
+    }
+
+    /// Regression guard for the pre-authorization RCE hole: before a viewer is
+    /// authorized, EVERY control message except `Hello` must be dropped. If a
+    /// refactor lets any of these through pre-auth, this fails.
+    #[test]
+    fn authorization_gate_drops_every_non_hello_before_auth() {
+        use proto::pb;
+        // The sensitive control surface a peer could abuse before authorizing:
+        // input injection, clipboard, file transfer, keyframe, display switch,
+        // ping, view-only, audio. None may be processed while unauthorized.
+        let gated: Vec<Payload> = vec![
+            Payload::Input(pb::InputEvent::default()),
+            Payload::Clipboard(pb::ClipboardUpdate::default()),
+            Payload::FileOffer(pb::FileOffer::default()),
+            Payload::FileChunk(pb::FileChunk::default()),
+            Payload::SelectDisplay(pb::SelectDisplay::default()),
+            Payload::RequestKeyframe(pb::RequestKeyframe::default()),
+            Payload::Ping(pb::Ping::default()),
+            Payload::ViewOnly(pb::ViewOnly::default()),
+            Payload::Audio(pb::AudioFrame::default()),
+        ];
+        for p in &gated {
+            assert!(
+                !authorization_permits(p, false),
+                "{p:?} must be dropped before authorization"
+            );
+            // Once authorized, the same messages are allowed through.
+            assert!(
+                authorization_permits(p, true),
+                "{p:?} must pass once authorized"
+            );
+        }
+
+        // A `Hello` is the ONLY message allowed pre-authorization (it's how a
+        // viewer authorizes in the first place); it also passes post-auth.
+        let hello = hello_payload();
+        assert!(authorization_permits(&hello, false), "Hello must pass pre-auth");
+        assert!(authorization_permits(&hello, true), "Hello must pass post-auth");
+    }
 
     /// Build a viewer `Hello` carrying an access proof bound to `binding`.
     fn authed_hello(id: &DeviceIdentity, binding: &[u8]) -> proto::Hello {
@@ -742,6 +801,126 @@ mod tests {
             _ => unreachable!(),
         };
         assert!(access.authorize(&bare, b"").is_ok());
+    }
+
+    /// A synthetic BGRA frame with a moving gradient (mirrors `tests/pipeline.rs`).
+    fn synthetic_bgra(w: u32, h: u32, seq: u64) -> Vec<u8> {
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        let o = (seq as u32).wrapping_mul(7);
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                buf[i] = ((x + o) % 256) as u8;
+                buf[i + 1] = ((y + o) % 256) as u8;
+                buf[i + 2] = ((x + y + o) % 256) as u8;
+                buf[i + 3] = 255;
+            }
+        }
+        buf
+    }
+
+    /// The stream half of the authorization gate: the real `spawn_encode_thread`
+    /// must send NO video to a connected-but-unauthorized peer, and start streaming
+    /// only once `authorized` flips true. Runs the actual encoder over a real
+    /// loopback WebRTC transport (no screen/OS permissions needed).
+    #[test]
+    fn encode_thread_streams_no_video_until_authorized() {
+        use super::{spawn_encode_thread, HostConfig};
+        use rmd_capture::{Frame, PixelFormat};
+        use rmd_transport::{
+            Transport, TransportConfig, TransportEvent, TransportRole,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        fn drain(t: &Transport) -> Vec<TransportEvent> {
+            let mut out = Vec::new();
+            while let Some(ev) = t.try_event() {
+                out.push(ev);
+            }
+            out
+        }
+        // Bridge signaling both ways and tally any video the viewer receives.
+        fn pump(host: &Transport, viewer: &Transport, hc: &mut bool, vc: &mut bool, video: &mut usize) {
+            for ev in drain(host) {
+                match ev {
+                    TransportEvent::LocalSignal(s) => viewer.feed_signal(s),
+                    TransportEvent::Connected => *hc = true,
+                    _ => {}
+                }
+            }
+            for ev in drain(viewer) {
+                match ev {
+                    TransportEvent::LocalSignal(s) => host.feed_signal(s),
+                    TransportEvent::Connected => *vc = true,
+                    TransportEvent::Video { .. } => *video += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        let (w, h) = (320u32, 240u32);
+        let mk = |role| {
+            Transport::spawn(TransportConfig {
+                role,
+                ice_servers: Vec::new(),
+                bind_addr: "127.0.0.1:0".parse().unwrap(),
+                video_bitrate_bps: 1_500_000,
+                video_codec: Default::default(),
+            })
+            .expect("transport")
+        };
+        let host = mk(TransportRole::Host);
+        let viewer = mk(TransportRole::Viewer);
+
+        let (mut hc, mut vc, mut video) = (false, false, 0usize);
+        let connect_deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < connect_deadline && !(hc && vc) {
+            pump(&host, &viewer, &mut hc, &mut vc, &mut video);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(hc && vc, "peers did not connect");
+
+        // Spawn the REAL encode thread, initially unauthorized.
+        let cfg = HostConfig { width: w, height: h, fps: 30, ..Default::default() };
+        let authorized = Arc::new(AtomicBool::new(false));
+        let force_keyframe = Arc::new(AtomicBool::new(true));
+        let (frame_tx, frame_rx) = mpsc::channel::<Frame>();
+        spawn_encode_thread(&cfg, host.sender(), force_keyframe, authorized.clone(), frame_rx)
+            .expect("encode thread");
+
+        let mk_frame = |seq: u64| Frame {
+            width: w,
+            height: h,
+            bytes_per_row: w * 4,
+            format: PixelFormat::Bgra,
+            data: synthetic_bgra(w, h, seq).into(),
+            capture_ts_micros: seq * 33_000,
+        };
+
+        // Phase 1 — UNAUTHORIZED: feed frames for ~2s; the peer must get zero video.
+        let mut seq = 0u64;
+        let unauth_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < unauth_deadline {
+            frame_tx.send(mk_frame(seq)).unwrap();
+            seq += 1;
+            pump(&host, &viewer, &mut hc, &mut vc, &mut video);
+            std::thread::sleep(Duration::from_millis(33));
+        }
+        assert_eq!(video, 0, "video leaked to an UNAUTHORIZED peer");
+
+        // Phase 2 — AUTHORIZE: the same encoder must now stream to the peer.
+        authorized.store(true, Ordering::Relaxed);
+        let auth_deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < auth_deadline && video == 0 {
+            frame_tx.send(mk_frame(seq)).unwrap();
+            seq += 1;
+            pump(&host, &viewer, &mut hc, &mut vc, &mut video);
+            std::thread::sleep(Duration::from_millis(33));
+        }
+        assert!(video > 0, "authorized peer never received video");
     }
 
     fn hello_with_codecs(codecs: Vec<i32>) -> proto::Hello {
