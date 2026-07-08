@@ -18,3 +18,7 @@ minisign.key
 
 # OS cruft
 .DS_Store
+
+# Local agent instructions — references private deploy infra; keep out of the
+# public repo. Present on the maintainer's machine only.
+CLAUDE.md
