@@ -88,6 +88,7 @@ fn connect_two_peers_through_real_rendezvous() {
                 bind_addr: "127.0.0.1:0".parse().unwrap(),
                 database_url: db_url,
                 allow_open_registration: true,
+                admin_token: None,
                 turn: None,
             };
             let state = init_state(cfg).await.unwrap();

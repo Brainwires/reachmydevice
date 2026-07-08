@@ -60,27 +60,26 @@ pub struct DeviceRow {
 // --- handlers --------------------------------------------------------------
 
 /// `POST /api/register` — create a new account.
+///
+/// The **first** account always bootstraps (an empty server is unusable
+/// otherwise); once any user exists, new sign-ups require the runtime
+/// `open_registration` setting to be on. The check + insert is a single atomic
+/// statement so concurrent first-account requests can't both slip through the
+/// bootstrap window.
 pub async fn register_user(
     State(state): State<AppState>,
     Json(body): Json<RegisterUser>,
 ) -> AppResult<Json<serde_json::Value>> {
-    if !state.config.allow_open_registration {
-        return Err(AppError::RegistrationClosed);
-    }
     if body.username.trim().is_empty() || body.password.len() < 8 {
         return Err(AppError::BadRequest(
             "username required; password must be at least 8 chars".into(),
         ));
     }
+    let open = registration_open(&state).await?;
     let hash = auth::hash_password(&body.password).map_err(AppError::Internal)?;
-    let res =
-        sqlx::query("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)")
-            .bind(&body.username)
-            .bind(&hash)
-            .bind(now_unix())
-            .execute(&state.pool)
-            .await;
-    match res {
+    match crate::db::create_user_if_allowed(&state.pool, &body.username, &hash, open).await {
+        // No row inserted → users exist and signup is closed.
+        Ok(0) => Err(AppError::RegistrationClosed),
         Ok(_) => Ok(Json(serde_json::json!({ "status": "created" }))),
         // UNIQUE violation → username taken.
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
@@ -88,6 +87,44 @@ pub async fn register_user(
         }
         Err(e) => Err(AppError::Db(e)),
     }
+}
+
+/// Current runtime value of the open-registration flag: the DB `settings` row,
+/// falling back to the env-seeded config default if the row is somehow absent.
+async fn registration_open(state: &AppState) -> AppResult<bool> {
+    match crate::db::get_setting(&state.pool, crate::db::SETTING_OPEN_REGISTRATION).await? {
+        Some(v) => Ok(crate::db::parse_bool(&v)),
+        None => Ok(state.config.allow_open_registration),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetRegistration {
+    enabled: bool,
+}
+
+/// `GET /api/registration` — public: is new-account signup currently open?
+pub async fn get_registration(
+    State(state): State<AppState>,
+) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(serde_json::json!({ "open": registration_open(&state).await? })))
+}
+
+/// `POST /api/admin/registration` — flip signup open/closed. Admin bearer token.
+pub async fn set_registration(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SetRegistration>,
+) -> AppResult<Json<serde_json::Value>> {
+    require_admin(&state, &headers)?;
+    crate::db::set_setting(
+        &state.pool,
+        crate::db::SETTING_OPEN_REGISTRATION,
+        crate::db::bool_str(body.enabled),
+    )
+    .await?;
+    tracing::info!(open = body.enabled, "open_registration changed via admin API");
+    Ok(Json(serde_json::json!({ "open": body.enabled })))
 }
 
 /// `POST /api/devices` — register/refresh a device and issue a bearer token.
@@ -295,6 +332,38 @@ async fn authenticate_user(state: &AppState, username: &str, password: &str) -> 
             Err(AppError::Unauthorized)
         }
     }
+}
+
+/// Require a valid admin bearer token (`RMD_RZ_ADMIN_TOKEN`). When no admin token
+/// is configured on the server, the admin API is disabled entirely (Unauthorized).
+fn require_admin(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
+    let expected = state
+        .config
+        .admin_token
+        .as_deref()
+        .ok_or(AppError::Unauthorized)?;
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(AppError::Unauthorized)?;
+    if ct_eq(presented.as_bytes(), expected.as_bytes()) {
+        Ok(())
+    } else {
+        Err(AppError::Unauthorized)
+    }
+}
+
+/// Constant-time byte comparison (length may leak; token length is not secret).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Parse an HTTP Basic `Authorization` header into `(username, password)`.

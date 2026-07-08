@@ -30,6 +30,9 @@ pub use db::AppState;
 /// Open + migrate the database and construct shared state.
 pub async fn init_state(cfg: Config) -> anyhow::Result<AppState> {
     let pool = db::connect_and_migrate(&cfg.database_url).await?;
+    // Seed runtime settings (e.g. open_registration) from env defaults on first
+    // boot, without clobbering operator changes.
+    db::seed_settings(&pool, &cfg).await?;
     Ok(AppState {
         pool,
         config: Arc::new(cfg),
@@ -57,6 +60,10 @@ pub fn router(state: AppState) -> Router {
         // The `curl https://reachmy.dev/install.sh | sh` one-liner.
         .route("/install.sh", get(install_script))
         .route("/api/register", post(api::register_user))
+        // Public: whether new-account signup is currently open (for UI + ops).
+        .route("/api/registration", get(api::get_registration))
+        // Admin: flip signup open/closed at runtime (RMD_RZ_ADMIN_TOKEN bearer).
+        .route("/api/admin/registration", post(api::set_registration))
         .route(
             "/api/devices",
             post(api::register_device).get(api::list_devices),

@@ -9,8 +9,12 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     /// SQLite connection URL, e.g. `sqlite:rmd.db?mode=rwc`.
     pub database_url: String,
-    /// Whether new-user registration is open (vs. invite/admin-only).
+    /// Default for the runtime `open_registration` setting, used only to seed the
+    /// DB on first boot (see `db::seed_settings`). The live value is the DB row.
     pub allow_open_registration: bool,
+    /// Bearer token guarding the admin endpoints (e.g. flipping registration).
+    /// `None` disables the admin API entirely (no token → no admin surface).
+    pub admin_token: Option<String>,
     /// TURN configuration (all-or-nothing). When set, `/api/ice` mints ephemeral
     /// coturn credentials so browser/host peers can relay through NAT.
     pub turn: Option<TurnConfig>,
@@ -50,6 +54,11 @@ impl Config {
         let allow_open_registration = std::env::var("RMD_RZ_OPEN_REGISTRATION")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+        // Optional admin bearer token (guards runtime settings changes). Absent →
+        // the admin API is disabled.
+        let admin_token = std::env::var("RMD_RZ_ADMIN_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
         // TURN relay is OFF by default. Enabling it is a deliberate operator
         // decision because relayed media flows through — and uses the bandwidth
         // of — this server. It requires `RMD_TURN_ENABLED=1` **and** a shared
@@ -90,6 +99,7 @@ impl Config {
             bind_addr,
             database_url,
             allow_open_registration,
+            admin_token,
             turn,
         }
     }

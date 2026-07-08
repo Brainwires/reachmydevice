@@ -44,8 +44,23 @@ curl -X POST https://rmd.example.com/api/register \
 ```
 The host and viewer apps register their own device + obtain a token on first run
 (Phase 3 wires the onboarding UI); the token authenticates the signaling
-WebSocket at `wss://rmd.example.com/ws?token=<token>`. Set
-`RMD_RZ_OPEN_REGISTRATION=false` and redeploy once your account exists.
+WebSocket at `wss://rmd.example.com/ws?token=<token>`.
+
+**Registration.** The **first** account always succeeds even with registration
+closed (an empty server must be bootstrappable) — so you do **not** need to force
+`RMD_RZ_OPEN_REGISTRATION=true` to create it; the default (closed) is correct.
+Once any account exists, new sign-ups obey the `open_registration` setting
+(default off). That setting is stored in the DB (seeded from
+`RMD_RZ_OPEN_REGISTRATION` on first boot) and can be flipped at runtime without a
+redeploy, if you set an admin token:
+```sh
+# server: RMD_RZ_ADMIN_TOKEN=<a-strong-secret>
+curl -s https://rmd.example.com/api/registration            # {"open":false}
+curl -X POST https://rmd.example.com/api/admin/registration \
+  -H "authorization: Bearer $RMD_RZ_ADMIN_TOKEN" \
+  -H 'content-type: application/json' -d '{"enabled":true}'  # open it to add users
+```
+Leave `RMD_RZ_ADMIN_TOKEN` unset to disable the admin API entirely.
 
 ## Security posture (hardened defaults)
 - **TLS everywhere** via Caddy/ACME; port 80 is ACME/redirect only.
