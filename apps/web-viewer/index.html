@@ -130,18 +130,16 @@
   #kb-wrap{position:fixed;top:50%;left:50%;width:100vw;height:100vh;
     transform:translate(-50%,-50%);display:flex;align-items:flex-end;justify-content:center;
     pointer-events:none;z-index:60;}
-  /* Rotated views: the keyboard's long axis runs top↔bottom of the phone. Confine
-     it to the window BELOW the header and ABOVE the home-indicator — shrink the
-     long axis by (header + bottom-inset) and bias the centre by half their diff —
-     so it no longer slides under the header and centres between the two ends. */
-  #kb-wrap.rot1,#kb-wrap.rot3{width:calc(100vh - var(--hdr) - var(--sab));height:100vw;
-    top:calc(50% + (var(--hdr) - var(--sab)) / 2);}
+  /* The keyboard box is sized + placed by JS (syncKbToVideo) to exactly overlay the
+     video's RENDERED rect, so it spans the same width the video occupies and sits
+     below the header (never under/over it). These rules give the shared rotate
+     transform + a fallback box before the sync runs. */
+  #kb-wrap.rot1,#kb-wrap.rot3{width:100vh;height:100vw;}
   /* A small symmetric long-axis margin so the 12-key row (which fills 100%) gets a
      little breathing room instead of butting against the ends. */
   #kb-wrap.rot1 #kb,#kb-wrap.rot3 #kb{padding-left:10px;padding-right:10px;}
   #kb-wrap.rot1{transform:translate(-50%,-50%) rotate(90deg);}
-  #kb-wrap.rot2{height:calc(100vh - var(--hdr) - var(--sab));
-    top:calc(50% + (var(--hdr) - var(--sab)) / 2);transform:translate(-50%,-50%) rotate(180deg);}
+  #kb-wrap.rot2{transform:translate(-50%,-50%) rotate(180deg);}
   #kb-wrap.rot3{transform:translate(-50%,-50%) rotate(-90deg);}
   #kb{pointer-events:auto;width:100%;box-sizing:border-box;display:flex;flex-direction:column;
     gap:4px;padding:4px 4px calc(4px + env(safe-area-inset-bottom));
@@ -240,12 +238,37 @@
     // to the visual bottom of the rotated view.
     let rot=0; const rotBtn=$('rotate'); rotBtn.style.display='';
     const kbWrap=$('kb-wrap');
+    // Size + place the keyboard box to exactly overlay the video's RENDERED rect, so
+    // the keys span the same width the video occupies and stay below the header (never
+    // under/over it). Only when rotated; portrait keeps the CSS default (full width,
+    // glued to the screen bottom). offsetWidth/Height are the pre-transform layout
+    // size (the rotate comes from the shared rot class); the rect centre is
+    // rotation-invariant, so centring the box on it overlays the two exactly.
+    const syncKbToVideo=()=>{
+      if(!rot || kbWrap.classList.contains('hidden')){
+        kbWrap.style.width=kbWrap.style.height=kbWrap.style.left=kbWrap.style.top='';
+        return;
+      }
+      const r=vid.getBoundingClientRect();
+      if(!r.width||!r.height) return;
+      kbWrap.style.width=vid.offsetWidth+'px';
+      kbWrap.style.height=vid.offsetHeight+'px';
+      kbWrap.style.left=(r.left+r.width/2)+'px';
+      kbWrap.style.top=(r.top+r.height/2)+'px';
+    };
     const applyRot=()=>{
       for(const el of [vid,kbWrap]){ el.classList.remove('rot1','rot2','rot3'); if(rot) el.classList.add('rot'+rot); }
       vid.dataset.rot=rot;
+      syncKbToVideo();
     };
     rotBtn.onclick=()=>{ rot=(rot+1)%4; applyRot(); };
     applyRot();
+    // Keep the keyboard matched as the video's rendered size changes (stream
+    // resolution, viewport/orientation, address-bar show/hide).
+    if(window.ResizeObserver) new ResizeObserver(syncKbToVideo).observe(vid);
+    window.addEventListener('resize',syncKbToVideo);
+    vid.addEventListener('loadedmetadata',syncKbToVideo);
+    vid.addEventListener('playing',syncKbToVideo);
 
     // Full custom on-screen keyboard. Rendered here (each key sends HID via the
     // WASM layer wired in attach_keyboard), so it rotates with the view — the OS
@@ -337,7 +360,7 @@
     klet.addEventListener('touchmove',e=>{ const t=e.touches[0]; if(t&&tpts.length) trailAdd(t.clientX,t.clientY); },{passive:true});
     // Show/hide the keyboard.
     let kbOpen=false;
-    const setKb=on=>{ kbOpen=on; kbWrap.classList.toggle('hidden',!on); };
+    const setKb=on=>{ kbOpen=on; kbWrap.classList.toggle('hidden',!on); syncKbToVideo(); };
     kbtn.onclick=()=>setKb(!kbOpen);
     // Go fullscreen on the first tap, where the API exists (Android/desktop/iPad)
     // — it needs a user gesture, and the session auto-starts on load. iPhone Safari
