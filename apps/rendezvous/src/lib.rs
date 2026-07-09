@@ -120,10 +120,24 @@ async fn root(headers: HeaderMap) -> axum::response::Response {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if is_apex_host(host) {
-        axum::response::Html(include_str!("landing.html")).into_response()
+        axum::response::Html(landing_html()).into_response()
     } else {
         axum::response::Redirect::temporary("/app/").into_response()
     }
+}
+
+/// The landing-page HTML. If `RMD_LANDING_FILE` is set and readable, it's served
+/// from there (so the page can be updated by swapping a bind-mounted file — no
+/// rebuild, mirroring how `RMD_WEBVIEWER_DIR` hot-swaps `/app`); otherwise the
+/// copy embedded at build time. Read per request — the apex page is low-traffic.
+fn landing_html() -> String {
+    if let Ok(path) = std::env::var("RMD_LANDING_FILE") {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            return contents;
+        }
+        tracing::warn!(%path, "RMD_LANDING_FILE unreadable; using embedded landing page");
+    }
+    include_str!("landing.html").to_string()
 }
 
 /// Whether a `Host` header names the bare apex domain (landing page), as opposed
