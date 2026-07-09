@@ -39,6 +39,85 @@ pub fn key(hid_usage: u32, pressed: bool, modifiers: u32) -> Vec<u8> {
     })))
 }
 
+/// The modifier bit for a special-key-bar modifier name (`ctrl`/`alt`/`super`/
+/// `shift`), matching `rmd_protocol::modifiers`. Unknown names → 0.
+pub fn mod_bit(name: &str) -> u32 {
+    use proto::modifiers;
+    match name {
+        "ctrl" => modifiers::CONTROL,
+        "alt" => modifiers::ALT,
+        "super" | "meta" => modifiers::META,
+        "shift" => modifiers::SHIFT,
+        _ => 0,
+    }
+}
+
+/// Map a typed character (from the mobile soft keyboard's `input`/`beforeinput`
+/// events) to a US-QWERTY HID usage code + whether Shift is required. Covers the
+/// printable ASCII a physical US keyboard produces; other characters → `None`.
+/// (The soft keyboard gives us characters, not `KeyboardEvent.code`, so this is
+/// the only way to translate mobile typing into HID.)
+pub fn char_to_hid(c: char) -> Option<(u32, bool)> {
+    // Letters.
+    if c.is_ascii_lowercase() {
+        return Some((0x04 + (c as u32 - 'a' as u32), false));
+    }
+    if c.is_ascii_uppercase() {
+        return Some((0x04 + (c as u32 - 'A' as u32), true));
+    }
+    // Digit row (unshifted digits, shifted symbols share the same usage).
+    let (usage, shift) = match c {
+        '1' => (0x1E, false),
+        '2' => (0x1F, false),
+        '3' => (0x20, false),
+        '4' => (0x21, false),
+        '5' => (0x22, false),
+        '6' => (0x23, false),
+        '7' => (0x24, false),
+        '8' => (0x25, false),
+        '9' => (0x26, false),
+        '0' => (0x27, false),
+        '!' => (0x1E, true),
+        '@' => (0x1F, true),
+        '#' => (0x20, true),
+        '$' => (0x21, true),
+        '%' => (0x22, true),
+        '^' => (0x23, true),
+        '&' => (0x24, true),
+        '*' => (0x25, true),
+        '(' => (0x26, true),
+        ')' => (0x27, true),
+        // Whitespace + common punctuation.
+        ' ' => (0x2C, false),
+        '\n' | '\r' => (0x28, false), // Enter
+        '\t' => (0x2B, false),        // Tab
+        '-' => (0x2D, false),
+        '_' => (0x2D, true),
+        '=' => (0x2E, false),
+        '+' => (0x2E, true),
+        '[' => (0x2F, false),
+        '{' => (0x2F, true),
+        ']' => (0x30, false),
+        '}' => (0x30, true),
+        '\\' => (0x31, false),
+        '|' => (0x31, true),
+        ';' => (0x33, false),
+        ':' => (0x33, true),
+        '\'' => (0x34, false),
+        '"' => (0x34, true),
+        '`' => (0x35, false),
+        '~' => (0x35, true),
+        ',' => (0x36, false),
+        '<' => (0x36, true),
+        '.' => (0x37, false),
+        '>' => (0x37, true),
+        '/' => (0x38, false),
+        '?' => (0x38, true),
+        _ => return None,
+    };
+    Some((usage, shift))
+}
+
 /// Map a DOM `MouseEvent.button` (0=left,1=middle,2=right) to the protocol enum.
 pub fn dom_button_to_proto(dom_button: i16) -> i32 {
     use rmd_protocol::pb::MouseBtn;

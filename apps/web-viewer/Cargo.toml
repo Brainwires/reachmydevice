@@ -74,6 +74,11 @@ features = [
   "TouchEvent",
   "Touch",
   "TouchList",
+  "InputEvent",
+  "HtmlInputElement",
+  "NodeList",
+  "DomTokenList",
+  "DomStringMap",
   "DomRect",
   "console",
 ]

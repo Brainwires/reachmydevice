@@ -710,6 +710,19 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             let dc = dc.clone();
             let cb = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
                 move |ev: web_sys::KeyboardEvent| {
+                    // The mobile soft keyboard's plain characters are handled by
+                    // `attach_keyboard` (beforeinput) — if this keydown targets the
+                    // hidden capture input and is an unmodified single character,
+                    // skip it here so it isn't sent twice. Special keys
+                    // (Backspace/Enter/arrows…) and modified combos still go through.
+                    if is_kbd_input_target(&ev)
+                        && ev.key().chars().count() == 1
+                        && !ev.ctrl_key()
+                        && !ev.alt_key()
+                        && !ev.meta_key()
+                    {
+                        return;
+                    }
                     if let Some(hid) = input::code_to_hid(&ev.code()) {
                         ev.prevent_default();
                         let mods = input::modifier_mask(
@@ -724,6 +737,170 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 },
             );
             win.add_event_listener_with_callback(event, cb.as_ref().unchecked_ref())
+                .ok();
+            cb.forget();
+        }
+    }
+
+    attach_keyboard(dc);
+}
+
+/// Whether a keyboard event's target is the hidden soft-keyboard capture input.
+fn is_kbd_input_target(ev: &web_sys::KeyboardEvent) -> bool {
+    ev.target()
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+        .map(|el| el.id() == "kbd-input")
+        .unwrap_or(false)
+}
+
+/// Wire the mobile keyboard: the hidden `#kbd-input` (native soft keyboard, via
+/// `beforeinput`) and the on-screen special-key bar `#kbd-bar` (Esc/Tab/modifiers/
+/// arrows/Ctrl-Alt-Del). The bar's modifiers are *sticky*: tap to arm (highlight),
+/// they apply to the next key, then clear. All key output goes to the host as HID
+/// over `dc`, so this composes with the existing physical-keyboard path.
+fn attach_keyboard(dc: &RtcDataChannel) {
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let Some(input_el) = document.get_element_by_id("kbd-input") else {
+        return; // page has no keyboard UI — nothing to wire
+    };
+
+    // Armed sticky modifiers (a `rmd_protocol::modifiers` bitmask).
+    let mods = Rc::new(std::cell::Cell::new(0u32));
+
+    // Clear the armed modifiers and un-highlight their buttons.
+    let clear_mods: Rc<dyn Fn()> = {
+        let mods = mods.clone();
+        let document = document.clone();
+        Rc::new(move || {
+            mods.set(0);
+            if let Ok(list) = document.query_selector_all("#kbd-bar [data-mod]") {
+                for i in 0..list.length() {
+                    if let Some(el) = list
+                        .item(i)
+                        .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                    {
+                        let _ = el.class_list().remove_1("armed");
+                    }
+                }
+            }
+        })
+    };
+
+    // beforeinput on the hidden input: translate typed characters (and the
+    // deletion/newline input-types that mobile keyboards report) into HID. The
+    // soft keyboard gives characters, not key codes, so we map char → HID here.
+    {
+        let dc = dc.clone();
+        let mods = mods.clone();
+        let clear = clear_mods.clone();
+        let cb = Closure::<dyn FnMut(web_sys::InputEvent)>::new(move |ev: web_sys::InputEvent| {
+            let send = |hid: u32, m: u32| {
+                let _ = dc.send_with_u8_array(&input::key(hid, true, m));
+                let _ = dc.send_with_u8_array(&input::key(hid, false, m));
+            };
+            match ev.input_type().as_str() {
+                "insertText" | "insertReplacementText" | "insertCompositionText"
+                | "insertFromPaste" => {
+                    let Some(data) = ev.data() else { return };
+                    let base = mods.get();
+                    for ch in data.chars() {
+                        if let Some((hid, shift)) = input::char_to_hid(ch) {
+                            let m = if shift { base | input::mod_bit("shift") } else { base };
+                            send(hid, m);
+                        }
+                    }
+                    clear();
+                }
+                "insertLineBreak" | "insertParagraph" => {
+                    send(0x28, mods.get()); // Enter
+                    clear();
+                }
+                "deleteContentBackward" | "deleteWordBackward" | "deleteContent" => {
+                    send(0x2A, mods.get()); // Backspace
+                    clear();
+                }
+                _ => {}
+            }
+        });
+        input_el
+            .add_event_listener_with_callback("beforeinput", cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+    }
+    // input: keep the hidden field empty so it never accumulates and each keystroke
+    // passes straight through (no autocorrect batching — desirable for a terminal).
+    {
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+            if let Some(inp) = ev
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+            {
+                inp.set_value("");
+            }
+        });
+        input_el
+            .add_event_listener_with_callback("input", cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+    }
+    // Clear armed modifiers when the keyboard is dismissed (input loses focus).
+    {
+        let clear = clear_mods.clone();
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_ev| clear());
+        input_el
+            .add_event_listener_with_callback("blur", cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+    }
+
+    // Special-key bar: each `.kb` button sends over `dc` on pointerdown. We
+    // preventDefault so focus stays on the hidden input and the OS keyboard doesn't
+    // dismiss. `data-mod` = sticky modifier; `data-combo` = a chord (Ctrl-Alt-Del);
+    // `data-code` = a `KeyboardEvent.code` we already map to HID.
+    if let Ok(btns) = document.query_selector_all("#kbd-bar .kb") {
+        for i in 0..btns.length() {
+            let Some(el) = btns
+                .item(i)
+                .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+            else {
+                continue;
+            };
+            let dc = dc.clone();
+            let mods = mods.clone();
+            let clear = clear_mods.clone();
+            let el_cb = el.clone();
+            let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+                ev.prevent_default(); // keep focus on the hidden input
+                let send_key = |hid: u32, m: u32| {
+                    let _ = dc.send_with_u8_array(&input::key(hid, true, m));
+                    let _ = dc.send_with_u8_array(&input::key(hid, false, m));
+                };
+                if let Some(name) = el_cb.get_attribute("data-mod") {
+                    // Toggle this sticky modifier + its highlight.
+                    let bit = input::mod_bit(&name);
+                    let cur = mods.get();
+                    if cur & bit != 0 {
+                        mods.set(cur & !bit);
+                        let _ = el_cb.class_list().remove_1("armed");
+                    } else {
+                        mods.set(cur | bit);
+                        let _ = el_cb.class_list().add_1("armed");
+                    }
+                } else if let Some(combo) = el_cb.get_attribute("data-combo") {
+                    if combo == "ctrl-alt-del" {
+                        send_key(0x4C, input::mod_bit("ctrl") | input::mod_bit("alt")); // Delete
+                    }
+                    clear();
+                } else if let Some(code) = el_cb.get_attribute("data-code") {
+                    if let Some(hid) = input::code_to_hid(&code) {
+                        send_key(hid, mods.get());
+                    }
+                    clear();
+                }
+            });
+            el.add_event_listener_with_callback("pointerdown", cb.as_ref().unchecked_ref())
                 .ok();
             cb.forget();
         }
