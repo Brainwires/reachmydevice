@@ -5,19 +5,21 @@ How ReachMyDevice ships prebuilt binaries. Two build hosts because **a macOS `.a
 
 | Platform | Artifacts | Built on | Trigger |
 |----------|-----------|----------|---------|
-| **Linux x86_64** | raw binaries, `.tar.gz`, `.deb` (host + rendezvous) | biscuits (Linux) | `bd-webhook` on a `v*` tag push — automatic |
-| **macOS (host arch)** | raw binaries, `.tar.gz`, `.app` + `.dmg` (viewer) | your Mac | run `build-macos.sh` by hand |
+| **macOS x86_64 + arm64** | raw binaries, `.tar.gz`, `.dmg` | a Mac (cross-builds both arches) | its own GitHub webhook, `v*` tag |
+| **Linux x86_64** | raw binaries, `.tar.gz`, `.deb` (host + rendezvous) | biscuits (Linux) | its own GitHub webhook, `v*` tag |
 | **Windows** | — | — | build-from-source only (no Windows build host) |
 
-`build-macos.sh` builds for the arch of the Mac it runs on — an **Intel** Mac
-produces `macos-x86_64`, an **Apple Silicon** Mac produces `macos-arm64`. It only
-ships the arch you can actually run and test. Users on the *other* Mac arch build
-from source until a build host for that arch exists (or run
-`RMD_MAC_ARCH=arm64 build-macos.sh` to cross-build an **untested** arm64
-binary from Intel).
+`build-macos.sh` builds **one** arch (the host's, or `RMD_MAC_ARCH=x86_64|arm64`).
+The decentralized CI (`rmd-ci`'s `build-release.sh`) runs it for **both** arches
+from a single Mac — the Apple SDK ships both `x86_64` and `arm64` slices, so one
+machine covers all macOS users; no separate Apple-Silicon host is needed. (An
+arm64 binary cross-built on Intel can't be *smoke-tested* there, but it builds
+cleanly.)
 
-Both build hosts publish to the **same** GitHub Release (`v<version>`), signed with
-the **same** minisign key, so `install.sh` finds every platform in one place.
+Every build host publishes to the **same** GitHub Release (`v<version>`), signs
+with the **same** minisign key, and writes a per-platform `SHA256SUMS-<slug>`, so
+`install.sh` finds each platform independently. See `../../` note: the automated
+per-host webhook build lives in the private `rmd-ci` repo.
 
 ## Files
 

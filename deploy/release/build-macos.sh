@@ -51,7 +51,10 @@ git submodule update --init --recursive >/dev/null 2>&1 || true
 reset_dist
 
 # --- 1. Compile ------------------------------------------------------------
-log "Building release binaries (${BINS[*]})"
+log "Building release binaries (${BINS[*]}) for $TARGET"
+# Ensure the target toolchain is present — this is what lets one Mac cross-build
+# the *other* arch (the Apple SDK ships both x86_64 and arm64 slices).
+rustup target add "$TARGET" >/dev/null 2>&1 || true
 PKGARGS=(); for b in "${BINS[@]}"; do PKGARGS+=(-p "$b"); done
 cargo build --release --target "$TARGET" "${PKGARGS[@]}"
 BINDIR="target/$TARGET/release"
