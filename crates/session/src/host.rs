@@ -527,7 +527,23 @@ fn spawn_encode_thread(
                     return;
                 }
             };
-            while let Ok(frame) = frame_rx.recv() {
+            while let Ok(mut frame) = frame_rx.recv() {
+                // Keep-latest: if we fell behind (encoding slower than capture, or a
+                // slow link backing the pipeline up), skip straight to the newest
+                // captured frame and drop the stale ones. The capture→encode channel
+                // is unbounded and FIFO, so without this the encoder perpetually
+                // works on old frames and latency grows without bound ("minutes
+                // behind"). A screen share only ever wants the freshest frame;
+                // dropping *raw* frames is safe (unlike dropping encoded P-frames,
+                // which would corrupt the stream) — it just lowers the effective FPS.
+                let mut dropped = 0u32;
+                while let Ok(newer) = frame_rx.try_recv() {
+                    frame = newer;
+                    dropped += 1;
+                }
+                if dropped > 0 {
+                    tracing::trace!(dropped, "encode: dropped stale frames to stay live");
+                }
                 // Only encode/send once the viewer is authorized (never stream the
                 // screen to an unauthorized peer; also avoids RTP before SRTP is up
                 // and saves CPU when idle).
