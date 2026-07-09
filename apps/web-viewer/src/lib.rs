@@ -28,8 +28,8 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{
     HtmlCanvasElement, HtmlVideoElement, MediaStream, MessageEvent, MouseEvent, RtcConfiguration,
     RtcDataChannel, RtcDataChannelEvent, RtcIceCandidateInit, RtcPeerConnection,
-    RtcPeerConnectionIceEvent, RtcSdpType, RtcSessionDescriptionInit, RtcTrackEvent, Response,
-    TouchEvent, WheelEvent,
+    RtcPeerConnectionIceEvent, RtcRtpReceiver, RtcSdpType, RtcSessionDescriptionInit, RtcTrackEvent,
+    Response, TouchEvent, WheelEvent,
 };
 
 /// Runtime configuration, from URL query params on the page:
@@ -132,6 +132,9 @@ struct Session {
     /// of stalling at "connected" with no video (the host won't stream until
     /// authorized).
     password: Rc<RefCell<Option<String>>>,
+    /// `setInterval` handle for the live-latency monitor (see
+    /// [`start_latency_control`]); cleared on teardown so it doesn't outlive the pc.
+    latency_timer: RefCell<Option<i32>>,
 }
 
 impl Session {
@@ -143,6 +146,12 @@ impl Session {
         self.pc.set_ontrack(None);
         self.pc.set_onicecandidate(None);
         self.pc.set_ondatachannel(None);
+        if let Some(id) = self.latency_timer.borrow_mut().take() {
+            if let Some(w) = web_sys::window() {
+                w.clear_interval_with_handle(id);
+            }
+        }
+        self.video.set_playback_rate(1.0);
         self.pc.close();
         self.relay.close();
     }
@@ -304,6 +313,7 @@ async fn connect(app: Rc<App>) {
         video: app.video.clone(),
         hello_sent: RefCell::new(false),
         password: app.password.clone(),
+        latency_timer: RefCell::new(None),
     });
 
     wire_pc_callbacks(&session, &app);
@@ -336,6 +346,104 @@ fn schedule_reconnect(app: Rc<App>) {
     }
 }
 
+/// Pin video playback to the live edge. WebRTC playout latency creeps up over a
+/// session — a network burst, or the phone being backgrounded and resumed, leaves
+/// the jitter buffer full — and the browser doesn't reliably drain it, so the view
+/// falls behind "live". We (1) ask the receiver to keep its buffer minimal, and
+/// (2) sample the jitter-buffer delay once a second and, when it grows, play a
+/// touch faster to *drain* the backlog and catch up — never dropping frames. The
+/// hint is re-asserted every tick, so a background→resume self-heals within a second.
+fn start_latency_control(session: &Rc<Session>, receiver: RtcRtpReceiver) {
+    apply_low_latency_hints(&receiver);
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let pc = session.pc.clone();
+    let video = session.video.clone();
+    // Previous cumulative (jitterBufferDelay, jitterBufferEmittedCount) so we can
+    // derive the delay over just the last interval, not the lifetime average.
+    let prev = Rc::new(RefCell::new((0.0_f64, 0.0_f64)));
+    let cb = Closure::<dyn FnMut()>::new(move || {
+        apply_low_latency_hints(&receiver);
+        let pc = pc.clone();
+        let video = video.clone();
+        let prev = prev.clone();
+        spawn_local(async move {
+            let Ok(stats) = JsFuture::from(pc.get_stats()).await else {
+                return;
+            };
+            let Some((jbd, jbe)) = inbound_video_jitter_totals(&stats) else {
+                return;
+            };
+            let (pjbd, pjbe) = *prev.borrow();
+            *prev.borrow_mut() = (jbd, jbe);
+            let emitted = jbe - pjbe;
+            if emitted <= 0.0 {
+                return; // no new frames this interval (stalled / paused)
+            }
+            let delay = (jbd - pjbd) / emitted; // avg playout delay, seconds
+            // >0.30s behind → drain at 1.25×; ease back to 1× once we're near live.
+            let target = if delay > 0.30 {
+                1.25
+            } else if delay < 0.12 {
+                1.0
+            } else {
+                video.playback_rate()
+            };
+            if (video.playback_rate() - target).abs() > 0.01 {
+                video.set_playback_rate(target);
+            }
+        });
+    });
+    if let Ok(id) = window
+        .set_interval_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), 1000)
+    {
+        *session.latency_timer.borrow_mut() = Some(id);
+    }
+    cb.forget();
+}
+
+/// Ask the receiver to keep its playout/jitter buffer as small as possible. Two
+/// property names for two eras: `playoutDelayHint` (seconds, Chrome) and the spec
+/// `jitterBufferTarget` (milliseconds, Chrome 114+ / Safari 17+). Set both; whichever
+/// the browser doesn't know is ignored.
+fn apply_low_latency_hints(receiver: &RtcRtpReceiver) {
+    let r: &JsValue = receiver.as_ref();
+    let _ = js_sys::Reflect::set(
+        r,
+        &JsValue::from_str("playoutDelayHint"),
+        &JsValue::from_f64(0.0),
+    );
+    let _ = js_sys::Reflect::set(
+        r,
+        &JsValue::from_str("jitterBufferTarget"),
+        &JsValue::from_f64(0.0),
+    );
+}
+
+/// Cumulative `(jitterBufferDelay, jitterBufferEmittedCount)` of the inbound video
+/// track from a `getStats` report. The caller diffs successive samples to get the
+/// recent playout delay. `None` if the report has no inbound video yet.
+fn inbound_video_jitter_totals(report: &JsValue) -> Option<(f64, f64)> {
+    let iter = js_sys::try_iter(report).ok().flatten()?;
+    for entry in iter {
+        let Ok(entry) = entry else { continue };
+        // Each entry is [id, statsObject]; we want the object at index 1.
+        let val = js_sys::Array::from(&entry).get(1);
+        let field = |name: &str| js_sys::Reflect::get(&val, &JsValue::from_str(name)).ok();
+        if field("type").and_then(|v| v.as_string()).as_deref() != Some("inbound-rtp") {
+            continue;
+        }
+        if field("kind").and_then(|v| v.as_string()).as_deref() != Some("video") {
+            continue;
+        }
+        let jbd = field("jitterBufferDelay").and_then(|v| v.as_f64())?;
+        let jbe = field("jitterBufferEmittedCount").and_then(|v| v.as_f64())?;
+        return Some((jbd, jbe));
+    }
+    None
+}
+
 /// Attach ontrack / onicecandidate / ondatachannel / connectionstatechange.
 fn wire_pc_callbacks(session: &Rc<Session>, app: &Rc<App>) {
     let pc = &session.pc;
@@ -343,12 +451,15 @@ fn wire_pc_callbacks(session: &Rc<Session>, app: &Rc<App>) {
     // Inbound video track → attach the MediaStream to the <video> element.
     {
         let video = session.video.clone();
+        let session = session.clone();
         let cb = Closure::<dyn FnMut(RtcTrackEvent)>::new(move |ev: RtcTrackEvent| {
             let streams = ev.streams();
             if let Some(stream) = streams.get(0).dyn_ref::<MediaStream>() {
                 video.set_src_object(Some(stream));
                 let _ = video.play();
                 set_status("connected");
+                // Keep playback pinned to the live edge (low buffer + catch-up).
+                start_latency_control(&session, ev.receiver());
             }
         });
         pc.set_ontrack(Some(cb.as_ref().unchecked_ref()));
