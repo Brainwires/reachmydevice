@@ -38,11 +38,16 @@
   .brand{display:flex;align-items:center;gap:10px;}
   .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
   #bar{position:fixed;top:0;left:0;right:0;display:flex;gap:10px;align-items:center;
-    padding:8px 12px;background:rgba(15,17,21,.72);backdrop-filter:blur(6px);font-size:13px;z-index:10;
+    /* Keep the toolbar clear of the notch/status bar in fullscreen/PWA mode. */
+    padding:calc(8px + env(safe-area-inset-top,0px)) calc(12px + env(safe-area-inset-right,0px))
+      8px calc(12px + env(safe-area-inset-left,0px));
+    background:rgba(15,17,21,.72);backdrop-filter:blur(6px);font-size:13px;z-index:10;
     transition:opacity .25s;} #bar.idle:not(:hover){opacity:.2;}
   #barStatus{color:var(--muted);} #bar .sp{flex:1;}
 
-  #connect{position:fixed;inset:0;overflow:auto;padding:20px;display:grid;place-items:start center;}
+  #connect{position:fixed;inset:0;overflow:auto;display:grid;place-items:start center;
+    padding:calc(20px + env(safe-area-inset-top,0px)) calc(20px + env(safe-area-inset-right,0px))
+      calc(20px + env(safe-area-inset-bottom,0px)) calc(20px + env(safe-area-inset-left,0px));}
   .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:24px;
     width:100%;max-width:560px;margin:max(4vh,16px) 0;}
   .card h1{font-size:20px;margin:14px 0 4px;} .card .sub{color:var(--muted);margin:0 0 16px;font-size:13.5px;}
