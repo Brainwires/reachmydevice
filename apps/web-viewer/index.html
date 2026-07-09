@@ -111,6 +111,14 @@
   #kb .k:active,#kb .k.press{background:var(--accent);color:#fff;border-color:var(--accent);
     transform:scale(.9);box-shadow:0 0 0 2px rgba(79,140,255,.35);}
   #kb .klayer{display:flex;flex-direction:column;gap:5px;}
+  /* The letter layer owns its touches (tap + swipe); none = no scroll/zoom. */
+  #kb .klet{touch-action:none;}
+  /* Swipe word suggestions (hidden until a swipe produces some). */
+  #kb-suggest{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;}
+  #kb-suggest:empty{display:none;}
+  #kb-suggest .sug{flex:0 1 auto;padding:6px 14px;border-radius:8px;border:1px solid var(--border);
+    background:#1e222b;color:var(--text);font-size:14px;font-weight:600;touch-action:manipulation;}
+  #kb-suggest .sug:active{background:var(--accent);color:#fff;border-color:var(--accent);}
   #kb .ksym{display:none;}
   #kb.sym .klet{display:none;}
   #kb.sym .ksym{display:flex;}
@@ -119,6 +127,7 @@
   @media (prefers-color-scheme: light){
     #kb{background:rgba(244,245,247,.97);border-top-color:#d0d3da;}
     #kb .k{background:#fff;color:#1c1c1e;border-color:#c7cad1;}
+    #kb-suggest .sug{background:#eef0f3;color:#1c1c1e;border-color:#c7cad1;}
   }
   .hidden{display:none!important;}
 </style>
@@ -211,6 +220,8 @@
       return b; };
     const rowEl=specs=>{ const r=document.createElement('div'); r.className='krow';
       specs.forEach(s=>r.appendChild(keyEl(s))); return r; };
+    // Swipe suggestion bar (top): filled by the WASM decoder after a swipe.
+    const sug=document.createElement('div'); sug.id='kb-suggest'; kb.appendChild(sug);
     kb.appendChild(rowEl(KROWS.special));
     const klet=document.createElement('div'); klet.className='klayer klet';
     KROWS.letters.forEach(r=>klet.appendChild(rowEl(r)));

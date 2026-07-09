@@ -77,6 +77,7 @@ features = [
   "InputEvent",
   "HtmlInputElement",
   "Performance",
+  "Node",
   "NodeList",
   "DomTokenList",
   "DomStringMap",

@@ -17,6 +17,7 @@
 
 mod input;
 mod signaling;
+mod swipe;
 
 use signaling::Relay;
 use std::cell::{Cell, RefCell};
@@ -841,9 +842,17 @@ fn attach_keyboard(dc: &RtcDataChannel) {
         if el.get_attribute("data-layer").is_some() {
             continue;
         }
+        // QWERTY letter keys are owned by the swipe/tap handler below (so a swipe
+        // doesn't type its first letter on touchdown); everything else taps here.
+        if el.get_attribute("data-char").is_some()
+            && el.closest(".klet").ok().flatten().is_some()
+        {
+            continue;
+        }
         let dc = dc.clone();
         let mods = mods.clone();
         let clear = clear_mods.clone();
+        let doc = document.clone();
         let el_cb = el.clone();
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
             ev.prevent_default(); // no text selection / double-tap-zoom / synthetic mouse
@@ -872,21 +881,248 @@ fn attach_keyboard(dc: &RtcDataChannel) {
                     send_key(hid, m);
                 }
                 clear();
+                clear_suggestions(&doc);
             } else if let Some(combo) = el_cb.get_attribute("data-combo") {
                 if combo == "ctrl-alt-del" {
                     send_key(0x4C, input::mod_bit("ctrl") | input::mod_bit("alt")); // Delete
                 }
                 clear();
+                clear_suggestions(&doc);
             } else if let Some(code) = el_cb.get_attribute("data-code") {
                 if let Some(hid) = input::code_to_hid(&code) {
                     send_key(hid, mods.get());
                 }
                 clear();
+                clear_suggestions(&doc);
             }
         });
         el.add_event_listener_with_callback("pointerdown", cb.as_ref().unchecked_ref())
             .ok();
         cb.forget();
+    }
+
+    attach_swipe(dc, &document, &mods, &clear_mods);
+}
+
+/// Empty the word-suggestion bar.
+fn clear_suggestions(doc: &web_sys::Document) {
+    if let Some(bar) = doc.get_element_by_id("kb-suggest") {
+        bar.set_inner_html("");
+    }
+}
+
+/// Send a HID key as a press+release with the given modifier bitmask.
+fn kb_send(dc: &RtcDataChannel, hid: u32, mods: u32) {
+    let _ = dc.send_with_u8_array(&input::key(hid, true, mods));
+    let _ = dc.send_with_u8_array(&input::key(hid, false, mods));
+}
+
+/// Type a whole word (lowercase, char→HID) followed by a space.
+fn kb_send_word(dc: &RtcDataChannel, word: &str) {
+    for c in word.chars() {
+        if let Some((hid, shift)) = input::char_to_hid(c) {
+            kb_send(dc, hid, if shift { input::mod_bit("shift") } else { 0 });
+        }
+    }
+    kb_send(dc, 0x2C, 0); // trailing space
+}
+
+/// Read the 26 letter-key centres (client px, so rotation is baked in), indexed
+/// by `letter - 'a'`. `None` if the QWERTY layer isn't rendered/ready.
+fn read_letter_centers(doc: &web_sys::Document) -> Option<[(f64, f64); 26]> {
+    let list = doc.query_selector_all("#kb .klet [data-char]").ok()?;
+    let mut xy = [(f64::NAN, f64::NAN); 26];
+    let mut filled = 0;
+    for i in 0..list.length() {
+        let Some(el) = list.item(i).and_then(|n| n.dyn_into::<web_sys::Element>().ok()) else {
+            continue;
+        };
+        let Some(b) = el.get_attribute("data-char").and_then(|s| s.bytes().next()) else {
+            continue;
+        };
+        if !b.is_ascii_lowercase() {
+            continue;
+        }
+        let r = el.get_bounding_client_rect();
+        xy[(b - b'a') as usize] = (r.left() + r.width() / 2.0, r.top() + r.height() / 2.0);
+        filled += 1;
+    }
+    if filled < 20 {
+        return None; // keyboard not laid out yet
+    }
+    for e in xy.iter_mut() {
+        if e.0.is_nan() {
+            *e = (0.0, 0.0);
+        }
+    }
+    Some(xy)
+}
+
+/// Swipe (word-gesture) + tap input on the QWERTY layer. A stationary touch on a
+/// letter types it; a drag across letters is decoded to a word (SHARK²-style, see
+/// `swipe`), typed with a trailing space, and the top candidates are offered in
+/// `#kb-suggest` — tapping one replaces the last word.
+fn attach_swipe(
+    dc: &RtcDataChannel,
+    document: &web_sys::Document,
+    mods: &Rc<Cell<u32>>,
+    clear_mods: &Rc<dyn Fn()>,
+) {
+    let Ok(Some(klet)) = document.query_selector(".klet") else {
+        return;
+    };
+    let decoder = Rc::new(swipe::SwipeDecoder::new());
+    let path: Rc<RefCell<Vec<(f64, f64)>>> = Rc::new(RefCell::new(Vec::new()));
+    let tap_char: Rc<Cell<Option<char>>> = Rc::new(Cell::new(None));
+    let last_word_len = Rc::new(Cell::new(0usize)); // chars+space of the last inserted word
+
+    // touchstart: begin tracking only if the finger lands on a letter key.
+    {
+        let path = path.clone();
+        let tap_char = tap_char.clone();
+        let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
+            let ch = ev
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+                .and_then(|e| e.closest("[data-char]").ok().flatten())
+                .and_then(|e| e.get_attribute("data-char"))
+                .and_then(|s| s.chars().next());
+            match ch {
+                Some(c) => {
+                    ev.prevent_default();
+                    tap_char.set(Some(c));
+                    let mut p = path.borrow_mut();
+                    p.clear();
+                    if let Some(t) = ev.touches().get(0) {
+                        p.push((t.client_x() as f64, t.client_y() as f64));
+                    }
+                }
+                None => tap_char.set(None), // e.g. shift/backspace — let the tap handler above run
+            }
+        });
+        klet.add_event_listener_with_callback("touchstart", cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+    }
+    // touchmove: accumulate the path while tracking a letter gesture.
+    {
+        let path = path.clone();
+        let tap_char = tap_char.clone();
+        let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
+            if tap_char.get().is_none() {
+                return;
+            }
+            ev.prevent_default();
+            if let Some(t) = ev.touches().get(0) {
+                path.borrow_mut().push((t.client_x() as f64, t.client_y() as f64));
+            }
+        });
+        klet.add_event_listener_with_callback("touchmove", cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+    }
+    // touchend: classify tap vs swipe and act.
+    {
+        let dc = dc.clone();
+        let document = document.clone();
+        let mods = mods.clone();
+        let clear = clear_mods.clone();
+        let decoder = decoder.clone();
+        let path = path.clone();
+        let tap_char = tap_char.clone();
+        let last_word_len = last_word_len.clone();
+        let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
+            let Some(start_char) = tap_char.replace(None) else {
+                return; // not a letter gesture
+            };
+            ev.prevent_default();
+            let pts = std::mem::take(&mut *path.borrow_mut());
+            let Some(centers) = read_letter_centers(&document) else {
+                return;
+            };
+
+            // Distinct keys crossed + arc length distinguish a swipe from a tap.
+            let key_w = {
+                let q = centers[(b'q' - b'a') as usize];
+                let w = centers[(b'w' - b'a') as usize];
+                ((q.0 - w.0).powi(2) + (q.1 - w.1).powi(2)).sqrt().max(20.0)
+            };
+            let arc: f64 = pts
+                .windows(2)
+                .map(|w| ((w[0].0 - w[1].0).powi(2) + (w[0].1 - w[1].1).powi(2)).sqrt())
+                .sum();
+            let mut distinct = 0u32;
+            let mut last = 255u8;
+            for &p in &pts {
+                let k = swipe::nearest_letter(p, &centers);
+                if k != last {
+                    distinct += 1;
+                    last = k;
+                }
+            }
+            let is_swipe = distinct >= 2 && arc > key_w * 1.2;
+
+            if is_swipe {
+                let words = decoder.decode(&pts, &centers, 3);
+                if let Some(&best) = words.first() {
+                    kb_send_word(&dc, best);
+                    last_word_len.set(best.len() + 1);
+                    show_suggestions(&dc, &document, &words, &last_word_len);
+                }
+                clear(); // a completed word clears any armed modifier
+            } else {
+                // Tap: type the letter that was pressed, honouring sticky modifiers.
+                if let Some((hid, shift)) = input::char_to_hid(start_char) {
+                    let m = if shift {
+                        mods.get() | input::mod_bit("shift")
+                    } else {
+                        mods.get()
+                    };
+                    kb_send(&dc, hid, m);
+                }
+                clear();
+                clear_suggestions(&document);
+            }
+        });
+        klet.add_event_listener_with_callback("touchend", cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+    }
+}
+
+/// Populate `#kb-suggest` with the candidate words. Tapping one replaces the last
+/// inserted word (backspace its chars+space, type the new word+space).
+fn show_suggestions(
+    dc: &RtcDataChannel,
+    document: &web_sys::Document,
+    words: &[&str],
+    last_word_len: &Rc<Cell<usize>>,
+) {
+    let Some(bar) = document.get_element_by_id("kb-suggest") else {
+        return;
+    };
+    bar.set_inner_html("");
+    for &w in words {
+        let Ok(btn) = document.create_element("button") else {
+            continue;
+        };
+        btn.set_class_name("sug");
+        btn.set_text_content(Some(w));
+        let dc = dc.clone();
+        let word = w.to_string();
+        let lwl = last_word_len.clone();
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+            ev.prevent_default();
+            for _ in 0..lwl.get() {
+                kb_send(&dc, 0x2A, 0); // backspace the previously inserted word + space
+            }
+            kb_send_word(&dc, &word);
+            lwl.set(word.len() + 1);
+        });
+        btn.add_event_listener_with_callback("pointerdown", cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+        let _ = bar.append_child(&btn);
     }
 }
 
