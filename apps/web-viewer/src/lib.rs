@@ -522,39 +522,58 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             .ok();
         cb.forget();
     }
-    // Touch = trackpad semantics (a tap does NOT jump the cursor):
+    // Touch = trackpad semantics, branching on the current finger count. A drag
+    // moves the cursor by a RELATIVE delta (a comparable distance) — it does NOT
+    // jump the cursor to the point under the finger; a tap clicks in place:
     //   • one-finger tap        → LEFT-click at the cursor's current location
     //   • two-finger tap        → RIGHT-click at the cursor's current location
-    //   • one-finger press+drag → move the cursor (hover; tooltips, hover states),
-    //                             no click on release
-    // Only a drag moves the cursor; a tap clicks wherever the last drag left it.
-    // The host clicks AT the coords it's sent, so the tap replays the last known
-    // position (`last`) instead of the tap point. We handle touch explicitly and
-    // preventDefault so the browser neither scrolls nor double-fires as a mouse.
+    //   • one-finger press+drag → move the cursor by the finger's delta (hover)
+    //   • three-finger swipe    → wheel scroll (all four directions, content
+    //                             follows the fingers)
+    // The host moves/clicks AT the coords it's sent (absolute), so we keep a
+    // virtual cursor here, add each finger delta into it (clamped to [0,1]), and
+    // send that — never the raw finger point. The move delta is taken through
+    // `norm`, whose origin cancels in the difference, so rotation + scaling are
+    // handled for free. (The very first move establishes position from the seeded
+    // centre; there's no host cursor feedback to sync to.) We track the PRIMARY
+    // touch (`touches[0]`) and reset the delta anchor whenever the finger set
+    // changes, so adding/removing a finger doesn't fling the cursor. preventDefault
+    // stops the browser scrolling or double-firing as a mouse.
     {
         use std::cell::Cell;
+        const SENS: f64 = 1.0; // finger→cursor gain; 1.0 = comparable distance
+        const SCROLL_SENS: f64 = 1.0; // finger px → wheel px, content-follows-finger
         let moved = Rc::new(Cell::new(false)); // did this gesture cross the drag threshold?
-        let start = Rc::new(Cell::new((0.0f64, 0.0f64))); // first-finger client px, for the threshold
-        let last = Rc::new(Cell::new((0.0f64, 0.0f64))); // last cursor pos (normalized) we moved to
-        let has_pos = Rc::new(Cell::new(false)); // have we ever positioned the cursor?
+        let start = Rc::new(Cell::new((0.0f64, 0.0f64))); // first-finger client px (threshold anchor)
+        let prev = Rc::new(Cell::new((0.0f64, 0.0f64))); // previous primary-touch client px (delta anchor)
+        let cursor = Rc::new(Cell::new((0.5f64, 0.5f64))); // virtual cursor, normalized
+        let has_pos = Rc::new(Cell::new(false)); // has the cursor position been established?
         let max_fingers = Rc::new(Cell::new(0u32)); // most fingers down at once this gesture
 
-        // touchstart: record the finger for the drag threshold and the peak finger
-        // count (2 → right-click). Deliberately does NOT move the cursor.
+        // Snapshot the primary touch's client-px position, if any.
+        fn primary(ev: &TouchEvent) -> Option<(f64, f64)> {
+            ev.touches()
+                .get(0)
+                .map(|t| (t.client_x() as f64, t.client_y() as f64))
+        }
+
+        // touchstart: (re)anchor the delta to the primary touch and track the peak
+        // finger count. Does NOT move the cursor.
         {
-            let (moved, start, max_fingers) = (moved.clone(), start.clone(), max_fingers.clone());
+            let (moved, start, prev, max_fingers) =
+                (moved.clone(), start.clone(), prev.clone(), max_fingers.clone());
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
                 ev.prevent_default();
                 let n = ev.touches().length();
                 if n > max_fingers.get() {
                     max_fingers.set(n);
                 }
-                if n == 1 {
-                    let Some(t) = ev.changed_touches().get(0) else {
-                        return;
-                    };
-                    start.set((t.client_x() as f64, t.client_y() as f64));
-                    moved.set(false);
+                if let Some(p) = primary(&ev) {
+                    prev.set(p); // re-anchor so the new finger doesn't fling
+                    if n == 1 {
+                        start.set(p);
+                        moved.set(false);
+                    }
                 }
             });
             video
@@ -562,34 +581,49 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 .ok();
             cb.forget();
         }
-        // touchmove: with one finger past the threshold, move the cursor to follow
-        // it (hover) and mark the gesture a drag so touchend won't click. Two
-        // fingers down never moves the cursor (it's a right-click gesture).
+        // touchmove: branch on the CURRENT finger count — 1 = move cursor by delta,
+        // 3+ = wheel scroll by delta, 2 = nothing (a pending right-click). Any move
+        // past the threshold marks the gesture a drag so touchend won't click.
         {
             let dc = dc.clone();
             let norm = norm.clone();
-            let (moved, start, last, has_pos, max_fingers) = (
+            let (moved, start, prev, cursor, has_pos) = (
                 moved.clone(),
                 start.clone(),
-                last.clone(),
+                prev.clone(),
+                cursor.clone(),
                 has_pos.clone(),
-                max_fingers.clone(),
             );
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
                 ev.prevent_default();
-                let Some(t) = ev.changed_touches().get(0) else {
+                let n = ev.touches().length();
+                let Some((cx, cy)) = primary(&ev) else {
                     return;
                 };
-                let (cx, cy) = (t.client_x() as f64, t.client_y() as f64);
+                let (px, py) = prev.get();
+                prev.set((cx, cy));
                 let (sx, sy) = start.get();
                 if (cx - sx).hypot(cy - sy) > 8.0 {
                     moved.set(true);
                 }
-                if max_fingers.get() <= 1 {
-                    let (x, y) = norm(cx, cy);
-                    last.set((x, y));
+                if n >= 3 {
+                    // Three-finger swipe → wheel scroll. Content follows the
+                    // fingers (drag down → content down), in raw client px.
+                    let (dx, dy) = ((cx - px) * SCROLL_SENS, (cy - py) * SCROLL_SENS);
+                    if dx != 0.0 || dy != 0.0 {
+                        let _ = dc.send_with_u8_array(&input::mouse_scroll(dx, dy));
+                    }
+                } else if n <= 1 {
+                    // Normalized (un-rotated) finger delta: `norm` is affine, so the
+                    // origin cancels and only the displacement survives.
+                    let (nx, ny) = norm(cx, cy);
+                    let (npx, npy) = norm(px, py);
+                    let (mut ux, mut uy) = cursor.get();
+                    ux = (ux + (nx - npx) * SENS).clamp(0.0, 1.0);
+                    uy = (uy + (ny - npy) * SENS).clamp(0.0, 1.0);
+                    cursor.set((ux, uy));
                     has_pos.set(true);
-                    let _ = dc.send_with_u8_array(&input::mouse_move(x, y));
+                    let _ = dc.send_with_u8_array(&input::mouse_move(ux, uy));
                 }
             });
             video
@@ -597,38 +631,45 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 .ok();
             cb.forget();
         }
-        // touchend: act once the LAST finger lifts. A tap (never dragged) clicks —
-        // right button if two fingers were used, else left — at the cursor's
-        // current location (`last`), NOT the tap point. A drag just ends (the hover
-        // already happened). Cold start (no drag yet, so no known cursor position):
-        // fall back to the tap point and adopt it, so the first tap still lands.
+        // touchend: re-anchor the delta while fingers remain; on the LAST lift, a
+        // tap (never dragged) clicks — right for two fingers, left for one, nothing
+        // for three+ — at the virtual cursor, NOT the tap point. A drag/swipe just
+        // ends. Cold start (a tap before any drag → no known cursor): fall back to
+        // the tap point + adopt it.
         {
             let dc = dc.clone();
             let norm = norm.clone();
-            let (moved, last, has_pos, max_fingers) = (
+            let (moved, prev, cursor, has_pos, max_fingers) = (
                 moved.clone(),
-                last.clone(),
+                prev.clone(),
+                cursor.clone(),
                 has_pos.clone(),
                 max_fingers.clone(),
             );
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
                 ev.prevent_default();
-                if ev.touches().length() > 0 {
-                    return; // fingers still down — wait for the last lift
+                if let Some(p) = primary(&ev) {
+                    prev.set(p); // a finger lifted but others remain — re-anchor
+                    return;
                 }
                 let fingers = max_fingers.get();
                 let dragged = moved.get();
                 max_fingers.set(0); // reset for the next gesture
                 if dragged {
-                    return; // it was a drag/hover, not a tap
+                    return; // it was a drag/swipe, not a tap
                 }
-                // DOM button: 0 = left, 2 = right (two-finger tap).
-                let btn = input::dom_button_to_proto(if fingers >= 2 { 2 } else { 0 });
+                // DOM button: 0 = left (one finger), 2 = right (two fingers);
+                // three+ finger taps do nothing.
+                let btn = match fingers {
+                    1 => input::dom_button_to_proto(0),
+                    2 => input::dom_button_to_proto(2),
+                    _ => return,
+                };
                 let (x, y) = if has_pos.get() {
-                    last.get()
+                    cursor.get()
                 } else if let Some(t) = ev.changed_touches().get(0) {
                     let p = norm(t.client_x() as f64, t.client_y() as f64);
-                    last.set(p);
+                    cursor.set(p);
                     has_pos.set(true);
                     p
                 } else {
