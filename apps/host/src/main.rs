@@ -238,9 +238,10 @@ fn main() -> anyhow::Result<()> {
                      rmdd unset <k>       remove a setting\n  \
                      rmdd list            list setting keys (values never printed)\n\n\
                      Settings (via `rmdd set`):\n  \
-                     token      device bearer token (rendezvous mode)\n  \
-                     password   connection password a viewer must enter\n\n\
-                     Env (session):\n  \
+                     rendezvous_url  wss://<host>/ws — enables rendezvous mode\n  \
+                     token           device bearer token (rendezvous mode)\n  \
+                     password        connection password a viewer must enter\n\n\
+                     Env (override the store):\n  \
                      RMD_RENDEZVOUS_URL  wss://<host>/ws (rendezvous signaling)\n  \
                      RMD_NAME            device name (default: hostname)\n  \
                      RMD_CODEC           h264 (default) | av1\n  \
@@ -288,9 +289,15 @@ fn main() -> anyhow::Result<()> {
     });
 
     // Read the rendezvous URL + device token once; both the ICE-server fetch and
-    // the signaling client use them (token comes from the settings store / file /
-    // env, in that order).
-    let rendezvous_url = std::env::var("RMD_RENDEZVOUS_URL").ok();
+    // the signaling client use them. URL + token come from the settings store
+    // first (`rmdd set rendezvous_url … / set token …`), then env, so a bare
+    // `rmdd` works once configured.
+    let rendezvous_url = settings
+        .as_ref()
+        .and_then(|s| s.get(rmd_session::settings::KEY_RENDEZVOUS_URL))
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+        .or_else(|| std::env::var("RMD_RENDEZVOUS_URL").ok());
     let token = match &rendezvous_url {
         Some(_) => Some(read_token(settings.as_ref())?),
         None => None,

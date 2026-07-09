@@ -24,6 +24,9 @@ const NONCE_LEN: usize = 24;
 /// Well-known setting keys.
 pub const KEY_TOKEN: &str = "token";
 pub const KEY_PASSWORD: &str = "password";
+/// Rendezvous signaling WebSocket URL (e.g. `wss://reachmy.dev/ws`). When set,
+/// the host uses rendezvous mode with the stored `token`.
+pub const KEY_RENDEZVOUS_URL: &str = "rendezvous_url";
 
 /// In-memory view of the settings, persisted as one encrypted blob.
 #[derive(Default)]
