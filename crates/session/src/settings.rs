@@ -28,6 +28,14 @@ pub const KEY_PASSWORD: &str = "password";
 /// the host uses rendezvous mode with the stored `token`.
 pub const KEY_RENDEZVOUS_URL: &str = "rendezvous_url";
 
+/// Video encode parameters. Each overrides its `RMD_*` env default when set, so
+/// they can be tuned persistently via `rmdd set <key> <value>` (e.g.
+/// `rmdd set fps 20` on a weak link).
+pub const KEY_FPS: &str = "fps";
+pub const KEY_WIDTH: &str = "width";
+pub const KEY_HEIGHT: &str = "height";
+pub const KEY_BITRATE: &str = "bitrate";
+
 /// In-memory view of the settings, persisted as one encrypted blob.
 #[derive(Default)]
 pub struct SettingsStore {

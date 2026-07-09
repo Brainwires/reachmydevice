@@ -6,7 +6,7 @@
 //! | env | default | meaning |
 //! |-----|---------|---------|
 //! | `RMD_DISPLAY`     | `0`         | display index to capture |
-//! | `RMD_WIDTH/HEIGHT/FPS/BITRATE` | 1920/1080/30/8000000 | encode params |
+//! | `RMD_WIDTH/HEIGHT/FPS/BITRATE` | 1920/1080/30/8000000 | encode params (also `rmdd set width/height/fps/bitrate <v>`, which wins over the env) |
 //! | `RMD_NAME`        | hostname    | this device's name |
 //! | `RMD_ICE`         | (none)      | comma-separated STUN/TURN URLs |
 //! | `RMD_RENDEZVOUS_URL` | (none)   | `wss://host/ws` — use rendezvous if set |
@@ -28,6 +28,21 @@ fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// Resolve a tunable in precedence order: the encrypted settings store
+/// (`rmdd set <skey> …`) first, then the `RMD_*` env var, then the built-in
+/// default. Lets video params be persisted per-host without an env var.
+fn setting_or_env_or<T: std::str::FromStr>(
+    settings: Option<&rmd_session::settings::SettingsStore>,
+    skey: &str,
+    env_key: &str,
+    default: T,
+) -> T {
+    settings
+        .and_then(|s| s.get(skey))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| env_or(env_key, default))
 }
 
 /// Assemble the host's ICE servers: any manual `RMD_ICE` URLs first, then the
@@ -314,12 +329,14 @@ fn main() -> anyhow::Result<()> {
         tracing::info!("connection password required for this host");
     }
 
+    use rmd_session::settings as sset;
+    let sref = settings.as_ref();
     let cfg = HostConfig {
         display_index: env_or("RMD_DISPLAY", 0),
-        width: env_or("RMD_WIDTH", 1920),
-        height: env_or("RMD_HEIGHT", 1080),
-        fps: env_or("RMD_FPS", 30),
-        bitrate_bps: env_or("RMD_BITRATE", 8_000_000),
+        width: setting_or_env_or(sref, sset::KEY_WIDTH, "RMD_WIDTH", 1920),
+        height: setting_or_env_or(sref, sset::KEY_HEIGHT, "RMD_HEIGHT", 1080),
+        fps: setting_or_env_or(sref, sset::KEY_FPS, "RMD_FPS", 30),
+        bitrate_bps: setting_or_env_or(sref, sset::KEY_BITRATE, "RMD_BITRATE", 8_000_000),
         device_name: std::env::var("RMD_NAME").unwrap_or_else(|_| {
             std::env::var("HOSTNAME").unwrap_or_else(|_| "rmd-host".to_string())
         }),
