@@ -125,7 +125,7 @@ fi
 
 # --- 7. Sign + checksum + publish -----------------------------------------
 sign_all
-write_checksums
+write_checksums "SHA256SUMS-macos-$ARCH"
 log "Artifacts in $DIST_DIR:"; ls -la "$DIST_DIR"
 
 publish_release "$VERSION"

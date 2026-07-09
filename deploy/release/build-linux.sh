@@ -105,7 +105,7 @@ fi
 
 # --- 6. Sign + checksum + publish -----------------------------------------
 sign_all
-write_checksums
+write_checksums "SHA256SUMS-linux-$ARCH"
 log "Artifacts in $DIST_DIR:"; ls -la "$DIST_DIR"
 
 publish_release "$VERSION"

@@ -72,16 +72,20 @@ sign_file() {
   warn "neither rsign (rsign2) nor minisign available — skipping signature for $(basename "$f")"
 }
 
-# SHA256SUMS over every file currently in $DIST_DIR (portable across GNU/BSD).
+# Checksums over every file currently in $DIST_DIR (portable across GNU/BSD).
+# The output filename defaults to SHA256SUMS but each build host passes a
+# per-platform name (e.g. SHA256SUMS-macos-x86_64) so independent hosts never
+# clobber each other's checksums on the shared GitHub Release.
 write_checksums() {
+  local name="${1:-SHA256SUMS}"
   ( cd "$DIST_DIR"
     if command -v sha256sum >/dev/null 2>&1; then
-      sha256sum -- * > SHA256SUMS
+      sha256sum -- * > "$name"
     else
-      shasum -a 256 -- * > SHA256SUMS
+      shasum -a 256 -- * > "$name"
     fi
   )
-  sign_file "$DIST_DIR/SHA256SUMS"
+  sign_file "$DIST_DIR/$name"
 }
 
 # Sign every artifact in $DIST_DIR except signatures/checksums themselves.
@@ -89,7 +93,7 @@ sign_all() {
   local f
   for f in "$DIST_DIR"/*; do
     case "$f" in
-      *.minisig|*/SHA256SUMS) continue ;;
+      *.minisig|*/SHA256SUMS|*/SHA256SUMS-*) continue ;;
     esac
     [[ -f "$f" ]] && sign_file "$f"
   done
@@ -109,9 +113,13 @@ publish_release() {
 
   if ! gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
     log "Creating GitHub Release $tag"
+    # Independent build hosts may race to create the release; the loser gets
+    # "already exists". Tolerate it — the upload below is the operation that
+    # matters, and it fails loudly if the release genuinely isn't there.
     gh release create "$tag" --repo "$GH_REPO" \
       --title "ReachMyDevice $tag" \
-      --generate-notes ${RMD_PRERELEASE:+--prerelease}
+      --generate-notes ${RMD_PRERELEASE:+--prerelease} \
+      || log "release create failed (another host likely created it) — continuing"
   else
     log "Release $tag already exists — uploading/replacing assets"
   fi

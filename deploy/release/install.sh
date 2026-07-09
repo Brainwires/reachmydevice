@@ -212,11 +212,18 @@ install_prebuilt() {
     rsign verify -P "$MINISIGN_PUB" -x "$TARBALL.minisig" "$TARBALL" >/dev/null 2>&1 \
       && { verified=signature; say "Verified: rsign2 signature."; } || die "SIGNATURE VERIFICATION FAILED — aborting"
   fi
-  if [ -z "$verified" ] && fetch "$BASE/SHA256SUMS" SHA256SUMS 2>/dev/null; then
-    want="$(grep " $TARBALL\$" SHA256SUMS | awk '{print $1}')"
-    if need sha256sum; then got="$(sha256sum "$TARBALL" | awk '{print $1}')"; else got="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"; fi
-    [ -n "$want" ] && [ "$want" = "$got" ] || die "CHECKSUM MISMATCH — refusing to install"
-    verified=checksum; say "Verified: SHA-256 checksum (published over HTTPS)."
+  if [ -z "$verified" ]; then
+    # Per-platform checksums (SHA256SUMS-<slug>, written independently by each
+    # build host) first; fall back to a legacy combined SHA256SUMS for old releases.
+    sums=""
+    if fetch "$BASE/SHA256SUMS-$SLUG" "SHA256SUMS-$SLUG" 2>/dev/null; then sums="SHA256SUMS-$SLUG"
+    elif fetch "$BASE/SHA256SUMS" SHA256SUMS 2>/dev/null; then sums="SHA256SUMS"; fi
+    if [ -n "$sums" ]; then
+      want="$(grep " $TARBALL\$" "$sums" | awk '{print $1}')"
+      if need sha256sum; then got="$(sha256sum "$TARBALL" | awk '{print $1}')"; else got="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"; fi
+      [ -n "$want" ] && [ "$want" = "$got" ] || die "CHECKSUM MISMATCH — refusing to install"
+      verified=checksum; say "Verified: SHA-256 checksum (published over HTTPS)."
+    fi
   fi
   [ -n "$verified" ] || warn "No signature/checksum available — proceeding on HTTPS trust only."
 
