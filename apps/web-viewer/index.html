@@ -122,7 +122,9 @@
   #kb-wrap{position:fixed;top:50%;left:50%;width:100vw;height:100vh;
     transform:translate(-50%,-50%);display:flex;align-items:flex-end;justify-content:center;
     pointer-events:none;z-index:60;}
-  #kb-wrap.rot1,#kb-wrap.rot3{width:100vh;height:100vw;}
+  /* Rotated (landscape) views: centre the keyboard along the content's top↔bottom
+     axis (physically horizontal) instead of pinning it to the visual-bottom edge. */
+  #kb-wrap.rot1,#kb-wrap.rot3{width:100vh;height:100vw;align-items:center;}
   #kb-wrap.rot1{transform:translate(-50%,-50%) rotate(90deg);}
   #kb-wrap.rot2{transform:translate(-50%,-50%) rotate(180deg);}
   #kb-wrap.rot3{transform:translate(-50%,-50%) rotate(-90deg);}
