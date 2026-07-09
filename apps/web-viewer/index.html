@@ -45,7 +45,7 @@
     transition:opacity .25s;} #bar.idle:not(:hover){opacity:.2;}
   #barStatus{color:var(--muted);} #bar .sp{flex:1;}
 
-  #connect{position:fixed;inset:0;overflow:auto;display:grid;place-items:start center;
+  #connect{position:fixed;inset:0;overflow-x:hidden;overflow-y:auto;display:grid;place-items:start center;
     padding:calc(20px + env(safe-area-inset-top,0px)) calc(20px + env(safe-area-inset-right,0px))
       calc(20px + env(safe-area-inset-bottom,0px)) calc(20px + env(safe-area-inset-left,0px));}
   .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:24px;
@@ -74,6 +74,13 @@
   .pill{font-size:11px;color:var(--muted);border:1px solid var(--border);border-radius:20px;padding:1px 8px;}
   .dot{width:8px;height:8px;border-radius:50%;background:var(--border);flex:0 0 auto;} .dot.on{background:var(--ok);}
   .muted{color:var(--muted);} .foot{color:var(--muted);font-size:12px;margin-top:18px;text-align:center;}
+  /* Phones: stack each device row so the action buttons sit UNDER the description
+     instead of being pushed off-screen to the right. */
+  @media (max-width:520px){
+    .dev{flex-wrap:wrap;align-items:flex-start;}
+    .dev .acts{flex:1 1 100%;justify-content:flex-end;margin-top:10px;}
+    .card{padding:18px;}
+  }
   pre{background:var(--panel2);border:1px solid var(--border);border-radius:9px;padding:12px;
     overflow:auto;font-size:12.5px;} .hint{color:var(--muted);font-size:12.5px;margin-top:8px;}
   .panel{border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:14px;background:#12151c;}
