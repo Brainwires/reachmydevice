@@ -13,8 +13,10 @@ const WORDS_RAW: &str = include_str!("words-en.txt");
 /// Points that both the gesture and each template are resampled to.
 const N: usize = 32;
 /// Weight of the frequency prior relative to the (≈0..1) shape distance. Higher
-/// favours common words; lower trusts the gesture shape more.
-const FREQ_WEIGHT: f64 = 0.35;
+/// favours common words; lower trusts the gesture shape more. Kept low so a clean
+/// gesture for a rare-but-real word (e.g. "pig", rank ~8000) still beats a common
+/// word with a worse-matching shape, instead of being buried by frequency.
+const FREQ_WEIGHT: f64 = 0.12;
 
 pub struct SwipeDecoder {
     /// a–z words (length ≥ 2), in descending frequency — the index is the rank.

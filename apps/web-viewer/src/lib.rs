@@ -1194,7 +1194,7 @@ fn attach_swipe(
             let is_swipe = distinct >= 2 && arc > key_w * 1.2;
 
             if is_swipe {
-                let words = decoder.decode(&pts, &centers, 3);
+                let words = decoder.decode(&pts, &centers, 5);
                 if let Some(&best) = words.first() {
                     kb_send_word(&dc, best);
                     last_word_len.set(best.len() + 1);
