@@ -229,7 +229,6 @@
       specs.forEach(s=>r.appendChild(keyEl(s))); return r; };
     // Swipe suggestion bar (top): filled by the WASM decoder after a swipe.
     const sug=document.createElement('div'); sug.id='kb-suggest'; kb.appendChild(sug);
-    kb.appendChild(rowEl(KROWS.special));
     const klet=document.createElement('div'); klet.className='klayer klet';
     KROWS.letters.forEach(r=>klet.appendChild(rowEl(r)));
     const ksym=document.createElement('div'); ksym.className='klayer ksym';
