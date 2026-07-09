@@ -101,113 +101,145 @@ impl Signaling for RendezvousClient {
     }
 }
 
-/// The async client loop: connect, (optionally) announce, relay both ways.
+/// The async client loop: connect the signaling WebSocket and relay both ways,
+/// **reconnecting with backoff** whenever it drops. A long-lived host's socket
+/// WILL be reset (idle timeout, a Cloudflare/proxy blip, a rendezvous restart);
+/// without this the client thread just exits and the host silently goes dark
+/// (still running, but unreachable — no new viewer can signal it). Relay state
+/// (the host's offer + candidates, the learned peer) is preserved across
+/// reconnects so a (re)announcing viewer still completes the handshake.
 async fn run(
     url: String,
     mut peer: Option<String>,
     mut out_rx: tok_mpsc::UnboundedReceiver<SignalMsg>,
     in_tx: std_mpsc::Sender<SignalMsg>,
 ) -> anyhow::Result<()> {
-    let (ws, _resp) = tokio_tungstenite::connect_async(&url).await?;
-    let (mut write, mut read) = ws.split();
-    tracing::info!("rendezvous connected");
-
-    // Outbound messages we can't address yet (host, before it knows the viewer).
-    let mut pending: Vec<SignalMsg> = Vec::new();
-    // The current offer + its trickled candidates (host side). Replayed to the
-    // viewer whenever it announces via `hello`, so a reconnecting/reloaded viewer
-    // that re-attaches to `/ws` *after* the host emitted its reconnect offer still
-    // receives it — the relay doesn't buffer for a momentarily-offline peer, so
-    // otherwise the offer is lost and the handshake deadlocks.
-    let mut last_offer: Option<SignalMsg> = None;
-    let mut sent_candidates: Vec<SignalMsg> = Vec::new();
+    use std::time::Duration;
 
     // The viewer (which knows the target upfront) re-announces until the host is
-    // online and replies; otherwise an early `hello` sent before the host's socket
-    // registers would be dropped by the relay and the pairing would never form.
+    // online and replies; the host learns the viewer's id from its `hello`.
     let is_viewer = peer.is_some();
-    let mut received_any = false;
-    let mut announce = tokio::time::interval(std::time::Duration::from_millis(500));
+    // State that must survive reconnects (see doc comment).
+    let mut pending: Vec<SignalMsg> = Vec::new();
+    let mut last_offer: Option<SignalMsg> = None;
+    let mut sent_candidates: Vec<SignalMsg> = Vec::new();
+    let mut backoff = Duration::from_secs(1);
+
+    // Why the relay loop stopped.
+    enum Stop {
+        SessionEnded,
+        SocketClosed,
+    }
 
     loop {
-        tokio::select! {
-            // Re-announce presence (viewer only, until we hear back). First tick is immediate.
-            _ = announce.tick(), if is_viewer && !received_any => {
-                if let Some(to) = &peer {
-                    let hello = serde_json::to_string(&Outbound { to, payload: Payload::Hello })?;
-                    write.send(Message::text(hello)).await?;
-                }
+        // (Re)connect + re-authenticate (registers this device's socket again).
+        let ws = match tokio_tungstenite::connect_async(&url).await {
+            Ok((ws, _resp)) => ws,
+            Err(e) => {
+                tracing::warn!(error = %e, "rendezvous connect failed; retrying in {backoff:?}");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+                continue;
             }
-            // Session wants to send a signaling message.
-            maybe = out_rx.recv() => {
-                let Some(msg) = maybe else { break; }; // sender dropped
-                // Cache the latest offer + candidates so we can replay them to a
-                // (re)announcing viewer. A new offer supersedes the old candidates.
-                match &msg {
-                    SignalMsg::Offer(_) => { last_offer = Some(msg.clone()); sent_candidates.clear(); }
-                    SignalMsg::Candidate(_) => sent_candidates.push(msg.clone()),
-                    _ => {}
-                }
-                match &peer {
-                    Some(to) => {
-                        let text = serde_json::to_string(&Outbound { to, payload: Payload::Signal { msg } })?;
-                        write.send(Message::text(text)).await?;
-                    }
-                    None => pending.push(msg), // buffer until we learn the peer
-                }
-            }
-            // Frame from the relay.
-            frame = read.next() => {
-                let Some(frame) = frame else { break; }; // socket closed
-                let Message::Text(text) = frame? else { continue; };
-                let Ok(inbound) = serde_json::from_str::<Inbound>(text.as_str()) else {
-                    tracing::debug!("bad rendezvous frame");
-                    continue;
-                };
-                received_any = true;
-                let first_contact = peer.is_none();
-                // Learn/lock the peer id on first contact and flush anything buffered.
-                if first_contact {
-                    peer = Some(inbound.from.clone());
-                    for msg in pending.drain(..) {
-                        let text = serde_json::to_string(&Outbound {
-                            to: inbound.from.as_str(),
-                            payload: Payload::Signal { msg },
-                        })?;
-                        write.send(Message::text(text)).await?;
-                    }
-                }
-                match inbound.payload {
-                    Payload::Signal { msg } => {
-                        if in_tx.send(msg).is_err() {
-                            break; // consumer gone
+        };
+        backoff = Duration::from_secs(1);
+        let (mut write, mut read) = ws.split();
+        tracing::info!("rendezvous connected");
+
+        // Per-connection: viewers must re-announce on a fresh socket; a keepalive
+        // ping keeps the connection off idle-timeout kill lists.
+        let mut received_any = false;
+        let mut announce = tokio::time::interval(Duration::from_millis(500));
+        let mut keepalive = tokio::time::interval(Duration::from_secs(30));
+        keepalive.reset(); // don't fire immediately on connect
+
+        // Non-`move` async block: borrows the state by &mut so it PERSISTS across
+        // reconnects. `?` errors surface here (→ reconnect) instead of killing the
+        // whole client.
+        let stop: anyhow::Result<Stop> = async {
+            loop {
+                tokio::select! {
+                    _ = announce.tick(), if is_viewer && !received_any => {
+                        if let Some(to) = &peer {
+                            let hello = serde_json::to_string(&Outbound { to, payload: Payload::Hello })?;
+                            write.send(Message::text(hello)).await?;
                         }
                     }
-                    // A `hello` *after* first contact = the viewer re-announced
-                    // (e.g. a page refresh). Replay the current offer + candidates
-                    // so the reconnect handshake completes even though the offer
-                    // was first emitted while the viewer was between page loads.
-                    Payload::Hello if !first_contact => {
-                        if let (Some(to), Some(offer)) = (peer.as_ref(), last_offer.as_ref()) {
-                            for m in std::iter::once(offer).chain(sent_candidates.iter()) {
+                    _ = keepalive.tick() => {
+                        write.send(Message::Ping(Vec::new().into())).await?;
+                    }
+                    maybe = out_rx.recv() => {
+                        let Some(msg) = maybe else { return Ok(Stop::SessionEnded); };
+                        match &msg {
+                            SignalMsg::Offer(_) => { last_offer = Some(msg.clone()); sent_candidates.clear(); }
+                            SignalMsg::Candidate(_) => sent_candidates.push(msg.clone()),
+                            _ => {}
+                        }
+                        match &peer {
+                            Some(to) => {
+                                let text = serde_json::to_string(&Outbound { to, payload: Payload::Signal { msg } })?;
+                                write.send(Message::text(text)).await?;
+                            }
+                            None => pending.push(msg),
+                        }
+                    }
+                    frame = read.next() => {
+                        let Some(frame) = frame else { return Ok(Stop::SocketClosed); };
+                        let Message::Text(text) = frame? else { continue; };
+                        let Ok(inbound) = serde_json::from_str::<Inbound>(text.as_str()) else {
+                            tracing::debug!("bad rendezvous frame");
+                            continue;
+                        };
+                        received_any = true;
+                        // Treat a `hello` from a *new* peer as first contact (the host
+                        // re-learns the viewer after a reconnect / a different viewer).
+                        let first_contact = peer.as_deref() != Some(inbound.from.as_str());
+                        if first_contact {
+                            peer = Some(inbound.from.clone());
+                            for msg in pending.drain(..) {
                                 let text = serde_json::to_string(&Outbound {
-                                    to,
-                                    payload: Payload::Signal { msg: m.clone() },
+                                    to: inbound.from.as_str(),
+                                    payload: Payload::Signal { msg },
                                 })?;
                                 write.send(Message::text(text)).await?;
                             }
-                            tracing::info!(
-                                candidates = sent_candidates.len(),
-                                "rendezvous: viewer re-announced; replayed offer"
-                            );
+                        }
+                        match inbound.payload {
+                            Payload::Signal { msg } => {
+                                if in_tx.send(msg).is_err() {
+                                    return Ok(Stop::SessionEnded);
+                                }
+                            }
+                            // Re-announce (page refresh / reconnect): replay the current
+                            // offer + candidates so the handshake completes.
+                            Payload::Hello if !first_contact => {
+                                if let (Some(to), Some(offer)) = (peer.as_ref(), last_offer.as_ref()) {
+                                    for m in std::iter::once(offer).chain(sent_candidates.iter()) {
+                                        let text = serde_json::to_string(&Outbound {
+                                            to,
+                                            payload: Payload::Signal { msg: m.clone() },
+                                        })?;
+                                        write.send(Message::text(text)).await?;
+                                    }
+                                    tracing::info!(
+                                        candidates = sent_candidates.len(),
+                                        "rendezvous: viewer re-announced; replayed offer"
+                                    );
+                                }
+                            }
+                            Payload::Hello => {}
                         }
                     }
-                    // First-contact `hello`: the buffered flush above already sent
-                    // the offer + candidates.
-                    Payload::Hello => {}
                 }
             }
         }
+        .await;
+
+        match stop {
+            Ok(Stop::SessionEnded) => return Ok(()), // session dropped the channel — stop.
+            Ok(Stop::SocketClosed) => tracing::warn!("rendezvous socket closed; reconnecting"),
+            Err(e) => tracing::warn!(error = %e, "rendezvous connection lost; reconnecting"),
+        }
+        tokio::time::sleep(backoff).await;
     }
-    Ok(())
 }
