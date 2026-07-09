@@ -901,20 +901,17 @@ fn attach_keyboard(dc: &RtcDataChannel) {
             .ok();
         cb.forget();
     }
-    // Clear armed modifiers when the keyboard is dismissed (input loses focus).
-    {
-        let clear = clear_mods.clone();
-        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_ev| clear());
-        input_el
-            .add_event_listener_with_callback("blur", cb.as_ref().unchecked_ref())
-            .ok();
-        cb.forget();
-    }
-
-    // Special-key bar: each `.kb` button sends over `dc` on pointerdown. We
-    // preventDefault so focus stays on the hidden input and the OS keyboard doesn't
-    // dismiss. `data-mod` = sticky modifier; `data-combo` = a chord (Ctrl-Alt-Del);
-    // `data-code` = a `KeyboardEvent.code` we already map to HID.
+    // Special-key bar: each `.kb` button sends over `dc` on pointerdown. Sticky
+    // modifiers (`data-mod`) accumulate until the next non-modifier key, which
+    // sends with `mods.get()` then clears — so e.g. Ctrl then C = Ctrl+C, and the
+    // modifier unsticks after. `data-combo` = a chord (Ctrl-Alt-Del); `data-code`
+    // = a `KeyboardEvent.code` we map to HID.
+    //
+    // CRITICAL: the buttons must NOT steal focus from the hidden input, or the OS
+    // keyboard dismisses and the just-armed modifier can't combine with the next
+    // typed character. `preventDefault` on `mousedown`/`touchstart` is what
+    // actually blocks the focus shift (pointerdown's default does not), so we guard
+    // those explicitly. We do the action on `pointerdown` for responsiveness.
     if let Ok(btns) = document.query_selector_all("#kbd-bar .kb") {
         for i in 0..btns.length() {
             let Some(el) = btns
@@ -923,6 +920,15 @@ fn attach_keyboard(dc: &RtcDataChannel) {
             else {
                 continue;
             };
+            // Focus-retention guards (keep the hidden input focused → keyboard up).
+            for ev_name in ["mousedown", "touchstart"] {
+                let guard = Closure::<dyn FnMut(web_sys::Event)>::new(|ev: web_sys::Event| {
+                    ev.prevent_default();
+                });
+                el.add_event_listener_with_callback(ev_name, guard.as_ref().unchecked_ref())
+                    .ok();
+                guard.forget();
+            }
             let dc = dc.clone();
             let mods = mods.clone();
             let clear = clear_mods.clone();
