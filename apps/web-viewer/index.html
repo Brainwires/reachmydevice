@@ -26,7 +26,11 @@
 <link rel="manifest" href="manifest.webmanifest">
 <style>
   :root{--bg:#0b0d11;--panel:#171a21;--panel2:#1e222b;--border:#2a2f3a;--text:#e6e8ec;
-    --muted:#9aa3b2;--accent:#4f8cff;--accent2:#3a6fd8;--err:#ff5c5c;--ok:#39d98a;}
+    --muted:#9aa3b2;--accent:#4f8cff;--accent2:#3a6fd8;--err:#ff5c5c;--ok:#39d98a;
+    /* Height reserved for the fixed #bar header (button row + padding + notch), so
+       the video and keyboard centre in the area BELOW it instead of sliding under. */
+    --hdr:calc(50px + env(safe-area-inset-top,0px));
+    --sab:env(safe-area-inset-bottom,0px);}
   *{box-sizing:border-box;}
   html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
     font:14px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
@@ -91,7 +95,7 @@
   .panel{border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:14px;background:#12151c;}
   .panel h2{margin:0 0 4px;font-size:15px;}
 
-  #stage{position:fixed;inset:0;display:grid;place-items:center;background:#000;}
+  #stage{position:fixed;top:var(--hdr);left:0;right:0;bottom:0;display:grid;place-items:center;background:#000;}
   #screen{max-width:100vw;max-height:100vh;width:auto;height:auto;background:#000;outline:none;
     transition:transform .2s;
     /* Permit pinch-zoom (handled by the browser) but kill double-tap-zoom so
@@ -101,8 +105,12 @@
      their center — grid centering doesn't reliably center a rotated child. The
      box is still sized to the video's aspect (constrained against the swapped
      viewport axis for 90°/270°) so pointer mapping stays exact. */
-  #screen.rot1,#screen.rot2,#screen.rot3{position:fixed;top:50%;left:50%;}
-  #screen.rot1,#screen.rot3{max-width:100vh;max-height:100vw;}
+  /* Rotated views centre in the area below the header: shrink the long axis by the
+     header height and drop the centre by half of it, so the top edge lands at the
+     header's bottom instead of under it. */
+  #screen.rot1,#screen.rot2,#screen.rot3{position:fixed;top:calc(50% + var(--hdr) / 2);left:50%;}
+  #screen.rot1,#screen.rot3{max-width:calc(100vh - var(--hdr));max-height:100vw;}
+  #screen.rot2{max-height:calc(100vh - var(--hdr));}
   #screen.rot1{transform:translate(-50%,-50%) rotate(90deg);}
   #screen.rot2{transform:translate(-50%,-50%) rotate(180deg);}
   #screen.rot3{transform:translate(-50%,-50%) rotate(-90deg);}
@@ -122,16 +130,18 @@
   #kb-wrap{position:fixed;top:50%;left:50%;width:100vw;height:100vh;
     transform:translate(-50%,-50%);display:flex;align-items:flex-end;justify-content:center;
     pointer-events:none;z-index:60;}
-  #kb-wrap.rot1,#kb-wrap.rot3{width:100vh;height:100vw;}
-  /* In the rotated views the keyboard's long axis runs top↔bottom of the phone.
-     The 12-key row is sized to fill exactly 100%, so it butts against both edges
-     (and the notch/home-indicator). Give the KEYS a symmetric long-axis inset so
-     the whole layout centres between the two ends instead of touching them. */
-  #kb-wrap.rot1 #kb,#kb-wrap.rot3 #kb{
-    padding-left:max(24px,env(safe-area-inset-top),env(safe-area-inset-bottom));
-    padding-right:max(24px,env(safe-area-inset-top),env(safe-area-inset-bottom));}
+  /* Rotated views: the keyboard's long axis runs top↔bottom of the phone. Confine
+     it to the window BELOW the header and ABOVE the home-indicator — shrink the
+     long axis by (header + bottom-inset) and bias the centre by half their diff —
+     so it no longer slides under the header and centres between the two ends. */
+  #kb-wrap.rot1,#kb-wrap.rot3{width:calc(100vh - var(--hdr) - var(--sab));height:100vw;
+    top:calc(50% + (var(--hdr) - var(--sab)) / 2);}
+  /* A small symmetric long-axis margin so the 12-key row (which fills 100%) gets a
+     little breathing room instead of butting against the ends. */
+  #kb-wrap.rot1 #kb,#kb-wrap.rot3 #kb{padding-left:10px;padding-right:10px;}
   #kb-wrap.rot1{transform:translate(-50%,-50%) rotate(90deg);}
-  #kb-wrap.rot2{transform:translate(-50%,-50%) rotate(180deg);}
+  #kb-wrap.rot2{height:calc(100vh - var(--hdr) - var(--sab));
+    top:calc(50% + (var(--hdr) - var(--sab)) / 2);transform:translate(-50%,-50%) rotate(180deg);}
   #kb-wrap.rot3{transform:translate(-50%,-50%) rotate(-90deg);}
   #kb{pointer-events:auto;width:100%;box-sizing:border-box;display:flex;flex-direction:column;
     gap:4px;padding:4px 4px calc(4px + env(safe-area-inset-bottom));
