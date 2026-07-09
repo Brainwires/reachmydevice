@@ -57,7 +57,10 @@
 
   #stage{position:fixed;inset:0;display:grid;place-items:center;background:#000;}
   #screen{max-width:100vw;max-height:100vh;width:auto;height:auto;background:#000;outline:none;
-    transition:transform .2s;}
+    transition:transform .2s;
+    /* Permit pinch-zoom (handled by the browser) but kill double-tap-zoom so
+       rapid taps register as double-clicks, not a page zoom. */
+    touch-action:manipulation;}
   /* Rotated views are centered explicitly (fixed + translate) and rotated about
      their center — grid centering doesn't reliably center a rotated child. The
      box is still sized to the video's aspect (constrained against the swapped

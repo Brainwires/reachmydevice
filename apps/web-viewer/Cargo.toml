@@ -76,6 +76,7 @@ features = [
   "TouchList",
   "InputEvent",
   "HtmlInputElement",
+  "Performance",
   "NodeList",
   "DomTokenList",
   "DomStringMap",
