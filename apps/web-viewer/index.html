@@ -123,6 +123,13 @@
     transform:translate(-50%,-50%);display:flex;align-items:flex-end;justify-content:center;
     pointer-events:none;z-index:60;}
   #kb-wrap.rot1,#kb-wrap.rot3{width:100vh;height:100vw;}
+  /* In the rotated views the keyboard's long axis runs top↔bottom of the phone.
+     The 12-key row is sized to fill exactly 100%, so it butts against both edges
+     (and the notch/home-indicator). Give the KEYS a symmetric long-axis inset so
+     the whole layout centres between the two ends instead of touching them. */
+  #kb-wrap.rot1 #kb,#kb-wrap.rot3 #kb{
+    padding-left:max(24px,env(safe-area-inset-top),env(safe-area-inset-bottom));
+    padding-right:max(24px,env(safe-area-inset-top),env(safe-area-inset-bottom));}
   #kb-wrap.rot1{transform:translate(-50%,-50%) rotate(90deg);}
   #kb-wrap.rot2{transform:translate(-50%,-50%) rotate(180deg);}
   #kb-wrap.rot3{transform:translate(-50%,-50%) rotate(-90deg);}
