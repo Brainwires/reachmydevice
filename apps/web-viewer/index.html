@@ -46,10 +46,11 @@
   #barStatus{color:var(--muted);} #bar .sp{flex:1;}
 
   #connect{position:fixed;inset:0;overflow-x:hidden;overflow-y:auto;display:grid;place-items:start center;
+    grid-template-columns:minmax(0,1fr);
     padding:calc(20px + env(safe-area-inset-top,0px)) calc(20px + env(safe-area-inset-right,0px))
       calc(20px + env(safe-area-inset-bottom,0px)) calc(20px + env(safe-area-inset-left,0px));}
   .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:24px;
-    width:100%;max-width:560px;margin:max(4vh,16px) 0;}
+    width:100%;max-width:560px;min-width:0;margin:max(4vh,16px) 0;}
   .card h1{font-size:20px;margin:14px 0 4px;} .card .sub{color:var(--muted);margin:0 0 16px;font-size:13.5px;}
   label{display:block;font-size:13px;color:var(--muted);margin:12px 0 5px;}
   input{width:100%;padding:11px 12px;border-radius:9px;border:1px solid var(--border);
@@ -80,6 +81,10 @@
     .dev{flex-wrap:wrap;align-items:flex-start;}
     .dev .acts{flex:1 1 100%;justify-content:flex-end;margin-top:10px;}
     .card{padding:18px;}
+    /* Free up width: drop the partial device-id (keep the status/time) and the
+       signed-in email from the header. */
+    .dev .sub2 .did{display:none;}
+    .head .muted{display:none;}
   }
   pre{background:var(--panel2);border:1px solid var(--border);border-radius:9px;padding:12px;
     overflow:auto;font-size:12.5px;} .hint{color:var(--muted);font-size:12.5px;margin-top:8px;}
@@ -428,7 +433,7 @@
       const s=fmtSeen(d.last_seen), canView=['host','both'].includes((d.role||'').toLowerCase());
       return `<div class="dev"><div class="dot ${s.on?'on':''}"></div>
         <div class="meta"><div class="name">${esc(d.name)} <span class="pill">${esc(d.role)}</span></div>
-          <div class="sub2 mono">${esc(d.device_id.slice(0,22))}… · ${esc(s.txt)}</div></div>
+          <div class="sub2 mono"><span class="did">${esc(d.device_id.slice(0,22))}… · </span>${esc(s.txt)}</div></div>
         <div class="acts">
           ${canView?`<button class="iconbtn" data-act="connect" data-id="${esc(d.device_id)}" title="Connect — view this device">${ICON.connect}</button>`:''}
           ${canView?`<button class="iconbtn ghost" data-act="cmd" data-id="${esc(d.device_id)}" data-name="${esc(d.name)}" data-role="${esc(d.role)}" title="Show run command (issues a fresh token)">${ICON.cmd}</button>`:''}
