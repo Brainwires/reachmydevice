@@ -77,25 +77,38 @@
     border-radius:50%;margin:0 auto 14px;animation:spin 1s linear infinite;}
   @keyframes spin{to{transform:rotate(360deg);}}
   #overlay .msg{font-size:15px;} #overlay .hint2{color:var(--muted);font-size:12.5px;margin-top:8px;}
-  /* Hidden capture input: focusable (pops the OS keyboard) but invisible. 16px
-     font stops iOS zooming the page on focus. */
-  #kbd-input{position:fixed;bottom:0;left:0;width:1px;height:1px;opacity:0;border:0;
-    padding:0;margin:0;font-size:16px;background:transparent;color:transparent;z-index:-1;}
-  /* Special-key bar: a horizontally-scrollable strip pinned just above the OS
-     keyboard (positioned via visualViewport in JS). */
-  #kbd-bar{position:fixed;left:0;right:0;bottom:0;z-index:60;display:flex;gap:6px;
-    flex-wrap:wrap;justify-content:center;padding:6px 8px;
-    background:rgba(15,17,21,.94);border-top:1px solid var(--border);}
-  #kbd-bar .kb{flex:0 0 auto;min-width:44px;padding:9px 12px;border-radius:9px;
-    border:1px solid var(--border);background:#20242c;color:var(--text);font-size:13.5px;
-    font-weight:600;user-select:none;-webkit-user-select:none;touch-action:manipulation;}
-  #kbd-bar .kb.mod.armed{background:var(--accent);color:#fff;border-color:var(--accent);}
-  /* The bar abuts the OS keyboard, so it follows the SYSTEM light/dark setting
-     (not the app's always-dark theme) to blend with it. Dark is the default
-     above; this lightens it when the OS is in light mode. */
+  /* Full custom on-screen keyboard. We render every key (each sends HID via the
+     WASM layer), so — unlike the OS keyboard — it can rotate WITH the view. The
+     wrap covers the screen (dims swapped for 90/270, like the video) and rotates
+     about its centre; its flex-end alignment keeps the keyboard glued to the
+     VISUAL bottom of the rotated view. It's pointer-transparent except the keys,
+     so cursor control still works above the keyboard. */
+  #kb-wrap{position:fixed;top:50%;left:50%;width:100vw;height:100vh;
+    transform:translate(-50%,-50%);display:flex;align-items:flex-end;justify-content:center;
+    pointer-events:none;z-index:60;}
+  #kb-wrap.rot1,#kb-wrap.rot3{width:100vh;height:100vw;}
+  #kb-wrap.rot1{transform:translate(-50%,-50%) rotate(90deg);}
+  #kb-wrap.rot2{transform:translate(-50%,-50%) rotate(180deg);}
+  #kb-wrap.rot3{transform:translate(-50%,-50%) rotate(-90deg);}
+  #kb{pointer-events:auto;width:100%;box-sizing:border-box;display:flex;flex-direction:column;
+    gap:5px;padding:6px 6px calc(6px + env(safe-area-inset-bottom));
+    background:rgba(15,17,21,.96);border-top:1px solid var(--border);
+    user-select:none;-webkit-user-select:none;touch-action:manipulation;}
+  #kb .krow{display:flex;gap:5px;justify-content:center;}
+  #kb .k{flex:1 1 0;min-width:0;max-width:54px;padding:11px 4px;border-radius:7px;
+    border:1px solid var(--border);background:#20242c;color:var(--text);
+    font-size:15px;font-weight:600;text-align:center;}
+  #kb .k.wide{flex:4 1 0;max-width:none;}
+  #kb .k.mod.armed{background:var(--accent);color:#fff;border-color:var(--accent);}
+  #kb .klayer{display:flex;flex-direction:column;gap:5px;}
+  #kb .ksym{display:none;}
+  #kb.sym .klet{display:none;}
+  #kb.sym .ksym{display:flex;}
+  /* The keyboard sits where the OS keyboard would, so it follows the SYSTEM
+     light/dark setting (not the app's always-dark theme). */
   @media (prefers-color-scheme: light){
-    #kbd-bar{background:rgba(244,245,247,.96);border-top-color:#d0d3da;}
-    #kbd-bar .kb{background:#fff;color:#1c1c1e;border-color:#c7cad1;}
+    #kb{background:rgba(244,245,247,.97);border-top-color:#d0d3da;}
+    #kb .k{background:#fff;color:#1c1c1e;border-color:#c7cad1;}
   }
   .hidden{display:none!important;}
 </style>
@@ -119,22 +132,9 @@
   <div id="overlay" class="hidden"><div class="box"><div class="spin"></div>
     <div class="msg" id="ovMsg">Connecting…</div><div class="hint2" id="ovHint"></div></div></div>
 
-  <!-- Mobile keyboard: hidden input summons the OS keyboard (typing → HID via the
-       WASM beforeinput handler); the bar sends keys the OS keyboard can't. -->
-  <input id="kbd-input" type="text" autocomplete="off" autocorrect="off"
-         autocapitalize="off" spellcheck="false" aria-hidden="true" tabindex="-1">
-  <div id="kbd-bar" class="hidden">
-    <button class="kb" data-code="Escape">Esc</button>
-    <button class="kb" data-code="Tab">Tab</button>
-    <button class="kb mod" data-mod="ctrl">Ctrl</button>
-    <button class="kb mod" data-mod="alt">Alt</button>
-    <button class="kb mod" data-mod="super">Super</button>
-    <button class="kb" data-code="ArrowLeft">←</button>
-    <button class="kb" data-code="ArrowUp">↑</button>
-    <button class="kb" data-code="ArrowDown">↓</button>
-    <button class="kb" data-code="ArrowRight">→</button>
-    <button class="kb" data-combo="ctrl-alt-del">C-A-D</button>
-  </div>
+  <!-- Full custom on-screen keyboard (built by JS below, wired to HID in WASM).
+       Rendered by us so it rotates with the view. -->
+  <div id="kb-wrap" class="hidden"><div id="kb"></div></div>
 
 <script>
 (function(){
@@ -159,26 +159,62 @@
     // Rotate control (handy on phones: view a landscape desktop in landscape on a
     // portrait screen). Cycles 0→90→180→270°; the quarter-turn count is stored on
     // the video as data-rot so the WASM input handler can rotate pointer coords.
+    // The custom keyboard (#kb-wrap) rotates with the same class, so it stays glued
+    // to the visual bottom of the rotated view.
     let rot=0; const rotBtn=$('rotate'); rotBtn.style.display='';
-    const applyRot=()=>{ vid.classList.remove('rot1','rot2','rot3'); if(rot) vid.classList.add('rot'+rot); vid.dataset.rot=rot; };
+    const kbWrap=$('kb-wrap');
+    const applyRot=()=>{
+      for(const el of [vid,kbWrap]){ el.classList.remove('rot1','rot2','rot3'); if(rot) el.classList.add('rot'+rot); }
+      vid.dataset.rot=rot;
+    };
     rotBtn.onclick=()=>{ rot=(rot+1)%4; applyRot(); };
     applyRot();
-    // Mobile keyboard toggle. Focusing the hidden input pops the OS keyboard; the
-    // WASM side captures typing (beforeinput) + the special-key bar. The bar is
-    // pinned just above the keyboard via visualViewport. (Key→HID wiring lives in
-    // the WASM viewer; here we only manage focus + visibility + placement.)
-    const kin=$('kbd-input'), kbar=$('kbd-bar'), kbtn=$('kbd-toggle'); kbtn.style.display='';
+
+    // Full custom on-screen keyboard. Rendered here (each key sends HID via the
+    // WASM layer wired in attach_keyboard), so it rotates with the view — the OS
+    // keyboard can't. Layout: a specials row, a letters/symbols layer, a bottom
+    // row. A string entry is a character key; an object customises it.
+    const kb=$('kb'), kbtn=$('kbd-toggle'); kbtn.style.display='';
+    const KROWS={
+      special:[{l:'Esc',code:'Escape'},{l:'Tab',code:'Tab'},{l:'←',code:'ArrowLeft'},
+        {l:'↑',code:'ArrowUp'},{l:'↓',code:'ArrowDown'},{l:'→',code:'ArrowRight'},
+        {l:'C-A-D',combo:'ctrl-alt-del'}],
+      letters:[
+        ['q','w','e','r','t','y','u','i','o','p'],
+        ['a','s','d','f','g','h','j','k','l'],
+        [{l:'⇧',mod:'shift'},'z','x','c','v','b','n','m',{l:'⌫',code:'Backspace'}]],
+      symbols:[
+        ['1','2','3','4','5','6','7','8','9','0'],
+        ['!','@','#','$','%','^','&','*','(',')'],
+        [{l:'⇧',mod:'shift'},'-','_','=','/',';',':',',','.',{l:'⌫',code:'Backspace'}]],
+      bottom:[{l:'?123',layer:1},{l:'Ctrl',mod:'ctrl'},{l:'Alt',mod:'alt'},{l:'Super',mod:'super'},
+        {l:'space',code:'Space',wide:1},{l:'⏎',code:'Enter'}]};
+    const keyEl=s=>{ if(typeof s==='string') s={l:s,char:s};
+      const b=document.createElement('button');
+      b.className='k'+(s.wide?' wide':'')+(s.mod?' mod':'');
+      b.textContent=s.l;
+      if(s.char!=null) b.dataset.char=s.char;
+      if(s.code) b.dataset.code=s.code;
+      if(s.mod) b.dataset.mod=s.mod;
+      if(s.combo) b.dataset.combo=s.combo;
+      if(s.layer!=null) b.dataset.layer='1';
+      return b; };
+    const rowEl=specs=>{ const r=document.createElement('div'); r.className='krow';
+      specs.forEach(s=>r.appendChild(keyEl(s))); return r; };
+    kb.appendChild(rowEl(KROWS.special));
+    const klet=document.createElement('div'); klet.className='klayer klet';
+    KROWS.letters.forEach(r=>klet.appendChild(rowEl(r)));
+    const ksym=document.createElement('div'); ksym.className='klayer ksym';
+    KROWS.symbols.forEach(r=>ksym.appendChild(rowEl(r)));
+    kb.appendChild(klet); kb.appendChild(ksym);
+    kb.appendChild(rowEl(KROWS.bottom));
+    // Layer toggle (?123 ↔ ABC): pure presentation, handled here (WASM ignores it).
+    kb.addEventListener('click',e=>{ const t=e.target.closest('[data-layer]'); if(!t) return;
+      t.textContent=kb.classList.toggle('sym')?'ABC':'?123'; });
+    // Show/hide the keyboard.
     let kbOpen=false;
-    const placeBar=()=>{ if(!kbOpen) return; const vv=window.visualViewport;
-      kbar.style.bottom = vv ? Math.max(0,(window.innerHeight-(vv.height+vv.offsetTop)))+'px' : '0px'; };
-    const setKb=on=>{ kbOpen=on;
-      if(on){ kbar.classList.remove('hidden'); kin.focus({preventScroll:true}); placeBar(); }
-      else { kbar.classList.add('hidden'); kin.blur(); } };
+    const setKb=on=>{ kbOpen=on; kbWrap.classList.toggle('hidden',!on); };
     kbtn.onclick=()=>setKb(!kbOpen);
-    // If the OS keyboard is dismissed (input blurred), hide our bar to match.
-    kin.addEventListener('blur',()=>{ if(kbOpen) setKb(false); });
-    if(window.visualViewport){ visualViewport.addEventListener('resize',placeBar);
-      visualViewport.addEventListener('scroll',placeBar); }
     // "← Devices": go back if there's history, else load the devices screen.
     $('disconnect').onclick=e=>{e.preventDefault(); if(history.length>1) history.back(); else location.href='/app/#/devices';};
     return;
