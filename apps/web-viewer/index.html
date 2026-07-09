@@ -9,8 +9,21 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="ReachMyDevice">
+<meta name="theme-color" content="#0f1115">
 <title>ReachMyDevice — web viewer</title>
 <link data-trunk rel="rust" data-wasm-opt="s" />
+<!-- PWA icons + manifest. copy-file lands them in dist unhashed so the manifest
+     and the link hrefs below (resolved against /app/) stay stable. -->
+<link data-trunk rel="copy-file" href="assets/favicon-32.png" />
+<link data-trunk rel="copy-file" href="assets/favicon-16.png" />
+<link data-trunk rel="copy-file" href="assets/apple-touch-icon.png" />
+<link data-trunk rel="copy-file" href="assets/icon-192.png" />
+<link data-trunk rel="copy-file" href="assets/icon-512.png" />
+<link data-trunk rel="copy-file" href="assets/manifest.webmanifest" />
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
 <style>
   :root{--bg:#0b0d11;--panel:#171a21;--panel2:#1e222b;--border:#2a2f3a;--text:#e6e8ec;
     --muted:#9aa3b2;--accent:#4f8cff;--accent2:#3a6fd8;--err:#ff5c5c;--ok:#39d98a;}
