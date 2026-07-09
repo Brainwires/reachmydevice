@@ -4,6 +4,37 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-07-09
+
+Mobile browser-viewer overhaul, and a fix for unbounded video latency.
+
+### Added
+- **Full on-screen keyboard in the browser viewer.** A rendered QWERTY + symbols
+  layer with sticky modifiers (Ctrl/Alt/Super/Shift), Esc/Tab/arrows/Ctrl-Alt-Del,
+  and per-key press feedback (click sound + haptic + flash). It **rotates with the
+  view** (the OS keyboard can't) and follows the system light/dark theme.
+- **Touch gestures (trackpad semantics) in the browser viewer.** A one-finger
+  drag moves the cursor by a relative delta; a one-finger tap left-clicks in
+  place; a quick two-finger tap right-clicks; a three-finger swipe scrolls; and a
+  two-finger pinch zooms the view.
+- **Auto-reconnect in the browser viewer.** A backgrounded phone that drops the
+  media/socket now rebuilds the session on resume instead of freezing until
+  refreshed.
+- **`rmdd set fps|width|height|bitrate <v>`.** Video encode parameters are now
+  stored settings (store → `RMD_*` env → default), tunable per host without
+  environment variables.
+- **`RMD_LANDING_FILE`.** The rendezvous serves the apex landing page from a
+  bind-mounted file when set, so it can be updated without a rebuild (mirroring
+  `RMD_WEBVIEWER_DIR` for `/app`).
+
+### Fixed
+- **Unbounded video latency ("minutes behind").** The host now drops stale
+  captured frames and always encodes the freshest one (keep-latest on the
+  capture→encode queue), so the remote and local screens stay in sync when the
+  link or encoder can't keep up.
+- Landing page: the RMD logo renders as a proper square (it was stretched into a
+  rectangle), and the redundant header CTA is hidden on mobile.
+
 ## [0.2.6] - 2026-07-09
 
 More platforms and a smoother host setup.
