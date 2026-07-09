@@ -84,7 +84,7 @@
   /* Special-key bar: a horizontally-scrollable strip pinned just above the OS
      keyboard (positioned via visualViewport in JS). */
   #kbd-bar{position:fixed;left:0;right:0;bottom:0;z-index:60;display:flex;gap:6px;
-    padding:6px 8px;overflow-x:auto;-webkit-overflow-scrolling:touch;
+    flex-wrap:wrap;justify-content:center;padding:6px 8px;
     background:rgba(15,17,21,.94);border-top:1px solid var(--border);}
   #kbd-bar .kb{flex:0 0 auto;min-width:44px;padding:9px 12px;border-radius:9px;
     border:1px solid var(--border);background:#20242c;color:var(--text);font-size:13.5px;
