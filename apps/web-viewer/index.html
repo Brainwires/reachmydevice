@@ -2,7 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Web-app (Add to Home Screen) so it launches with no browser chrome. This is
+     the only way to go chrome-free on iPhone Safari, which has no Fullscreen API. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ReachMyDevice">
 <title>ReachMyDevice — web viewer</title>
 <link data-trunk rel="rust" data-wasm-opt="s" />
 <style>
@@ -286,6 +292,13 @@
     let kbOpen=false;
     const setKb=on=>{ kbOpen=on; kbWrap.classList.toggle('hidden',!on); };
     kbtn.onclick=()=>setKb(!kbOpen);
+    // Go fullscreen on the first tap, where the API exists (Android/desktop/iPad)
+    // — it needs a user gesture, and the session auto-starts on load. iPhone Safari
+    // has no Fullscreen API; there, Add to Home Screen (meta tags in <head>) is the
+    // chrome-free path.
+    const goFS=()=>{ const el=document.documentElement, rf=el.requestFullscreen||el.webkitRequestFullscreen;
+      if(rf){ try{ rf.call(el); }catch(_){} } };
+    addEventListener('pointerdown',goFS,{once:true});
     // "← Devices": go back if there's history, else load the devices screen.
     $('disconnect').onclick=e=>{e.preventDefault(); if(history.length>1) history.back(); else location.href='/app/#/devices';};
     return;
