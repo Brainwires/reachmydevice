@@ -4,7 +4,26 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
-## [0.2.5] - 2026-07-08
+## [0.2.6] - 2026-07-09
+
+More platforms and a smoother host setup.
+
+### Added
+- **ARM builds — Raspberry Pi 4/5, Orange Pi 5B, Apple Silicon.** Every release
+  now ships `macos-x86_64`, `macos-arm64`, `linux-x86_64`, and `linux-arm64`
+  (the Linux arm64 build cross-compiles the full host + viewer + rendezvous).
+- **`rmdd set rendezvous_url <wss://…>`.** The rendezvous URL is now a stored
+  setting alongside `token` and `password`, so a bare `rmdd` connects with no
+  environment variables. (`RMD_RENDEZVOUS_URL` still overrides.)
+
+### Changed
+- `install.sh` clears the macOS Gatekeeper quarantine flag on the (already
+  minisign/SHA-verified) binaries automatically, instead of printing a warning.
+- The web app hides "Create account" when the server has registration closed
+  (it checks `GET /api/registration`).
+
+### Fixed
+- Cross-built Linux arm64 `.deb`s now package (skip host-`strip` on cross builds).
 
 Connection passwords, an encrypted host settings store, and a rendezvous
 sign-up fix.
