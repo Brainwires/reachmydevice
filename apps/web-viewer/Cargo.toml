@@ -71,6 +71,9 @@ features = [
   "WheelEvent",
   "KeyboardEvent",
   "PointerEvent",
+  "TouchEvent",
+  "Touch",
+  "TouchList",
   "DomRect",
   "console",
 ]

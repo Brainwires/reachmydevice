@@ -19,7 +19,7 @@ mod input;
 mod signaling;
 
 use signaling::Relay;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -28,11 +28,12 @@ use web_sys::{
     HtmlCanvasElement, HtmlVideoElement, MediaStream, MessageEvent, MouseEvent, RtcConfiguration,
     RtcDataChannel, RtcDataChannelEvent, RtcIceCandidateInit, RtcPeerConnection,
     RtcPeerConnectionIceEvent, RtcSdpType, RtcSessionDescriptionInit, RtcTrackEvent, Response,
-    WheelEvent,
+    TouchEvent, WheelEvent,
 };
 
 /// Runtime configuration, from URL query params on the page:
 /// `?server=wss://app.reachmy.dev&token=…&host=<device_id>`.
+#[derive(Clone)]
 struct Config {
     /// WebSocket base, e.g. `wss://app.reachmy.dev` (no trailing `/ws`).
     server: String,
@@ -126,6 +127,36 @@ struct Session {
     hello_sent: RefCell<bool>,
 }
 
+impl Session {
+    /// Stop this session's callbacks from firing and close its transports. Called
+    /// before building a replacement session on reconnect, so a dead pc/socket
+    /// can't dispatch late frames or re-trigger the reconnect logic.
+    fn teardown(&self) {
+        self.pc.set_onconnectionstatechange(None);
+        self.pc.set_ontrack(None);
+        self.pc.set_onicecandidate(None);
+        self.pc.set_ondatachannel(None);
+        self.pc.close();
+        self.relay.close();
+    }
+}
+
+/// Long-lived app state that survives across reconnects (the session inside is
+/// rebuilt each time the connection drops). A backgrounded phone freezes JS and
+/// drops the media/socket; on resume the old session is dead and never recovers,
+/// so we detect that (pc `Failed`/`Disconnected`, or the tab becoming visible
+/// again) and rebuild the whole session.
+struct App {
+    cfg: Config,
+    /// The `<video>` element (reused across reconnects; it's a page fixture).
+    video: HtmlVideoElement,
+    /// The live session, replaced on each reconnect.
+    current: RefCell<Option<Rc<Session>>>,
+    /// True while a connect attempt is scheduled or in progress (up to session
+    /// creation) — guards against stacking reconnects.
+    connecting: Cell<bool>,
+}
+
 #[wasm_bindgen(start)]
 pub fn start() {
     console_error_panic_hook::set_once();
@@ -170,37 +201,131 @@ async fn run() -> Result<(), String> {
     video.set_muted(true);
     let _ = video.set_attribute("playsinline", "true");
 
+    let app = Rc::new(App {
+        cfg,
+        video,
+        current: RefCell::new(None),
+        connecting: Cell::new(false),
+    });
+
+    // Rebuild the connection when the tab becomes visible again with no healthy
+    // session (the classic phone case: suspend freezes JS + kills the socket, and
+    // the dead session never recovers on its own).
+    {
+        let app = app.clone();
+        let document2 = document.clone();
+        let cb = Closure::<dyn FnMut()>::new(move || {
+            if document2.hidden() {
+                return; // only act on becoming visible
+            }
+            let healthy = app.current.borrow().as_ref().is_some_and(|s| {
+                matches!(
+                    s.pc.connection_state(),
+                    web_sys::RtcPeerConnectionState::Connected
+                        | web_sys::RtcPeerConnectionState::Connecting
+                        | web_sys::RtcPeerConnectionState::New
+                )
+            });
+            if !healthy {
+                web_sys::console::log_1(&"[rmd] visible again; reconnecting".into());
+                schedule_reconnect(app.clone());
+            }
+        });
+        document
+            .add_event_listener_with_callback("visibilitychange", cb.as_ref().unchecked_ref())
+            .ok();
+        cb.forget();
+    }
+
+    connect(app).await;
+    Ok(())
+}
+
+/// Build a fresh WebRTC session (answerer) and announce to the host. Replaces any
+/// previous session, tearing it down first. Idempotent under the `connecting`
+/// guard so overlapping reconnect triggers collapse into one attempt.
+async fn connect(app: Rc<App>) {
+    if app.connecting.replace(true) {
+        return; // an attempt is already in flight
+    }
+    // Tear the old session down so its dead pc/socket stops firing callbacks.
+    if let Some(old) = app.current.borrow_mut().take() {
+        old.teardown();
+    }
+
+    let Some(window) = web_sys::window() else {
+        app.connecting.set(false);
+        return;
+    };
+
     // --- WebRTC peer connection (answerer) --------------------------------
     // Ask the rendezvous which ICE servers to use (STUN + TURN with ephemeral
-    // credentials). Without a relay, a cross-NAT host won't connect.
+    // credentials). Without a relay, a cross-NAT host won't connect. Re-fetched
+    // each attempt so expired TURN credentials are refreshed on reconnect.
     let rtc_cfg = RtcConfiguration::new();
-    let ice = fetch_ice_servers(&window, &cfg.server, &cfg.token).await;
+    let ice = fetch_ice_servers(&window, &app.cfg.server, &app.cfg.token).await;
     rtc_cfg.set_ice_servers(&ice);
-    let pc =
-        RtcPeerConnection::new_with_configuration(&rtc_cfg).map_err(|e| format!("pc: {e:?}"))?;
-
-    let relay = Relay::connect(&cfg.server, &cfg.token).map_err(|e| format!("ws: {e}"))?;
+    let pc = match RtcPeerConnection::new_with_configuration(&rtc_cfg) {
+        Ok(pc) => pc,
+        Err(e) => {
+            app.connecting.set(false);
+            web_sys::console::error_1(&format!("[rmd] pc: {e:?}").into());
+            schedule_reconnect(app.clone());
+            return;
+        }
+    };
+    let relay = match Relay::connect(&app.cfg.server, &app.cfg.token) {
+        Ok(r) => r,
+        Err(e) => {
+            pc.close();
+            app.connecting.set(false);
+            web_sys::console::error_1(&format!("[rmd] ws: {e}").into());
+            schedule_reconnect(app.clone());
+            return;
+        }
+    };
 
     let session = Rc::new(Session {
         pc: pc.clone(),
         relay: relay.clone(),
-        host_id: cfg.host_id.clone(),
+        host_id: app.cfg.host_id.clone(),
         control: RefCell::new(None),
-        video: video.clone(),
+        video: app.video.clone(),
         hello_sent: RefCell::new(false),
     });
 
-    wire_pc_callbacks(&session);
+    wire_pc_callbacks(&session, &app);
     wire_relay_callbacks(&session);
 
+    *app.current.borrow_mut() = Some(session);
+    app.connecting.set(false);
+
     // Announce presence so the host learns our device id and sends its offer.
-    relay.send_hello(&cfg.host_id);
+    relay.send_hello(&app.cfg.host_id);
     set_status("connecting…");
-    Ok(())
+}
+
+/// Schedule a reconnect after a short backoff (debounced by the `connecting`
+/// guard so a burst of Failed/visibility events yields a single attempt).
+fn schedule_reconnect(app: Rc<App>) {
+    if app.connecting.get() {
+        return; // already scheduled or in progress
+    }
+    app.connecting.set(true); // hold the guard across the backoff delay
+    let cb = Closure::once_into_js(move || {
+        app.connecting.set(false); // release so connect() can re-acquire
+        spawn_local(connect(app));
+    });
+    if let Some(win) = web_sys::window() {
+        let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(
+            cb.unchecked_ref(),
+            1000,
+        );
+    }
 }
 
 /// Attach ontrack / onicecandidate / ondatachannel / connectionstatechange.
-fn wire_pc_callbacks(session: &Rc<Session>) {
+fn wire_pc_callbacks(session: &Rc<Session>, app: &Rc<App>) {
     let pc = &session.pc;
 
     // Inbound video track → attach the MediaStream to the <video> element.
@@ -245,9 +370,10 @@ fn wire_pc_callbacks(session: &Rc<Session>) {
         cb.forget();
     }
 
-    // Surface connection-state changes.
+    // Surface connection-state changes, and rebuild the session when it drops.
     {
         let pc2 = pc.clone();
+        let app = app.clone();
         let cb = Closure::<dyn FnMut()>::new(move || {
             let st = pc2.connection_state();
             web_sys::console::log_1(&format!("[rmd] pc state: {st:?}").into());
@@ -256,7 +382,8 @@ fn wire_pc_callbacks(session: &Rc<Session>) {
                 web_sys::RtcPeerConnectionState::Failed
                     | web_sys::RtcPeerConnectionState::Disconnected
             ) {
-                set_status("disconnected");
+                set_status("disconnected — reconnecting…");
+                schedule_reconnect(app.clone());
             }
         });
         pc.set_onconnectionstatechange(Some(cb.as_ref().unchecked_ref()));
@@ -343,19 +470,17 @@ fn prompt_password() -> Option<String> {
 fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
     let video = session.video.clone();
 
-    // Normalized pointer position helper.
-    let rect_norm = {
+    // Normalized position helper: viewport client px -> host source coords in
+    // [0,1], un-rotating for the current view (`data-rot`; CSS rotate(90deg) is
+    // clockwise, so these are its inverses). Shared by mouse + touch.
+    let norm = {
         let video = video.clone();
-        move |ev: &MouseEvent| -> (f64, f64) {
+        move |cx: f64, cy: f64| -> (f64, f64) {
             let rect = video.get_bounding_client_rect();
             let w = rect.width().max(1.0);
             let h = rect.height().max(1.0);
-            // Position within the on-screen (possibly rotated) video box.
-            let bx = (ev.client_x() as f64 - rect.left()) / w;
-            let by = (ev.client_y() as f64 - rect.top()) / h;
-            // Un-rotate to the host's source coordinates using the view's
-            // quarter-turn count (`data-rot`, set by the rotate button). CSS
-            // rotate(90deg) is clockwise; these are its inverses.
+            let bx = (cx - rect.left()) / w;
+            let by = (cy - rect.top()) / h;
             match video.get_attribute("data-rot").as_deref() {
                 Some("1") => (by, 1.0 - bx),
                 Some("2") => (1.0 - bx, 1.0 - by),
@@ -363,6 +488,10 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 _ => (bx, by),
             }
         }
+    };
+    let rect_norm = {
+        let norm = norm.clone();
+        move |ev: &MouseEvent| norm(ev.client_x() as f64, ev.client_y() as f64)
     };
 
     // mousemove
@@ -392,6 +521,83 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             .add_event_listener_with_callback(event, cb.as_ref().unchecked_ref())
             .ok();
         cb.forget();
+    }
+    // Touch: a tap = move + left-click (as before); a press-and-drag = cursor
+    // MOVE ONLY (hover — tooltips, hover states), no click on release. The
+    // browser synthesizes mouse events for a tap but not for a drag, so a drag
+    // never moved the cursor until now. We handle touch explicitly and
+    // preventDefault so the browser neither scrolls nor double-fires as a mouse.
+    {
+        use std::cell::Cell;
+        let moved = Rc::new(Cell::new(false)); // did this touch cross the drag threshold?
+        let start = Rc::new(Cell::new((0.0f64, 0.0f64))); // client px, for the threshold
+        let last = Rc::new(Cell::new((0.0f64, 0.0f64))); // last normalized pos (for the tap click)
+
+        // touchstart: move the cursor to the touch point; reset drag tracking.
+        {
+            let dc = dc.clone();
+            let norm = norm.clone();
+            let (moved, start, last) = (moved.clone(), start.clone(), last.clone());
+            let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
+                ev.prevent_default();
+                let Some(t) = ev.changed_touches().get(0) else {
+                    return;
+                };
+                let (cx, cy) = (t.client_x() as f64, t.client_y() as f64);
+                start.set((cx, cy));
+                moved.set(false);
+                let (x, y) = norm(cx, cy);
+                last.set((x, y));
+                let _ = dc.send_with_u8_array(&input::mouse_move(x, y));
+            });
+            video
+                .add_event_listener_with_callback("touchstart", cb.as_ref().unchecked_ref())
+                .ok();
+            cb.forget();
+        }
+        // touchmove: follow the finger as a plain move (hover). Past a small
+        // threshold it counts as a drag, so touchend won't also click.
+        {
+            let dc = dc.clone();
+            let norm = norm.clone();
+            let (moved, start, last) = (moved.clone(), start.clone(), last.clone());
+            let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
+                ev.prevent_default();
+                let Some(t) = ev.changed_touches().get(0) else {
+                    return;
+                };
+                let (cx, cy) = (t.client_x() as f64, t.client_y() as f64);
+                let (sx, sy) = start.get();
+                if (cx - sx).hypot(cy - sy) > 8.0 {
+                    moved.set(true);
+                }
+                let (x, y) = norm(cx, cy);
+                last.set((x, y));
+                let _ = dc.send_with_u8_array(&input::mouse_move(x, y));
+            });
+            video
+                .add_event_listener_with_callback("touchmove", cb.as_ref().unchecked_ref())
+                .ok();
+            cb.forget();
+        }
+        // touchend: a tap (never dragged) clicks at the point; a drag just ends.
+        {
+            let dc = dc.clone();
+            let (moved, last) = (moved.clone(), last.clone());
+            let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
+                ev.prevent_default();
+                if !moved.get() {
+                    let (x, y) = last.get();
+                    let left = input::dom_button_to_proto(0);
+                    let _ = dc.send_with_u8_array(&input::mouse_button(left, true, x, y));
+                    let _ = dc.send_with_u8_array(&input::mouse_button(left, false, x, y));
+                }
+            });
+            video
+                .add_event_listener_with_callback("touchend", cb.as_ref().unchecked_ref())
+                .ok();
+            cb.forget();
+        }
     }
     // contextmenu → suppress (right-click is sent as an input event instead)
     {

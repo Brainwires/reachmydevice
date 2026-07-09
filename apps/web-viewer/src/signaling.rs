@@ -84,6 +84,15 @@ impl Relay {
         Ok(Relay { ws, on_signal })
     }
 
+    /// Close the socket and drop its handlers. Used when tearing a stale session
+    /// down before reconnecting, so the old socket can't dispatch late frames.
+    pub fn close(&self) {
+        self.ws.set_onmessage(None);
+        self.ws.set_onerror(None);
+        self.ws.set_onopen(None);
+        let _ = self.ws.close();
+    }
+
     /// Register the handler invoked for each inbound `SignalMsg`.
     pub fn on_signal<F: Fn(SignalMsg) + 'static>(&self, f: F) {
         *self.on_signal.borrow_mut() = Some(Box::new(f));
