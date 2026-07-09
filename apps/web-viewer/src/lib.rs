@@ -522,46 +522,39 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             .ok();
         cb.forget();
     }
-    // Touch gestures:
-    //   • one-finger tap        → move cursor + left-click
-    //   • two-finger tap        → move cursor + RIGHT-click
-    //   • one-finger press+drag → cursor MOVE ONLY (hover — tooltips, hover
-    //                             states), no click on release
-    // The browser synthesizes mouse events for a tap but not for a drag, so a
-    // drag never moved the cursor until now. We handle touch explicitly and
+    // Touch = trackpad semantics (a tap does NOT jump the cursor):
+    //   • one-finger tap        → LEFT-click at the cursor's current location
+    //   • two-finger tap        → RIGHT-click at the cursor's current location
+    //   • one-finger press+drag → move the cursor (hover; tooltips, hover states),
+    //                             no click on release
+    // Only a drag moves the cursor; a tap clicks wherever the last drag left it.
+    // The host clicks AT the coords it's sent, so the tap replays the last known
+    // position (`last`) instead of the tap point. We handle touch explicitly and
     // preventDefault so the browser neither scrolls nor double-fires as a mouse.
     {
         use std::cell::Cell;
         let moved = Rc::new(Cell::new(false)); // did this gesture cross the drag threshold?
         let start = Rc::new(Cell::new((0.0f64, 0.0f64))); // first-finger client px, for the threshold
-        let last = Rc::new(Cell::new((0.0f64, 0.0f64))); // last normalized pos (for the tap click)
+        let last = Rc::new(Cell::new((0.0f64, 0.0f64))); // last cursor pos (normalized) we moved to
+        let has_pos = Rc::new(Cell::new(false)); // have we ever positioned the cursor?
         let max_fingers = Rc::new(Cell::new(0u32)); // most fingers down at once this gesture
 
-        // touchstart: on the first finger, move the cursor there + reset tracking;
-        // track the peak finger count so a 2-finger tap becomes a right-click.
+        // touchstart: record the finger for the drag threshold and the peak finger
+        // count (2 → right-click). Deliberately does NOT move the cursor.
         {
-            let dc = dc.clone();
-            let norm = norm.clone();
-            let (moved, start, last, max_fingers) =
-                (moved.clone(), start.clone(), last.clone(), max_fingers.clone());
+            let (moved, start, max_fingers) = (moved.clone(), start.clone(), max_fingers.clone());
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
                 ev.prevent_default();
                 let n = ev.touches().length();
                 if n > max_fingers.get() {
                     max_fingers.set(n);
                 }
-                // Only (re)position on the first finger; a second finger is part of
-                // the right-click gesture and must not drag the cursor.
                 if n == 1 {
                     let Some(t) = ev.changed_touches().get(0) else {
                         return;
                     };
-                    let (cx, cy) = (t.client_x() as f64, t.client_y() as f64);
-                    start.set((cx, cy));
+                    start.set((t.client_x() as f64, t.client_y() as f64));
                     moved.set(false);
-                    let (x, y) = norm(cx, cy);
-                    last.set((x, y));
-                    let _ = dc.send_with_u8_array(&input::mouse_move(x, y));
                 }
             });
             video
@@ -569,15 +562,19 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 .ok();
             cb.forget();
         }
-        // touchmove: with one finger, follow it as a plain move (hover); past a
-        // small threshold it counts as a drag so touchend won't click. With two
-        // fingers down, don't move the cursor (it's a right-click), only note that
-        // it moved too far to still count as a tap.
+        // touchmove: with one finger past the threshold, move the cursor to follow
+        // it (hover) and mark the gesture a drag so touchend won't click. Two
+        // fingers down never moves the cursor (it's a right-click gesture).
         {
             let dc = dc.clone();
             let norm = norm.clone();
-            let (moved, start, last, max_fingers) =
-                (moved.clone(), start.clone(), last.clone(), max_fingers.clone());
+            let (moved, start, last, has_pos, max_fingers) = (
+                moved.clone(),
+                start.clone(),
+                last.clone(),
+                has_pos.clone(),
+                max_fingers.clone(),
+            );
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
                 ev.prevent_default();
                 let Some(t) = ev.changed_touches().get(0) else {
@@ -591,6 +588,7 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 if max_fingers.get() <= 1 {
                     let (x, y) = norm(cx, cy);
                     last.set((x, y));
+                    has_pos.set(true);
                     let _ = dc.send_with_u8_array(&input::mouse_move(x, y));
                 }
             });
@@ -599,12 +597,20 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 .ok();
             cb.forget();
         }
-        // touchend: act once the LAST finger lifts. A tap (never dragged) clicks
-        // at the point — right button if two fingers were used, else left; a drag
-        // just ends (the hover already happened).
+        // touchend: act once the LAST finger lifts. A tap (never dragged) clicks —
+        // right button if two fingers were used, else left — at the cursor's
+        // current location (`last`), NOT the tap point. A drag just ends (the hover
+        // already happened). Cold start (no drag yet, so no known cursor position):
+        // fall back to the tap point and adopt it, so the first tap still lands.
         {
             let dc = dc.clone();
-            let (moved, last, max_fingers) = (moved.clone(), last.clone(), max_fingers.clone());
+            let norm = norm.clone();
+            let (moved, last, has_pos, max_fingers) = (
+                moved.clone(),
+                last.clone(),
+                has_pos.clone(),
+                max_fingers.clone(),
+            );
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
                 ev.prevent_default();
                 if ev.touches().length() > 0 {
@@ -618,7 +624,16 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 }
                 // DOM button: 0 = left, 2 = right (two-finger tap).
                 let btn = input::dom_button_to_proto(if fingers >= 2 { 2 } else { 0 });
-                let (x, y) = last.get();
+                let (x, y) = if has_pos.get() {
+                    last.get()
+                } else if let Some(t) = ev.changed_touches().get(0) {
+                    let p = norm(t.client_x() as f64, t.client_y() as f64);
+                    last.set(p);
+                    has_pos.set(true);
+                    p
+                } else {
+                    return;
+                };
                 let _ = dc.send_with_u8_array(&input::mouse_button(btn, true, x, y));
                 let _ = dc.send_with_u8_array(&input::mouse_button(btn, false, x, y));
             });
