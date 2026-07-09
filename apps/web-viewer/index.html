@@ -91,20 +91,22 @@
   #kb-wrap.rot2{transform:translate(-50%,-50%) rotate(180deg);}
   #kb-wrap.rot3{transform:translate(-50%,-50%) rotate(-90deg);}
   #kb{pointer-events:auto;width:100%;box-sizing:border-box;display:flex;flex-direction:column;
-    gap:5px;padding:6px 5px calc(6px + env(safe-area-inset-bottom));
-    /* Every key is 1/10 of the row wide, so all rows line up into a uniform grid
-       and shorter rows just centre (justify-content) instead of ballooning. */
-    --kw:calc((100% - 45px) / 10);
+    gap:4px;padding:4px 4px calc(4px + env(safe-area-inset-bottom));
+    /* Every key is 1/12 of the row wide, so all rows line up into a uniform grid
+       and shorter rows just centre (justify-content) instead of ballooning. The
+       12-column basis keeps the whole thing to 4 compact rows like the OS keyboard. */
+    --kw:calc((100% - 44px) / 12);
     background:rgba(15,17,21,.96);border-top:1px solid var(--border);
     user-select:none;-webkit-user-select:none;touch-action:manipulation;}
-  #kb .krow{display:flex;gap:5px;justify-content:center;}
-  #kb .k{flex:0 0 var(--kw);max-width:58px;height:46px;box-sizing:border-box;
-    display:flex;align-items:center;justify-content:center;padding:0 2px;
-    border-radius:8px;border:1px solid var(--border);background:#2a2f3a;color:var(--text);
-    font-size:16px;font-weight:600;line-height:1;
+  #kb .krow{display:flex;gap:4px;justify-content:center;}
+  #kb .k{flex:0 0 var(--kw);max-width:56px;height:38px;box-sizing:border-box;
+    display:flex;align-items:center;justify-content:center;padding:0 1px;
+    border-radius:6px;border:1px solid var(--border);background:#2a2f3a;color:var(--text);
+    font-size:15px;font-weight:600;line-height:1;
     transition:transform .05s ease,background .09s ease,box-shadow .09s ease;}
-  #kb .k.mod{font-size:11.5px;}
-  #kb .k.wide{flex-basis:calc(var(--kw) * 3 + 10px);max-width:none;}
+  #kb .k.sm{font-size:10.5px;}
+  #kb .k.mod{font-size:10.5px;}
+  #kb .k.wide{flex-basis:calc(var(--kw) * 3 + 8px);max-width:none;}
   #kb .k.mod.armed{background:var(--accent);color:#fff;border-color:var(--accent);}
   /* Pressed feedback: depress + accent flash (CSS :active for the live press, plus
      a JS-toggled .press so the flash is reliable on touch even after release). */
@@ -122,6 +124,9 @@
   #kb .ksym{display:none;}
   #kb.sym .klet{display:none;}
   #kb.sym .ksym{display:flex;}
+  /* Swipe trail: a full-screen overlay above the keyboard that traces the finger.
+     pointer-events:none so it never intercepts touches. */
+  #kb-trail{position:fixed;inset:0;pointer-events:none;z-index:70;}
   /* The keyboard sits where the OS keyboard would, so it follows the SYSTEM
      light/dark setting (not the app's always-dark theme). */
   @media (prefers-color-scheme: light){
@@ -194,23 +199,25 @@
     // keyboard can't. Layout: a specials row, a letters/symbols layer, a bottom
     // row. A string entry is a character key; an object customises it.
     const kb=$('kb'), kbtn=$('kbd-toggle'); kbtn.style.display='';
+    // 4 rows like the OS keyboard, but with every key kept: backspace + arrows go
+    // on the letter rows' ends, and all the function/modifier keys live on row 4.
     const KROWS={
-      special:[{l:'Esc',code:'Escape'},{l:'Tab',code:'Tab'},{l:'←',code:'ArrowLeft'},
-        {l:'↑',code:'ArrowUp'},{l:'↓',code:'ArrowDown'},{l:'→',code:'ArrowRight'},
-        {l:'C-A-D',combo:'ctrl-alt-del'}],
       letters:[
-        ['q','w','e','r','t','y','u','i','o','p'],
+        ['q','w','e','r','t','y','u','i','o','p',{l:'⌫',code:'Backspace'}],
         ['a','s','d','f','g','h','j','k','l'],
-        [{l:'⇧',mod:'shift'},'z','x','c','v','b','n','m',{l:'⌫',code:'Backspace'}]],
+        [{l:'⇧',mod:'shift'},'z','x','c','v','b','n','m',
+          {l:'←',code:'ArrowLeft'},{l:'↑',code:'ArrowUp'},{l:'↓',code:'ArrowDown'},{l:'→',code:'ArrowRight'}]],
       symbols:[
-        ['1','2','3','4','5','6','7','8','9','0'],
+        ['1','2','3','4','5','6','7','8','9','0',{l:'⌫',code:'Backspace'}],
         ['!','@','#','$','%','^','&','*','(',')'],
-        [{l:'⇧',mod:'shift'},'-','_','=','/',';',':',',','.',{l:'⌫',code:'Backspace'}]],
-      bottom:[{l:'?123',layer:1},{l:'Ctrl',mod:'ctrl'},{l:'Alt',mod:'alt'},{l:'Super',mod:'super'},
-        {l:'space',code:'Space',wide:1},{l:'⏎',code:'Enter'}]};
+        [{l:'⇧',mod:'shift'},'-','_','=','/',';',':',',','.','?','!']],
+      bottom:[{l:'?123',layer:1},{l:'Esc',code:'Escape'},{l:'Tab',code:'Tab'},
+        {l:'Ctrl',mod:'ctrl'},{l:'Alt',mod:'alt'},{l:'Super',mod:'super'},
+        {l:'space',code:'Space',wide:1},{l:'⏎',code:'Enter'},{l:'C-A-D',combo:'ctrl-alt-del'}]};
     const keyEl=s=>{ if(typeof s==='string') s={l:s,char:s};
       const b=document.createElement('button');
-      b.className='k'+(s.wide?' wide':'')+(s.mod?' mod':'');
+      b.className='k'+(s.wide?' wide':'')+(s.mod?' mod':'')
+        +((s.l&&s.l.length>1&&!s.wide&&!s.mod)?' sm':'');
       b.textContent=s.l;
       if(s.char!=null) b.dataset.char=s.char;
       if(s.code) b.dataset.code=s.code;
@@ -251,6 +258,31 @@
       if(navigator.vibrate) navigator.vibrate(8);
       k.classList.add('press'); setTimeout(()=>k.classList.remove('press'),110);
     });
+    // iOS-style swipe trail: a fading tail that traces the finger during a letter
+    // swipe. Drawn on a full-screen overlay in client coords, so rotation needs no
+    // maths — it follows the finger where it physically is. The RAF loop ages
+    // points out over TAIL_MS, so the tail trails and fades on release.
+    const trail=document.createElement('canvas'); trail.id='kb-trail'; document.body.appendChild(trail);
+    const tctx=trail.getContext('2d');
+    let tpts=[], traf=0;
+    const trailSize=()=>{ const d=window.devicePixelRatio||1;
+      trail.width=innerWidth*d; trail.height=innerHeight*d;
+      trail.style.width=innerWidth+'px'; trail.style.height=innerHeight+'px';
+      tctx.setTransform(d,0,0,d,0,0); };
+    trailSize(); addEventListener('resize',trailSize);
+    const TAIL_MS=200;
+    const drawTrail=()=>{ const now=performance.now();
+      tpts=tpts.filter(p=>now-p.t<TAIL_MS);
+      tctx.clearRect(0,0,innerWidth,innerHeight);
+      tctx.lineCap='round'; tctx.lineJoin='round';
+      for(let i=1;i<tpts.length;i++){ const a=tpts[i-1], b=tpts[i], k=1-(now-b.t)/TAIL_MS;
+        tctx.strokeStyle='rgba(79,140,255,'+(k*0.85)+')'; tctx.lineWidth=k*8+1.5;
+        tctx.beginPath(); tctx.moveTo(a.x,a.y); tctx.lineTo(b.x,b.y); tctx.stroke(); }
+      traf = tpts.length ? requestAnimationFrame(drawTrail) : 0; };
+    const trailAdd=(x,y)=>{ tpts.push({x,y,t:performance.now()}); if(!traf) traf=requestAnimationFrame(drawTrail); };
+    klet.addEventListener('touchstart',e=>{ if(!e.target.closest('[data-char]')) return;
+      const t=e.touches[0]; if(t){ tpts=[]; trailAdd(t.clientX,t.clientY); } },{passive:true});
+    klet.addEventListener('touchmove',e=>{ const t=e.touches[0]; if(t&&tpts.length) trailAdd(t.clientX,t.clientY); },{passive:true});
     // Show/hide the keyboard.
     let kbOpen=false;
     const setKb=on=>{ kbOpen=on; kbWrap.classList.toggle('hidden',!on); };
