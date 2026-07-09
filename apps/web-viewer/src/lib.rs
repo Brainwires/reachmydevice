@@ -126,6 +126,12 @@ struct Session {
     video: HtmlVideoElement,
     /// Whether we've already sent our protocol `Hello` over the control channel.
     hello_sent: RefCell<bool>,
+    /// The host's connection password once the user has entered it — shared with
+    /// [`App`] so it survives reconnects. On (re)connect the Hello carries it, so a
+    /// reconnect after a background/resume re-authenticates automatically instead
+    /// of stalling at "connected" with no video (the host won't stream until
+    /// authorized).
+    password: Rc<RefCell<Option<String>>>,
 }
 
 impl Session {
@@ -156,6 +162,9 @@ struct App {
     /// True while a connect attempt is scheduled or in progress (up to session
     /// creation) — guards against stacking reconnects.
     connecting: Cell<bool>,
+    /// The host's connection password, remembered across reconnects (see
+    /// [`Session::password`]).
+    password: Rc<RefCell<Option<String>>>,
 }
 
 #[wasm_bindgen(start)]
@@ -207,6 +216,7 @@ async fn run() -> Result<(), String> {
         video,
         current: RefCell::new(None),
         connecting: Cell::new(false),
+        password: Rc::new(RefCell::new(None)),
     });
 
     // Rebuild the connection when the tab becomes visible again with no healthy
@@ -293,6 +303,7 @@ async fn connect(app: Rc<App>) {
         control: RefCell::new(None),
         video: app.video.clone(),
         hello_sent: RefCell::new(false),
+        password: app.password.clone(),
     });
 
     wire_pc_callbacks(&session, &app);
@@ -402,8 +413,13 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
         let cb = Closure::<dyn FnMut()>::new(move || {
             if !*s.hello_sent.borrow() {
                 let hello = rmd_protocol::hello("web-viewer", rmd_protocol::Role::Viewer, 0);
-                let bytes = rmd_protocol::encode(&hello);
-                let _ = dc_open.send_with_u8_array(&bytes);
+                // Carry the remembered password so a reconnect re-authenticates
+                // without re-prompting (and doesn't stall unauthorized).
+                let hello = match s.password.borrow().as_ref() {
+                    Some(pw) => rmd_protocol::with_password(hello, pw.clone()),
+                    None => hello,
+                };
+                let _ = dc_open.send_with_u8_array(&rmd_protocol::encode(&hello));
                 *s.hello_sent.borrow_mut() = true;
                 attach_input(&s, &dc_open);
                 set_status("session ready");
@@ -415,18 +431,22 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
 
     // Inbound control (HelloAck, DisplayList, Pong…).
     {
-        // Clone the channel so we can re-send a password-bearing Hello.
+        // Clone the channel + session so we can re-send a password-bearing Hello
+        // and remember the password for reconnects.
         let dc_msg = dc.clone();
+        let s = session.clone();
         let cb = Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| {
             if let Ok(buf) = ev.data().dyn_into::<js_sys::ArrayBuffer>() {
                 let bytes = js_sys::Uint8Array::new(&buf).to_vec();
                 if let Ok(env) = rmd_protocol::decode(&bytes) {
                     if let Some(rmd_protocol::pb::envelope::Payload::HelloAck(ack)) = env.payload {
                         if ack.password_required {
-                            // Host wants a connection password (or ours was wrong):
-                            // prompt and re-send the Hello with it (not via the URL).
+                            // Host wants a connection password (or the remembered one
+                            // was wrong): prompt, remember it (for reconnects), and
+                            // re-send the Hello with it (not via the URL).
                             match prompt_password() {
                                 Some(pw) => {
+                                    *s.password.borrow_mut() = Some(pw.clone());
                                     let hello = rmd_protocol::with_password(
                                         rmd_protocol::hello(
                                             "web-viewer",
