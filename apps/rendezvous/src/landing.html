@@ -24,11 +24,18 @@
   .wrap { max-width:960px; margin:0 auto; padding:0 20px; }
 
   header { display:flex; align-items:center; gap:12px; padding:22px 0; }
-  .logo { min-width:40px; height:40px; border-radius:10px; padding:0 12px;
+  .logo { width:40px; height:40px; flex:0 0 auto; border-radius:10px;
     background:linear-gradient(135deg,var(--accent),#8a5cff); display:grid;
-    place-items:center; color:#fff; font-weight:700; font-size:15px; letter-spacing:1px; }
+    place-items:center; color:#fff; font-weight:700; font-size:13px; letter-spacing:.5px; }
   header h1 { font-size:19px; margin:0; font-weight:650; }
   header nav { margin-left:auto; display:flex; gap:20px; align-items:center; font-size:15px; }
+  /* Mobile: drop the header CTA (redundant with the hero button) so the header
+     doesn't cram/wrap, and ease the title size. */
+  @media (max-width:600px) {
+    header { padding:16px 0; }
+    header h1 { font-size:17px; }
+    header nav .btn { display:none; }
+  }
 
   .hero { padding:56px 0 40px; text-align:center; }
   .hero h2 { font-size:clamp(30px,5vw,46px); line-height:1.1; margin:0 0 18px;
@@ -146,7 +153,7 @@
   </section>
 
   <footer>
-    <div class="logo" style="width:32px;height:32px;min-width:32px;font-size:12px;padding:0 8px">RMD</div>
+    <div class="logo" style="width:32px;height:32px;font-size:11px">RMD</div>
     <div>ReachMyDevice — self-hostable, end-to-end-encrypted remote desktop.</div>
     <div class="sp"></div>
     <a href="https://github.com/Brainwires/reachmydevice">Source</a>
