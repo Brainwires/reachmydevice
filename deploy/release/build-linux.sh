@@ -90,10 +90,15 @@ if ! command -v cargo-deb >/dev/null 2>&1; then
   log "Installing cargo-deb"
   cargo install cargo-deb --locked
 fi
+# When cross-compiling, the host `strip` can't strip the foreign binary, so
+# cargo-deb aborts — skip stripping for cross builds (the binary is already
+# unstripped from the cross toolchain; a slightly larger .deb is fine).
+DEB_ARGS=()
+[[ "$BUILDER" == cross ]] && DEB_ARGS+=(--no-strip)
 for pkg in rmd-host rmd-rendezvous; do
   log "Building .deb for $pkg"
   # --no-build: reuse the release binaries we just compiled.
-  cargo deb -p "$pkg" --no-build --target "$TARGET" --output "$DIST_DIR/" \
+  cargo deb -p "$pkg" --no-build --target "$TARGET" "${DEB_ARGS[@]}" --output "$DIST_DIR/" \
     || warn "cargo deb failed for $pkg (skipping)"
 done
 
