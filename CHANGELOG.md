@@ -4,6 +4,30 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-07-10
+
+Reconnect-stability release, plus browser-viewer polish.
+
+### Fixed
+- **Host no longer deadlocks on reconnect after idle.** When a backgrounded viewer's
+  browser rebuilt its PeerConnection and re-announced, the rendezvous replayed the
+  host's cached offer; the viewer answered, but the host's connection was already
+  past `have-local-offer`, so it failed with `set remote answer: from stable
+  applying false answer` and stalled forever. The host now rebuilds with a fresh
+  offer (new ICE/DTLS credentials) on a post-negotiation answer — mirroring the
+  viewer's existing second-offer path — so idle reconnects complete cleanly.
+- **Browser viewer keeps video pinned to the live edge.** WebRTC playout latency no
+  longer creeps up over a session (or after a background/resume): the receiver is
+  asked to keep its buffer minimal, and a once-a-second monitor drains any
+  accumulated jitter-buffer delay by briefly speeding playback — frames are never
+  dropped, playback catches back up to live.
+- **On-screen keyboard and video sit correctly in rotated views.** Both are kept
+  below the fixed header and the keyboard is sized to the video's rendered width, so
+  the keys no longer slide under the toolbar or off-centre.
+- **Swipe typing surfaces rare-but-real words** (e.g. "pig"): the frequency prior was
+  softened and the suggestion list widened so a clean gesture for an uncommon word
+  isn't buried by common look-alikes.
+
 ## [0.2.7] - 2026-07-09
 
 Mobile browser-viewer overhaul, and a fix for unbounded video latency.
