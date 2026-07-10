@@ -35,6 +35,10 @@ message Envelope {
     ViewOnly view_only = 25;
     // Audio (added in MINOR 2; host -> viewer Opus).
     AudioFrame audio = 26;
+    // Digital zoom: the viewer tells the host which sub-rect of the screen to
+    // crop + scale to full frame (added in MINOR 7; older hosts ignore it and
+    // stay full-screen).
+    SetZoom set_zoom = 27;
   }
 }
 
@@ -147,6 +151,21 @@ message KeyEvent {
   uint32 hid_usage = 1;
   bool pressed = 2;
   uint32 modifiers = 3; // bitmask, see Modifiers in Rust
+}
+
+// --- Digital zoom (viewer -> host) -----------------------------------------
+
+// The crop rectangle the host should magnify: a sub-region of the captured
+// screen, normalized [0,1], that gets scaled back up to the full encoded frame.
+// The viewer derives this from its pinch gesture and sends it whenever it
+// changes. The host applies the SAME rect to (a) crop+scale the video before
+// encoding and (b) remap incoming pointer coordinates, so taps land correctly.
+// The identity rect {0,0,1,1} means "no zoom" (full screen).
+message SetZoom {
+  double x = 1; // left edge, normalized [0,1]
+  double y = 2; // top edge, normalized [0,1]
+  double w = 3; // width,  normalized (0,1]
+  double h = 4; // height, normalized (0,1]
 }
 
 // --- Liveness / latency ----------------------------------------------------

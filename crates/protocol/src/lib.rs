@@ -21,7 +21,7 @@ pub use pb::{
     envelope, input_event, AudioFrame, Bye, ClipboardKind, ClipboardUpdate, DisplayDescriptor,
     DisplayList, Envelope, FileAck, FileCancel, FileChunk, FileComplete, FileOffer, Hello,
     HelloAck, InputEvent, KeyEvent, MouseButton, MouseMove, MouseScroll, Ping, Pong,
-    RequestKeyframe, Role, SelectDisplay, VideoCodec, ViewOnly,
+    RequestKeyframe, Role, SelectDisplay, SetZoom, VideoCodec, ViewOnly,
 };
 
 /// Protocol major version. **Incompatible across mismatches** — bump only on a
@@ -35,8 +35,10 @@ pub const PROTOCOL_MAJOR: u32 = 1;
 /// MINOR 5 added video-codec negotiation (`Hello.supported_video_codecs`,
 ///   `HelloAck.video_codec`) for the AV1 (browser) / H.264 split;
 /// MINOR 6 added the connection password (`Hello.password`,
-///   `HelloAck.password_required`).
-pub const PROTOCOL_MINOR: u32 = 6;
+///   `HelloAck.password_required`);
+/// MINOR 7 added digital zoom (`SetZoom`: viewer-driven crop rect the host
+///   magnifies and remaps pointer coords through).
+pub const PROTOCOL_MINOR: u32 = 7;
 
 /// Errors from encoding/decoding or handshake validation.
 #[derive(Debug, thiserror::Error)]
@@ -320,6 +322,13 @@ pub fn display_list(displays: Vec<DisplayDescriptor>) -> Envelope {
 /// Ask the host to switch the captured display.
 pub fn select_display(id: u32) -> Envelope {
     envelope(pb::envelope::Payload::SelectDisplay(SelectDisplay { id }))
+}
+
+/// Viewer → host: set the digital-zoom crop rect (normalized [0,1]). The host
+/// crops+scales the screen to this rect and remaps pointer coords through it.
+/// `{0,0,1,1}` is the identity (no zoom).
+pub fn set_zoom(x: f64, y: f64, w: f64, h: f64) -> Envelope {
+    envelope(pb::envelope::Payload::SetZoom(SetZoom { x, y, w, h }))
 }
 
 /// 64-bit FNV-1a hash — a cheap content fingerprint for the clipboard loop guard.

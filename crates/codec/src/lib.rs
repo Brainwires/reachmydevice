@@ -20,7 +20,10 @@ use bytes::Bytes;
 pub mod audio;
 #[cfg(feature = "av1")]
 pub mod av1;
+pub mod scale;
 pub mod software;
+
+pub use scale::{CropRect, Scaler};
 
 #[cfg(feature = "audio")]
 pub use audio::{

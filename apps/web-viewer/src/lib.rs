@@ -670,21 +670,17 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             .ok();
         cb.forget();
     }
-    // Touch = trackpad semantics, branching on the current finger count. A drag
-    // moves the cursor by a RELATIVE delta (a comparable distance) — it does NOT
-    // jump the cursor to the point under the finger; a tap clicks in place:
-    //   • one-finger tap        → LEFT-click at the cursor's current location
-    //   • two-finger QUICK tap  → RIGHT-click at the cursor's current location
-    //   • one-finger press+drag → move the cursor by the finger's delta (hover)
-    //   • three-finger swipe    → wheel scroll (all four directions, content
-    //                             follows the fingers)
-    //   • two-finger press+drag → LEFT ALONE → the browser pinch-zooms
-    // We only `preventDefault` one-finger drags (to stop page scroll) and
-    // three-finger swipes (scroll); two-finger gestures are left to the browser so
-    // pinch-zoom works, and a two-finger right-click is recognised only as a fast
-    // tap (short press + release, no movement). Because we no longer swallow
-    // touches, the browser emits synthesized mouse events — the mouse handlers drop
-    // those via the `last_touch` ghost guard.
+    // Touch = trackpad semantics, branching on the current finger count. The app
+    // now owns EVERY touch (we `preventDefault` all branches; the browser never
+    // pinch-zooms or scrolls the page — see `touch-action:none` on #screen):
+    //   • one-finger tap                → LEFT-click at the cursor's location
+    //   • one-finger press+drag         → move the cursor by the finger's delta
+    //   • one-finger long-press / double-tap-hold, then drag → DRAG-SELECT: hold
+    //       the left button down through the move (mode via `data-dragmode`)
+    //   • two-finger QUICK tap          → RIGHT-click at the cursor's location
+    //   • two-finger pinch + drag       → HOST digital zoom (SetZoom) + pan the
+    //       zoomed view; the host crops+scales the screen and remaps our coords
+    //   • three-finger swipe            → wheel scroll (content follows fingers)
     //
     // The host moves/clicks AT the coords it's sent (absolute), so we keep a
     // virtual cursor here, add each finger delta into it (clamped to [0,1]), and
@@ -693,10 +689,20 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
     // handled for free. We track the PRIMARY touch (`touches[0]`) and reset the
     // delta anchor whenever the finger set changes, so adding/removing a finger
     // doesn't fling the cursor.
+    //
+    // Zoom is a persistent view transform {scale, center} in full-screen
+    // normalized coords; a two-finger gesture zooms about the centroid and pans by
+    // its translation. We derive the crop rect {x0,y0,w,h} = center±(1/2s), 1/s and
+    // send it as `SetZoom` (throttled). The host applies the SAME rect to the video
+    // and to our pointer coords, so taps land right and zoomed control is finer.
     {
         const SENS: f64 = 1.0; // finger→cursor gain; 1.0 = comparable distance
         const SCROLL_SENS: f64 = 1.0; // finger px → wheel px, content-follows-finger
         const TAP_MS: f64 = 300.0; // max press time for a two-finger tap = right-click
+        const LONGPRESS_MS: i32 = 400; // press-and-hold time to arm a drag-select
+        const DOUBLE_TAP_MS: f64 = 300.0; // max gap for double-tap-hold to arm a drag
+        const MAX_ZOOM: f64 = 8.0; // host digital-zoom cap
+        const ZOOM_THROTTLE_MS: f64 = 33.0; // ~30 SetZoom/s while pinching
         let moved = Rc::new(Cell::new(false)); // did this gesture cross the drag threshold?
         let start = Rc::new(Cell::new((0.0f64, 0.0f64))); // first-finger client px (threshold anchor)
         let start_ms = Rc::new(Cell::new(0.0f64)); // gesture start time (for the tap window)
@@ -704,6 +710,16 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
         let cursor = Rc::new(Cell::new((0.5f64, 0.5f64))); // virtual cursor, normalized
         let has_pos = Rc::new(Cell::new(false)); // has the cursor position been established?
         let max_fingers = Rc::new(Cell::new(0u32)); // most fingers down at once this gesture
+        let finger_down = Rc::new(Cell::new(false)); // is at least one finger currently down?
+        let dragging = Rc::new(Cell::new(false)); // is drag-select holding the left button?
+        let last_tap_ms = Rc::new(Cell::new(0.0f64)); // time of the last clean 1-finger tap (double-tap)
+        let lp_handle = Rc::new(Cell::new(None::<i32>)); // pending long-press timeout id
+        // Persistent zoom view transform (survives across gestures until changed).
+        let scale = Rc::new(Cell::new(1.0f64)); // ≥1; 1 = no zoom
+        let center = Rc::new(Cell::new((0.5f64, 0.5f64))); // view center, full-screen normalized
+        let pinch_dist = Rc::new(Cell::new(0.0f64)); // previous two-finger distance (0 = not pinching)
+        let pinch_cen = Rc::new(Cell::new((0.0f64, 0.0f64))); // previous two-finger centroid (client px)
+        let last_zoom_ms = Rc::new(Cell::new(0.0f64)); // last SetZoom send time (throttle)
 
         // Snapshot the primary touch's client-px position, if any.
         fn primary(ev: &TouchEvent) -> Option<(f64, f64)> {
@@ -711,24 +727,105 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 .get(0)
                 .map(|t| (t.client_x() as f64, t.client_y() as f64))
         }
+        // Both touch points' client-px positions, if a second finger is present.
+        fn two_points(ev: &TouchEvent) -> Option<((f64, f64), (f64, f64))> {
+            let t = ev.touches();
+            let a = t.get(0)?;
+            let b = t.get(1)?;
+            Some((
+                (a.client_x() as f64, a.client_y() as f64),
+                (b.client_x() as f64, b.client_y() as f64),
+            ))
+        }
 
-        // touchstart: (re)anchor the delta to the primary touch and track the peak
-        // finger count. Does NOT move the cursor, and does NOT preventDefault (so a
-        // two-finger pinch can still start).
-        {
-            let (moved, start, start_ms, prev, max_fingers, last_touch) = (
+        // Long-press timer target, reused across presses. Fires only if a single
+        // finger is still down, hasn't moved, and isn't already dragging → arms a
+        // drag-select by pressing the left button at the virtual cursor (or, cold,
+        // at the press point like a tap does).
+        let lp_fn: Rc<js_sys::Function> = {
+            let (dc, norm, cursor, dragging, finger_down, moved, max_fingers, has_pos, start, lp_handle) = (
+                dc.clone(),
+                norm.clone(),
+                cursor.clone(),
+                dragging.clone(),
+                finger_down.clone(),
                 moved.clone(),
-                start.clone(),
-                start_ms.clone(),
-                prev.clone(),
                 max_fingers.clone(),
-                last_touch.clone(),
+                has_pos.clone(),
+                start.clone(),
+                lp_handle.clone(),
             );
+            let c = Closure::<dyn FnMut()>::new(move || {
+                lp_handle.set(None);
+                if !(finger_down.get() && !moved.get() && max_fingers.get() == 1 && !dragging.get()) {
+                    return;
+                }
+                let (x, y) = if has_pos.get() {
+                    cursor.get()
+                } else {
+                    let (sx, sy) = start.get();
+                    let p = norm(sx, sy);
+                    cursor.set(p);
+                    has_pos.set(true);
+                    p
+                };
+                let _ = dc.send_with_u8_array(&input::mouse_button(0, true, x, y));
+                dragging.set(true);
+            });
+            let f = c.as_ref().unchecked_ref::<js_sys::Function>().clone();
+            c.forget();
+            Rc::new(f)
+        };
+
+        // touchstart: (re)anchor the delta to the primary touch, track the peak
+        // finger count, arm drag-select (1 finger) or baseline the pinch (2), and
+        // preventDefault (the app owns every touch now).
+        {
+            let dc = dc.clone();
+            let vidattr = video.clone();
+            let moved = moved.clone();
+            let start = start.clone();
+            let start_ms = start_ms.clone();
+            let prev = prev.clone();
+            let max_fingers = max_fingers.clone();
+            let last_touch = last_touch.clone();
+            let finger_down = finger_down.clone();
+            let dragging = dragging.clone();
+            let last_tap_ms = last_tap_ms.clone();
+            let lp_handle = lp_handle.clone();
+            let lp_fn = lp_fn.clone();
+            let pinch_dist = pinch_dist.clone();
+            let pinch_cen = pinch_cen.clone();
+            let cursor = cursor.clone();
+            let has_pos = has_pos.clone();
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
+                ev.prevent_default();
                 last_touch.set(now_ms());
                 let n = ev.touches().length();
+                // Fresh gesture (first finger of a new touch sequence): clear the
+                // drag flag so a stale drag from the previous gesture can't suppress
+                // this one's tap/right-click (fingers may land simultaneously, so
+                // this can't live only in the n==1 branch below).
+                if !finger_down.get() {
+                    moved.set(false);
+                }
                 if n > max_fingers.get() {
                     max_fingers.set(n);
+                }
+                finger_down.set(true);
+                // A second finger means "zoom", not drag: cancel a pending long-press
+                // and release any in-progress drag-select, then baseline the pinch.
+                if n >= 2 {
+                    clear_lp(&lp_handle);
+                    if dragging.get() {
+                        let (x, y) = cursor.get();
+                        let _ = dc.send_with_u8_array(&input::mouse_button(0, false, x, y));
+                        dragging.set(false);
+                    }
+                    if let Some((a, b)) = two_points(&ev) {
+                        pinch_dist.set((a.0 - b.0).hypot(a.1 - b.1).max(1.0));
+                        pinch_cen.set(((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0));
+                    }
                 }
                 if let Some(p) = primary(&ev) {
                     prev.set(p); // re-anchor so the new finger doesn't fling
@@ -736,6 +833,22 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                         start.set(p);
                         start_ms.set(now_ms());
                         moved.set(false);
+                        // Arm drag-select per the client's selected mode.
+                        let doubletap =
+                            vidattr.dataset().get("dragmode").as_deref() == Some("doubletap");
+                        if doubletap {
+                            // A held second tap within the window starts a drag now.
+                            if now_ms() - last_tap_ms.get() < DOUBLE_TAP_MS
+                                && has_pos.get()
+                                && !dragging.get()
+                            {
+                                let (x, y) = cursor.get();
+                                let _ = dc.send_with_u8_array(&input::mouse_button(0, true, x, y));
+                                dragging.set(true);
+                            }
+                        } else {
+                            arm_lp(&lp_handle, &lp_fn, LONGPRESS_MS);
+                        }
                     }
                 }
             });
@@ -744,36 +857,86 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 .ok();
             cb.forget();
         }
-        // touchmove: branch on the CURRENT finger count — 1 = move cursor by delta,
-        // 3+ = wheel scroll by delta, 2 = nothing (pinch-zoom / pending right-click).
-        // preventDefault only for 1 or 3+ fingers; two-finger moves are left to the
-        // browser so it can pinch-zoom. Any move past the threshold marks the
-        // gesture a drag so touchend won't click.
+        // touchmove: branch on the CURRENT finger count — 1 = move cursor by delta
+        // (button held if drag-selecting), 2 = host zoom + pan, 3+ = wheel scroll.
+        // All branches preventDefault (the app owns every touch). A move past the
+        // threshold marks the gesture a drag (so touchend won't click) and cancels a
+        // pending long-press.
         {
             let dc = dc.clone();
             let norm = norm.clone();
-            let (moved, start, prev, cursor, has_pos, last_touch) = (
-                moved.clone(),
-                start.clone(),
-                prev.clone(),
-                cursor.clone(),
-                has_pos.clone(),
-                last_touch.clone(),
-            );
+            let moved = moved.clone();
+            let start = start.clone();
+            let prev = prev.clone();
+            let cursor = cursor.clone();
+            let has_pos = has_pos.clone();
+            let last_touch = last_touch.clone();
+            let lp_handle = lp_handle.clone();
+            let scale = scale.clone();
+            let center = center.clone();
+            let pinch_dist = pinch_dist.clone();
+            let pinch_cen = pinch_cen.clone();
+            let last_zoom_ms = last_zoom_ms.clone();
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
+                ev.prevent_default();
                 last_touch.set(now_ms());
                 let n = ev.touches().length();
+                if n == 2 {
+                    // Two-finger pinch: zoom about the centroid + pan by its
+                    // translation. Updates the persistent {scale, center} transform
+                    // and sends the derived crop rect as SetZoom (throttled).
+                    let Some((a, b)) = two_points(&ev) else {
+                        return;
+                    };
+                    let dist = (a.0 - b.0).hypot(a.1 - b.1).max(1.0);
+                    let cen = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+                    let pd = pinch_dist.get();
+                    if pd <= 0.0 {
+                        pinch_dist.set(dist);
+                        pinch_cen.set(cen);
+                        return;
+                    }
+                    moved.set(true); // a pinch is never a right-click tap
+                    let w_old = 1.0 / scale.get();
+                    let s = (scale.get() * (dist / pd)).clamp(1.0, MAX_ZOOM);
+                    let w_new = 1.0 / s;
+                    let (vx, vy) = norm(cen.0, cen.1); // centroid, visible-normalized
+                    let (pvx, pvy) = norm(pinch_cen.get().0, pinch_cen.get().1);
+                    let (cx0, cy0) = center.get();
+                    // Keep the point under the centroid fixed while zooming, then pan
+                    // (content follows the fingers).
+                    let mut cx = cx0 + (vx - 0.5) * (w_old - w_new) - (vx - pvx) * w_new;
+                    let mut cy = cy0 + (vy - 0.5) * (w_old - w_new) - (vy - pvy) * w_new;
+                    let half = w_new / 2.0;
+                    cx = cx.clamp(half, 1.0 - half);
+                    cy = cy.clamp(half, 1.0 - half);
+                    scale.set(s);
+                    center.set((cx, cy));
+                    pinch_dist.set(dist);
+                    pinch_cen.set(cen);
+                    let now = now_ms();
+                    if now - last_zoom_ms.get() >= ZOOM_THROTTLE_MS {
+                        last_zoom_ms.set(now);
+                        let _ = dc.send_with_u8_array(&input::set_zoom(
+                            cx - half,
+                            cy - half,
+                            w_new,
+                            w_new,
+                        ));
+                    }
+                    return;
+                }
                 let Some((cx, cy)) = primary(&ev) else {
                     return;
                 };
                 let (px, py) = prev.get();
                 prev.set((cx, cy));
                 let (sx, sy) = start.get();
-                if (cx - sx).hypot(cy - sy) > 8.0 {
+                if (cx - sx).hypot(cy - sy) > 8.0 && !moved.get() {
                     moved.set(true);
+                    clear_lp(&lp_handle); // a moving finger isn't a long-press
                 }
                 if n >= 3 {
-                    ev.prevent_default();
                     // Three-finger swipe → wheel scroll. Content follows the
                     // fingers (drag down → content down), in raw client px.
                     let (dx, dy) = ((cx - px) * SCROLL_SENS, (cy - py) * SCROLL_SENS);
@@ -781,9 +944,9 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                         let _ = dc.send_with_u8_array(&input::mouse_scroll(dx, dy));
                     }
                 } else if n <= 1 {
-                    ev.prevent_default(); // stop page scroll while dragging the cursor
                     // Normalized (un-rotated) finger delta: `norm` is affine, so the
-                    // origin cancels and only the displacement survives.
+                    // origin cancels and only the displacement survives. The host has
+                    // the button down if we're drag-selecting, so this drags.
                     let (nx, ny) = norm(cx, cy);
                     let (npx, npy) = norm(px, py);
                     let (mut ux, mut uy) = cursor.get();
@@ -793,40 +956,63 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                     has_pos.set(true);
                     let _ = dc.send_with_u8_array(&input::mouse_move(ux, uy));
                 }
-                // n == 2: do nothing — leave it to the browser (pinch-zoom).
             });
             video
                 .add_event_listener_with_callback("touchmove", cb.as_ref().unchecked_ref())
                 .ok();
             cb.forget();
         }
-        // touchend: re-anchor the delta while fingers remain; on the LAST lift, a
-        // tap (never dragged) clicks at the virtual cursor — left for one finger,
-        // right for a QUICK two-finger tap (a longer two-finger press was a
-        // pinch/hold and is left alone). A drag/swipe just ends. Cold start (a tap
-        // before any drag → no known cursor): fall back to the tap point + adopt it.
+        // touchend: while fingers remain, re-anchor + drop the pinch baseline. On the
+        // LAST lift: release a drag-select if one is held; else a tap (never dragged)
+        // clicks at the virtual cursor — left for one finger, right for a QUICK two-
+        // finger tap (a longer two-finger press was a pinch). A clean 1-finger tap is
+        // recorded for double-tap-hold. Cold start: fall back to the tap point.
         {
             let dc = dc.clone();
             let norm = norm.clone();
-            let (moved, start_ms, prev, cursor, has_pos, max_fingers, last_touch) = (
-                moved.clone(),
-                start_ms.clone(),
-                prev.clone(),
-                cursor.clone(),
-                has_pos.clone(),
-                max_fingers.clone(),
-                last_touch.clone(),
-            );
+            let moved = moved.clone();
+            let start_ms = start_ms.clone();
+            let prev = prev.clone();
+            let cursor = cursor.clone();
+            let has_pos = has_pos.clone();
+            let max_fingers = max_fingers.clone();
+            let last_touch = last_touch.clone();
+            let finger_down = finger_down.clone();
+            let dragging = dragging.clone();
+            let last_tap_ms = last_tap_ms.clone();
+            let lp_handle = lp_handle.clone();
+            let pinch_dist = pinch_dist.clone();
+            let scale = scale.clone();
+            let center = center.clone();
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
                 last_touch.set(now_ms());
                 if let Some(p) = primary(&ev) {
                     prev.set(p); // a finger lifted but others remain — re-anchor
+                    pinch_dist.set(0.0); // re-baseline the pinch on the next 2-finger move
                     return;
                 }
+                // Last finger up.
+                finger_down.set(false);
+                clear_lp(&lp_handle);
                 let fingers = max_fingers.get();
                 let dragged = moved.get();
                 let quick = now_ms() - start_ms.get() < TAP_MS;
                 max_fingers.set(0); // reset for the next gesture
+                pinch_dist.set(0.0);
+                // If a pinch just ended, make sure the host has the final crop rect
+                // (the throttle may have skipped the last move).
+                if fingers >= 2 {
+                    let w = 1.0 / scale.get();
+                    let (cx, cy) = center.get();
+                    let _ = dc.send_with_u8_array(&input::set_zoom(cx - w / 2.0, cy - w / 2.0, w, w));
+                }
+                // Release a held drag-select — this is a button-up, not a click.
+                if dragging.get() {
+                    let (x, y) = cursor.get();
+                    let _ = dc.send_with_u8_array(&input::mouse_button(0, false, x, y));
+                    dragging.set(false);
+                    return;
+                }
                 if dragged {
                     return; // it was a drag/swipe/pinch, not a tap
                 }
@@ -847,6 +1033,10 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 } else {
                     return;
                 };
+                // A clean 1-finger tap arms double-tap-hold.
+                if fingers == 1 {
+                    last_tap_ms.set(now_ms());
+                }
                 let _ = dc.send_with_u8_array(&input::mouse_button(btn, true, x, y));
                 let _ = dc.send_with_u8_array(&input::mouse_button(btn, false, x, y));
             });
@@ -906,6 +1096,24 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
     attach_keyboard(dc);
 }
 
+/// Cancel a pending long-press timer (if any) and clear its handle.
+fn clear_lp(handle: &Cell<Option<i32>>) {
+    if let (Some(id), Some(w)) = (handle.get(), web_sys::window()) {
+        w.clear_timeout_with_handle(id);
+    }
+    handle.set(None);
+}
+
+/// (Re)arm the long-press timer to fire `f` after `ms`.
+fn arm_lp(handle: &Cell<Option<i32>>, f: &js_sys::Function, ms: i32) {
+    clear_lp(handle);
+    if let Some(w) = web_sys::window() {
+        if let Ok(id) = w.set_timeout_with_callback_and_timeout_and_arguments_0(f, ms) {
+            handle.set(Some(id));
+        }
+    }
+}
+
 /// Current high-res time in ms (`performance.now()`); 0.0 if unavailable.
 fn now_ms() -> f64 {
     web_sys::window()
@@ -916,8 +1124,9 @@ fn now_ms() -> f64 {
 
 /// Whether a mouse event is a browser-synthesized "ghost" event just after a
 /// touch (within 700ms) — the touch handlers already produced the real input, so
-/// the mouse handlers must ignore it. Now that we don't `preventDefault` touches
-/// (so pinch-zoom works), the browser emits these compatibility mouse events.
+/// the mouse handlers must ignore it. We now `preventDefault` every touch, which
+/// suppresses most of these compatibility events, but the guard stays as a
+/// belt-and-suspenders against browsers that still emit them.
 fn is_ghost_mouse(last_touch: &Rc<Cell<f64>>) -> bool {
     now_ms() - last_touch.get() < 700.0
 }

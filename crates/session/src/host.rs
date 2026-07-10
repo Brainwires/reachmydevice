@@ -25,6 +25,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// Map the codec crate's `VideoCodec` to the transport's local mirror (the
@@ -241,6 +242,12 @@ where
         None
     };
 
+    // Digital-zoom crop rect (viewer-driven, via `SetZoom`). Shared by the encode
+    // thread (which crops+scales the video to it) and the input path (which remaps
+    // pointer coords through it, so taps land inside the zoomed region). Default:
+    // no zoom (full screen).
+    let zoom = Arc::new(Mutex::new(codec::CropRect::FULL));
+
     // Encode thread: frames -> H.264 -> transport, with GCC-driven bitrate.
     // Gated on `authorized`, so screen content is never streamed to a peer that
     // has completed DTLS but not been authorized.
@@ -250,6 +257,7 @@ where
         force_keyframe.clone(),
         authorized.clone(),
         frame_rx,
+        zoom.clone(),
     )?;
 
     // Input injector (best effort; needs Accessibility permission).
@@ -388,6 +396,7 @@ where
                     &cfg.device_name,
                     to_proto_codec(cfg.video_codec),
                     cfg.connect_password.as_deref(),
+                    &zoom,
                 );
                 // The viewer just became authorized (accepted Hello) — surface the
                 // active session once, and start streaming.
@@ -509,6 +518,7 @@ fn spawn_encode_thread(
     force_keyframe: Arc<AtomicBool>,
     authorized: Arc<AtomicBool>,
     frame_rx: mpsc::Receiver<capture::Frame>,
+    zoom: Arc<Mutex<codec::CropRect>>,
 ) -> anyhow::Result<()> {
     let enc_cfg = codec::EncoderConfig {
         width: cfg.width,
@@ -527,6 +537,8 @@ fn spawn_encode_thread(
                     return;
                 }
             };
+            // Reused across frames; only does work when a zoom is active.
+            let mut scaler = codec::Scaler::new();
             while let Ok(mut frame) = frame_rx.recv() {
                 // Keep-latest: if we fell behind (encoding slower than capture, or a
                 // slow link backing the pipeline up), skip straight to the newest
@@ -553,11 +565,33 @@ fn spawn_encode_thread(
                 // Track the GCC target so the stream adapts to the link.
                 encoder.set_target_bitrate(sender.target_bitrate_bps());
                 let force = force_keyframe.swap(false, Ordering::Relaxed);
-                match encoder.encode(
+                // Digital zoom: crop the requested sub-rect and scale it back to
+                // the frame's own size, so the wire resolution never changes. When
+                // there's no zoom (the common case), `crop_scale` returns None and
+                // we encode the frame untouched — zero added cost.
+                let rect = *zoom.lock().unwrap();
+                let (data, width, height, stride) = match scaler.crop_scale(
                     &frame.data,
                     frame.width,
                     frame.height,
                     frame.bytes_per_row,
+                    rect,
+                    frame.width,
+                    frame.height,
+                ) {
+                    Some(scaled) => (scaled, frame.width, frame.height, frame.width * 4),
+                    None => (
+                        frame.data.as_ref(),
+                        frame.width,
+                        frame.height,
+                        frame.bytes_per_row,
+                    ),
+                };
+                match encoder.encode(
+                    data,
+                    width,
+                    height,
+                    stride,
                     frame.capture_ts_micros,
                     force,
                 ) {
@@ -627,6 +661,7 @@ fn handle_control(
     device_name: &str,
     host_codec: proto::VideoCodec,
     connect_password: Option<&str>,
+    zoom: &Mutex<codec::CropRect>,
 ) {
     let env = match proto::decode(bytes) {
         Ok(e) => e,
@@ -709,7 +744,26 @@ fn handle_control(
             }
         }
         Payload::Input(ie) => {
-            if let (Some(inj), Some(ev)) = (injector.as_deref_mut(), ie.event) {
+            if let (Some(inj), Some(mut ev)) = (injector.as_deref_mut(), ie.event) {
+                // Remap pointer coords through the active zoom crop: the viewer
+                // sends coords normalized over the *visible* (cropped) region, so
+                // `screen = crop.origin + coord * crop.size`. Non-positional events
+                // (scroll/key) pass through. `sanitized()` makes a full rect a no-op.
+                let rect = zoom.lock().unwrap().sanitized();
+                if !rect.is_full() {
+                    use proto::input_event::Event;
+                    match &mut ev {
+                        Event::MouseMove(m) => {
+                            m.x = rect.x + m.x * rect.w;
+                            m.y = rect.y + m.y * rect.h;
+                        }
+                        Event::MouseButton(b) => {
+                            b.x = rect.x + b.x * rect.w;
+                            b.y = rect.y + b.y * rect.h;
+                        }
+                        _ => {}
+                    }
+                }
                 if let Err(e) = inj.inject(&ev) {
                     tracing::trace!(error=%e, "inject failed");
                 }
@@ -722,6 +776,15 @@ fn handle_control(
         Payload::Clipboard(update) => clipboard.apply_remote(update),
         Payload::RequestKeyframe(_) => capture_ctl.force_keyframe.store(true, Ordering::Relaxed),
         Payload::SelectDisplay(sel) => capture_ctl.select(sel.id),
+        Payload::SetZoom(z) => {
+            *zoom.lock().unwrap() = codec::CropRect {
+                x: z.x,
+                y: z.y,
+                w: z.w,
+                h: z.h,
+            }
+            .sanitized();
+        }
         _ => {}
     }
 }
@@ -961,8 +1024,15 @@ mod tests {
         let authorized = Arc::new(AtomicBool::new(false));
         let force_keyframe = Arc::new(AtomicBool::new(true));
         let (frame_tx, frame_rx) = mpsc::channel::<Frame>();
-        spawn_encode_thread(&cfg, host.sender(), force_keyframe, authorized.clone(), frame_rx)
-            .expect("encode thread");
+        spawn_encode_thread(
+            &cfg,
+            host.sender(),
+            force_keyframe,
+            authorized.clone(),
+            frame_rx,
+            std::sync::Arc::new(std::sync::Mutex::new(codec::CropRect::FULL)),
+        )
+        .expect("encode thread");
 
         let mk_frame = |seq: u64| Frame {
             width: w,

@@ -4,6 +4,32 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-07-10
+
+Phone-control round 1: host-side pinch-zoom and drag-select for the browser viewer.
+
+### Added
+- **Pinch-to-zoom now magnifies the real desktop, host-side.** The browser no longer
+  pinch-zooms its own (blurry) rendering of the video. Instead a two-finger pinch/pan
+  sends the host a crop rectangle (`SetZoom`); `rmdd` crops that region of the captured
+  screen and scales it back to full frame before encoding, so you get a crisp,
+  re-encoded zoom of the actual screen. The host applies the *same* rectangle to remap
+  pointer coordinates, so taps land accurately inside the zoomed region and cursor
+  motion gets finer the more you zoom — built for hitting small targets on a big screen
+  from a phone. Two fingers zoom (pinch) and pan (drag) together; pinch back out to
+  return to the full screen. (Protocol MINOR 7; older hosts ignore `SetZoom`.)
+- **Drag-select / drag-and-drop from touch.** A one-finger long-press (default) or
+  double-tap-and-hold arms a left-button-down that's held through the drag and released
+  on lift — so you can select text and drag on the remote desktop. The trigger is
+  user-selectable from a new toolbar toggle (LP / 2T) and persists across sessions.
+
+### Changed
+- The browser viewer now captures **every** touch on the video (`touch-action:none`,
+  non-zoomable viewport): all one/two/three-finger gestures are handled in-app rather
+  than partly by the browser. Existing gestures are unchanged — one-finger tap/drag
+  (left-click / move cursor), quick two-finger tap (right-click), three-finger swipe
+  (scroll).
+
 ## [0.2.8] - 2026-07-10
 
 Reconnect-stability release, plus browser-viewer polish.

@@ -16,6 +16,8 @@ bytes.workspace = true
 openh264 = "0.9"
 # Fast BGRA -> I420 (encoder input) and I420 -> BGRA (decoder output).
 yuvutils-rs = "0.8"
+# SIMD BGRA crop+scale for host-side digital zoom (see scale.rs). Pure Rust.
+fast_image_resize = "5"
 # Opus audio (host -> viewer). audiopus_sys bundles + builds libopus from source
 # (C, via CMake), so it is gated behind the optional `audio` feature — the default
 # build is pure Rust. See lib.rs / docs/decisions.md.

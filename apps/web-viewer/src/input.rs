@@ -30,6 +30,12 @@ pub fn mouse_scroll(dx: f64, dy: f64) -> Vec<u8> {
     proto::encode(&proto::input(Event::MouseScroll(MouseScroll { dx, dy })))
 }
 
+/// Encode a digital-zoom crop rect (normalized [0,1]). The host crops+scales the
+/// screen to this rect and remaps pointer coords through it. `{0,0,1,1}` = no zoom.
+pub fn set_zoom(x: f64, y: f64, w: f64, h: f64) -> Vec<u8> {
+    proto::encode(&proto::set_zoom(x, y, w, h))
+}
+
 /// Encode a key event (HID usage + modifier bitmask).
 pub fn key(hid_usage: u32, pressed: bool, modifiers: u32) -> Vec<u8> {
     proto::encode(&proto::input(Event::Key(KeyEvent {

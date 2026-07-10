@@ -1632,6 +1632,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast_image_resize"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fbc7fe45cf92b43817ff62a3723e862b85bd1d06288f63007f7645d1d2f7a060"
+dependencies = [
+ "cfg-if",
+ "document-features",
+ "num-traits",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4896,7 +4908,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-capture"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -4916,11 +4928,12 @@ dependencies = [
 
 [[package]]
 name = "rmd-codec"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "audiopus",
  "bytes",
+ "fast_image_resize",
  "openh264",
  "rav1e",
  "thiserror 2.0.18",
@@ -4930,7 +4943,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-host"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "rmd-capture",
@@ -4949,7 +4962,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-input"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.1",
@@ -4962,7 +4975,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-protocol"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "bytes",
  "prost",
@@ -4973,7 +4986,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-rendezvous"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4999,7 +5012,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-session"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5034,7 +5047,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-signal-dev"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "serde",
@@ -5046,7 +5059,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-transport"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5064,7 +5077,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-viewer"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "bytemuck",
