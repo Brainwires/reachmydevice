@@ -972,12 +972,31 @@ fn apply_signal<I: Interceptor>(
             flush_remote_candidates(pc, state);
         }
         SignalMsg::Answer(json) => {
+            // A second answer on an already-negotiated host PC means the viewer
+            // re-announced (its browser PC was rebuilt after idle) and answered a
+            // replayed offer. Our PC is already past have-local-offer ("stable"), so
+            // this answer can't be applied — it errors with "from stable applying
+            // false answer" and the session stalls forever. Rebuild with a fresh
+            // offer (new ICE credentials) instead, mirroring the viewer's second-
+            // offer path above; the fresh offer is replayed to the viewer and the
+            // handshake completes cleanly.
+            if state.negotiated_once {
+                state.rebuild = true;
+                state.pending_offer = None; // the host makes its own fresh offer
+                tracing::info!(
+                    "transport(host): answer after negotiation (viewer re-announce); \
+                     rebuilding with a fresh offer"
+                );
+                return Ok(());
+            }
+
             // Host path: apply the remote answer.
             let answer: RTCSessionDescription =
                 serde_json::from_str(&json).context("parse remote answer")?;
             pc.set_remote_description(answer)
                 .context("set remote answer")?;
             state.remote_description_set = true;
+            state.negotiated_once = true;
             flush_remote_candidates(pc, state);
         }
         SignalMsg::Candidate(candidate) => {
