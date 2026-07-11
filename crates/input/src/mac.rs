@@ -148,9 +148,12 @@ impl Injector for MacInjector {
                 };
                 let ev = CGEvent::new_keyboard_event(self.source.clone(), keycode, k.pressed)
                     .map_err(|()| crate::InputError::Backend("new_keyboard_event".into()))?;
-                if k.modifiers != 0 {
-                    ev.set_flags(cg_flags(k.modifiers));
-                }
+                // ALWAYS set the flags explicitly — even to empty. A fresh CGEvent
+                // inherits the current modifier state, so a previous shifted key
+                // (e.g. one-shot Shift) leaks its Shift flag onto the next key unless
+                // we overwrite it with exactly this event's modifiers. This is the
+                // fix for "Shift stays on for the letter after the shifted one".
+                ev.set_flags(cg_flags(k.modifiers));
                 self.post(ev);
             }
         }

@@ -4,6 +4,19 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-07-11
+
+### Fixed
+- **Shift no longer leaks onto the key after a shifted one (macOS host).** The Mac
+  input injector only set the `CGEvent` modifier flags when `modifiers != 0`; because
+  a fresh `CGEvent` inherits the current modifier state, a shifted key (e.g. a
+  one-shot Shift) left its Shift flag on the *next* key, which had `modifiers == 0`
+  and therefore skipped `set_flags` entirely — so "Shift then a" then "b" produced
+  "Ab" on the client but "AB" on the host. The injector now always writes the exact
+  per-event flags (empty when there are no modifiers), so each key carries only its
+  own modifiers. (Linux/X11 drives modifiers via separate key events and is
+  unaffected here; making the web-viewer's bitmask work on X11 is a separate item.)
+
 ## [0.2.10] - 2026-07-11
 
 Host resilience: recover from a wedged system DNS resolver.

@@ -1186,9 +1186,11 @@ fn attach_keyboard(dc: &RtcDataChannel) {
     // survives `clear_mods`). While on, every letter is sent with Shift.
     let caps = Rc::new(Cell::new(false));
 
-    // Clear the armed modifiers and un-highlight their buttons.
+    // Clear the armed one-shot modifiers and un-highlight their buttons. Caps-lock
+    // is NOT in `mods`, so it survives; the letter-case visual then reflects caps.
     let clear_mods: Rc<dyn Fn()> = {
         let mods = mods.clone();
+        let caps = caps.clone();
         let document = document.clone();
         Rc::new(move || {
             mods.set(0);
@@ -1202,6 +1204,7 @@ fn attach_keyboard(dc: &RtcDataChannel) {
                     }
                 }
             }
+            set_letter_case(&document, caps.get());
         })
     };
 
@@ -1248,6 +1251,7 @@ fn attach_keyboard(dc: &RtcDataChannel) {
                 } else {
                     el_cb.class_list().remove_1("armed")
                 };
+                set_letter_case(&doc, on || (mods.get() & input::mod_bit("shift")) != 0);
                 return;
             }
             if let Some(name) = el_cb.get_attribute("data-mod") {
@@ -1260,6 +1264,10 @@ fn attach_keyboard(dc: &RtcDataChannel) {
                 } else {
                     mods.set(cur | bit);
                     let _ = el_cb.class_list().add_1("armed");
+                }
+                // Uppercase the letter labels while a shift is pending.
+                if name == "shift" {
+                    set_letter_case(&doc, (mods.get() & bit) != 0 || caps.get());
                 }
             } else if let Some(ch) = el_cb.get_attribute("data-char") {
                 if let Some((hid, shift)) = ch.chars().next().and_then(input::char_to_hid) {
@@ -1292,6 +1300,14 @@ fn attach_keyboard(dc: &RtcDataChannel) {
     }
 
     attach_swipe(dc, &document, &mods, &clear_mods, &caps);
+}
+
+/// Toggle the `#kb.up` class so the letter labels render uppercase (via CSS
+/// `text-transform`) while a shift is pending or caps-lock is on.
+fn set_letter_case(document: &web_sys::Document, up: bool) {
+    if let Some(kb) = document.get_element_by_id("kb") {
+        let _ = kb.class_list().toggle_with_force("up", up);
+    }
 }
 
 /// Empty the word-suggestion bar.

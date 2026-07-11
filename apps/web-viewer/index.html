@@ -195,7 +195,7 @@
      grid-column span, so the staggered left column + wide keys line up into a real
      keyboard grid (q above-left of a, etc.). */
   #kb .krow{display:grid;grid-template-columns:repeat(26,minmax(0,1fr));gap:5px;}
-  #kb .k{grid-column:span 2;height:40px;box-sizing:border-box;
+  #kb .k{grid-column:span 2;min-width:0;height:40px;box-sizing:border-box;
     display:flex;align-items:center;justify-content:center;padding:0 1px;
     border-radius:6px;border:1px solid var(--border);background:#2a2f3a;color:var(--text);
     font-size:16px;font-weight:600;line-height:1;
@@ -211,6 +211,8 @@
   #kb .klayer{display:flex;flex-direction:column;gap:5px;}
   /* The letter layer owns its touches (tap + swipe); none = no scroll/zoom. */
   #kb .klet{touch-action:none;}
+  /* Letter keys render uppercase while a shift is pending or caps-lock is on. */
+  #kb.up .klet .k[data-char]{text-transform:uppercase;}
   /* Swipe word suggestions (hidden until a swipe produces some). */
   #kb-suggest{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;}
   #kb-suggest:empty{display:none;}
@@ -408,7 +410,7 @@
       rows.forEach(r=>d.appendChild(rowEl(r))); return d; };
     // Swipe suggestion bar (top): filled by the WASM decoder after a swipe.
     const sug=document.createElement('div'); sug.id='kb-suggest'; kb.appendChild(sug);
-    kb.appendChild(layerEl('klet',  layerRows(LAY.abc, CAPS,   SHFT)));
+    const klet=kb.appendChild(layerEl('klet',  layerRows(LAY.abc, CAPS,   SHFT)));
     kb.appendChild(layerEl('ksym',  layerRows(LAY.s1,  SPC(4), PAGE)));
     kb.appendChild(layerEl('ksym2', layerRows(LAY.s2,  SPC(4), PAGE)));
     kb.appendChild(rowEl(BOTTOM));
