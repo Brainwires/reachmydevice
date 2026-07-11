@@ -18,8 +18,10 @@ use crate::signal::Signaling;
 use futures::{SinkExt, StreamExt};
 use rmd_transport::SignalMsg;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::mpsc as tok_mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -60,6 +62,7 @@ impl RendezvousClient {
         ws_url: &str,
         token: &str,
         peer_device_id: Option<String>,
+        session_active: Option<Arc<AtomicBool>>,
     ) -> anyhow::Result<Self> {
         let url = format!("{ws_url}?token={token}");
         let (out_tx, out_rx) = tok_mpsc::unbounded_channel::<SignalMsg>();
@@ -78,7 +81,8 @@ impl RendezvousClient {
                         return;
                     }
                 };
-                if let Err(e) = rt.block_on(run(url, peer_device_id, out_rx, in_tx)) {
+                if let Err(e) = rt.block_on(run(url, peer_device_id, out_rx, in_tx, session_active))
+                {
                     tracing::error!(error=%e, "rendezvous client ended");
                 }
             })?;
@@ -113,8 +117,18 @@ async fn run(
     mut peer: Option<String>,
     mut out_rx: tok_mpsc::UnboundedReceiver<SignalMsg>,
     in_tx: std_mpsc::Sender<SignalMsg>,
+    session_active: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<()> {
     use std::time::Duration;
+
+    // Watchdog: a macOS host that lives through a network blip can end up with a
+    // permanently wedged system DNS resolver (`getaddrinfo` returns "nodename nor
+    // servname" forever) that only a fresh process clears — so the host stays alive
+    // but unreachable. If we can't reach the rendezvous for this long AND no session
+    // is active, exit so the supervisor (launchd/systemd KeepAlive) relaunches us
+    // with a clean resolver. `None` (the viewer) never self-restarts.
+    const WATCHDOG: Duration = Duration::from_secs(150);
+    let mut first_fail: Option<Instant> = None;
 
     // The viewer (which knows the target upfront) re-announces until the host is
     // online and replies; the host learns the viewer's id from its `hello`.
@@ -137,11 +151,23 @@ async fn run(
             Ok((ws, _resp)) => ws,
             Err(e) => {
                 tracing::warn!(error = %e, "rendezvous connect failed; retrying in {backoff:?}");
+                let since = first_fail.get_or_insert_with(Instant::now);
+                if let Some(active) = &session_active {
+                    if since.elapsed() >= WATCHDOG && !active.load(Ordering::Relaxed) {
+                        tracing::error!(
+                            secs = since.elapsed().as_secs(),
+                            "rendezvous unreachable for too long with no active session — \
+                             exiting so the supervisor relaunches with a fresh DNS resolver"
+                        );
+                        std::process::exit(1);
+                    }
+                }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(30));
                 continue;
             }
         };
+        first_fail = None;
         backoff = Duration::from_secs(1);
         let (mut write, mut read) = ws.split();
         tracing::info!("rendezvous connected");

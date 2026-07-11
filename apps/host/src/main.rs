@@ -17,8 +17,10 @@
 //! permissions on macOS — see `docs/macos-permissions.md`.
 
 use rmd_session::rendezvous::RendezvousClient;
-use rmd_session::{run_host, HostConfig, SignalClient, Signaling};
+use rmd_session::{run_host_reporting, HostConfig, HostStatus, SignalClient, Signaling};
 use rmd_transport::IceServer;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[cfg(feature = "tray")]
 mod tray;
@@ -223,11 +225,20 @@ fn build_signaling(
     peer: Option<String>,
     rendezvous_url: Option<&str>,
     token: Option<&str>,
+    session_active: Arc<AtomicBool>,
 ) -> anyhow::Result<Box<dyn Signaling>> {
     if let Some(url) = rendezvous_url {
         let token = token.ok_or_else(|| anyhow::anyhow!("rendezvous mode requires a device token"))?;
         tracing::info!(%url, "signaling via rendezvous");
-        Ok(Box::new(RendezvousClient::connect(url, token, peer)?))
+        // Pass the session-active flag so the rendezvous client's watchdog can
+        // safely restart the (host) process if its DNS resolver wedges, without
+        // tearing down a live peer-to-peer session.
+        Ok(Box::new(RendezvousClient::connect(
+            url,
+            token,
+            peer,
+            Some(session_active),
+        )?))
     } else {
         let addr =
             std::env::var("RMD_SIGNAL_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".to_string());
@@ -360,8 +371,17 @@ fn main() -> anyhow::Result<()> {
         res = format!("{}x{}@{}", cfg.width, cfg.height, cfg.fps),
         "starting ReachMyDevice host"
     );
+    // Whether a viewer session is currently active — watched by the rendezvous
+    // client so its wedged-resolver watchdog never restarts us mid-session.
+    let session_active = Arc::new(AtomicBool::new(false));
+
     // The host is the offerer; it learns the viewer's id from the rendezvous hello.
-    let signaling = build_signaling(None, rendezvous_url.as_deref(), token_str)?;
+    let signaling = build_signaling(
+        None,
+        rendezvous_url.as_deref(),
+        token_str,
+        session_active.clone(),
+    )?;
 
     // Desktop tray companion when built with `--features tray` and requested via
     // `RMD_TRAY=1`; otherwise run headless (the default, and the only
@@ -371,5 +391,7 @@ fn main() -> anyhow::Result<()> {
         return tray::run_with_tray(cfg, signaling);
     }
 
-    run_host(cfg, signaling)
+    run_host_reporting(cfg, signaling, move |s| {
+        session_active.store(matches!(s, HostStatus::Active), Ordering::Relaxed);
+    })
 }

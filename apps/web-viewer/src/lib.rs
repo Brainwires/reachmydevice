@@ -602,10 +602,41 @@ fn prompt_password() -> Option<String> {
 fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
     let video = session.video.clone();
 
-    // We no longer preventDefault touch events (so the browser can pinch-zoom),
-    // which means a tap now also fires the browser's synthesized mouse events.
-    // Record the time of the last touch so the mouse handlers can ignore those
-    // synthetic events (the touch handlers already did the input) — a "ghost
+    // Pinch-zoom is done LOCALLY on the phone: an inline CSS transform on #zoomwrap
+    // zooms + pans only the video (the header/#bar is a separate fixed element, so it
+    // never moves — the keyboard/rotate controls stay reachable while zoomed). This
+    // is instant (no host round-trip), and because it transforms an ancestor of the
+    // <video>, the video's getBoundingClientRect already reflects the zoom, so the
+    // existing pointer mapping (`norm`) stays correct with no reprojection.
+    let doc = web_sys::window().and_then(|w| w.document());
+    let zoomwrap = doc
+        .as_ref()
+        .and_then(|d| d.get_element_by_id("zoomwrap"))
+        .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok());
+    let stage = doc
+        .as_ref()
+        .and_then(|d| d.get_element_by_id("stage"));
+    // Apply the zoom transform (screen-space: screen = pan + scale·content, origin at
+    // the wrap's top-left). Clears the transform entirely at 1× so the wrap stops
+    // being a containing block and the rotated-view layout is unchanged.
+    let apply_zoom = {
+        let zoomwrap = zoomwrap.clone();
+        move |s: f64, tx: f64, ty: f64| {
+            if let Some(z) = &zoomwrap {
+                if s <= 1.0001 {
+                    let _ = z.style().set_property("transform", "");
+                } else {
+                    let _ = z.style().set_property(
+                        "transform",
+                        &format!("translate({tx}px,{ty}px) scale({s})"),
+                    );
+                }
+            }
+        }
+    };
+
+    // Record the time of the last touch so the mouse handlers can ignore the
+    // browser's synthesized compatibility mouse events after a touch — a "ghost
     // click" guard. Real (desktop) mouse input has `last_touch == 0`, far in the
     // past, so it's unaffected.
     let last_touch = Rc::new(Cell::new(0.0f64));
@@ -678,8 +709,8 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
     //   • one-finger long-press / double-tap-hold, then drag → DRAG-SELECT: hold
     //       the left button down through the move (mode via `data-dragmode`)
     //   • two-finger QUICK tap          → RIGHT-click at the cursor's location
-    //   • two-finger pinch + drag       → HOST digital zoom (SetZoom) + pan the
-    //       zoomed view; the host crops+scales the screen and remaps our coords
+    //   • two-finger pinch + drag       → LOCAL zoom + pan of the video only (a CSS
+    //       transform on #zoomwrap; the header stays put, zero round-trip lag)
     //   • three-finger swipe            → wheel scroll (content follows fingers)
     //
     // The host moves/clicks AT the coords it's sent (absolute), so we keep a
@@ -690,19 +721,18 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
     // delta anchor whenever the finger set changes, so adding/removing a finger
     // doesn't fling the cursor.
     //
-    // Zoom is a persistent view transform {scale, center} in full-screen
-    // normalized coords; a two-finger gesture zooms about the centroid and pans by
-    // its translation. We derive the crop rect {x0,y0,w,h} = center±(1/2s), 1/s and
-    // send it as `SetZoom` (throttled). The host applies the SAME rect to the video
-    // and to our pointer coords, so taps land right and zoomed control is finer.
+    // Zoom is a persistent screen-space transform on #zoomwrap (`translate scale`),
+    // so it's instant and, because it transforms an ancestor of the <video>, the
+    // video's getBoundingClientRect already reflects it — `norm` needs no change and
+    // cursor deltas get finer with zoom for free. The host streams the full frame
+    // (no crop); we don't send SetZoom in this mode.
     {
         const SENS: f64 = 1.0; // finger→cursor gain; 1.0 = comparable distance
         const SCROLL_SENS: f64 = 1.0; // finger px → wheel px, content-follows-finger
         const TAP_MS: f64 = 300.0; // max press time for a two-finger tap = right-click
         const LONGPRESS_MS: i32 = 400; // press-and-hold time to arm a drag-select
         const DOUBLE_TAP_MS: f64 = 300.0; // max gap for double-tap-hold to arm a drag
-        const MAX_ZOOM: f64 = 8.0; // host digital-zoom cap
-        const ZOOM_THROTTLE_MS: f64 = 33.0; // ~30 SetZoom/s while pinching
+        const MAX_ZOOM: f64 = 8.0; // local zoom cap
         let moved = Rc::new(Cell::new(false)); // did this gesture cross the drag threshold?
         let start = Rc::new(Cell::new((0.0f64, 0.0f64))); // first-finger client px (threshold anchor)
         let start_ms = Rc::new(Cell::new(0.0f64)); // gesture start time (for the tap window)
@@ -714,12 +744,14 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
         let dragging = Rc::new(Cell::new(false)); // is drag-select holding the left button?
         let last_tap_ms = Rc::new(Cell::new(0.0f64)); // time of the last clean 1-finger tap (double-tap)
         let lp_handle = Rc::new(Cell::new(None::<i32>)); // pending long-press timeout id
-        // Persistent zoom view transform (survives across gestures until changed).
+        // Persistent local zoom transform (survives across gestures until changed).
+        // Screen-space: content→screen is `screen = pan + scale·content` in stage-
+        // local px (the #zoomwrap CSS transform), so the video's bounding rect
+        // reflects it and pointer mapping needs no reprojection.
         let scale = Rc::new(Cell::new(1.0f64)); // ≥1; 1 = no zoom
-        let center = Rc::new(Cell::new((0.5f64, 0.5f64))); // view center, full-screen normalized
+        let pan = Rc::new(Cell::new((0.0f64, 0.0f64))); // translate (tx,ty) in stage-local px
         let pinch_dist = Rc::new(Cell::new(0.0f64)); // previous two-finger distance (0 = not pinching)
         let pinch_cen = Rc::new(Cell::new((0.0f64, 0.0f64))); // previous two-finger centroid (client px)
-        let last_zoom_ms = Rc::new(Cell::new(0.0f64)); // last SetZoom send time (throttle)
 
         // Snapshot the primary touch's client-px position, if any.
         fn primary(ev: &TouchEvent) -> Option<(f64, f64)> {
@@ -873,23 +905,33 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             let last_touch = last_touch.clone();
             let lp_handle = lp_handle.clone();
             let scale = scale.clone();
-            let center = center.clone();
+            let pan = pan.clone();
             let pinch_dist = pinch_dist.clone();
             let pinch_cen = pinch_cen.clone();
-            let last_zoom_ms = last_zoom_ms.clone();
+            let stage = stage.clone();
+            let apply_zoom = apply_zoom.clone();
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
                 ev.prevent_default();
                 last_touch.set(now_ms());
                 let n = ev.touches().length();
                 if n == 2 {
-                    // Two-finger pinch: zoom about the centroid + pan by its
-                    // translation. Updates the persistent {scale, center} transform
-                    // and sends the derived crop rect as SetZoom (throttled).
+                    // Two-finger pinch: LOCAL zoom+pan of the video, screen-space. The
+                    // grabbed content point (under the previous centroid) is moved to
+                    // the new centroid at the new scale — one formula handles both
+                    // zoom and pan. `screen = pan + scale·content` (origin = stage
+                    // top-left), so centroids are in stage-local px.
                     let Some((a, b)) = two_points(&ev) else {
                         return;
                     };
                     let dist = (a.0 - b.0).hypot(a.1 - b.1).max(1.0);
-                    let cen = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+                    let (ox, oy) = stage
+                        .as_ref()
+                        .map(|s| {
+                            let r = s.get_bounding_client_rect();
+                            (r.left(), r.top())
+                        })
+                        .unwrap_or((0.0, 0.0));
+                    let cen = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0); // client px
                     let pd = pinch_dist.get();
                     if pd <= 0.0 {
                         pinch_dist.set(dist);
@@ -897,33 +939,23 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                         return;
                     }
                     moved.set(true); // a pinch is never a right-click tap
-                    let w_old = 1.0 / scale.get();
-                    let s = (scale.get() * (dist / pd)).clamp(1.0, MAX_ZOOM);
-                    let w_new = 1.0 / s;
-                    let (vx, vy) = norm(cen.0, cen.1); // centroid, visible-normalized
-                    let (pvx, pvy) = norm(pinch_cen.get().0, pinch_cen.get().1);
-                    let (cx0, cy0) = center.get();
-                    // Keep the point under the centroid fixed while zooming, then pan
-                    // (content follows the fingers).
-                    let mut cx = cx0 + (vx - 0.5) * (w_old - w_new) - (vx - pvx) * w_new;
-                    let mut cy = cy0 + (vy - 0.5) * (w_old - w_new) - (vy - pvy) * w_new;
-                    let half = w_new / 2.0;
-                    cx = cx.clamp(half, 1.0 - half);
-                    cy = cy.clamp(half, 1.0 - half);
+                    let s0 = scale.get();
+                    let s = (s0 * (dist / pd)).clamp(1.0, MAX_ZOOM);
+                    let (tx0, ty0) = pan.get();
+                    // Stage-local centroids (current + previous).
+                    let (cx, cy) = (cen.0 - ox, cen.1 - oy);
+                    let pcen = pinch_cen.get();
+                    let (pcx, pcy) = (pcen.0 - ox, pcen.1 - oy);
+                    // Content grabbed at the previous centroid: q = (prevScreen - t0)/s0.
+                    let qx = (pcx - tx0) / s0;
+                    let qy = (pcy - ty0) / s0;
+                    // Put it under the new centroid at the new scale: t = c - s·q.
+                    let (tx, ty) = (cx - s * qx, cy - s * qy);
                     scale.set(s);
-                    center.set((cx, cy));
+                    pan.set((tx, ty));
                     pinch_dist.set(dist);
                     pinch_cen.set(cen);
-                    let now = now_ms();
-                    if now - last_zoom_ms.get() >= ZOOM_THROTTLE_MS {
-                        last_zoom_ms.set(now);
-                        let _ = dc.send_with_u8_array(&input::set_zoom(
-                            cx - half,
-                            cy - half,
-                            w_new,
-                            w_new,
-                        ));
-                    }
+                    apply_zoom(s, tx, ty);
                     return;
                 }
                 let Some((cx, cy)) = primary(&ev) else {
@@ -983,7 +1015,8 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             let lp_handle = lp_handle.clone();
             let pinch_dist = pinch_dist.clone();
             let scale = scale.clone();
-            let center = center.clone();
+            let pan = pan.clone();
+            let apply_zoom = apply_zoom.clone();
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
                 last_touch.set(now_ms());
                 if let Some(p) = primary(&ev) {
@@ -999,12 +1032,12 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 let quick = now_ms() - start_ms.get() < TAP_MS;
                 max_fingers.set(0); // reset for the next gesture
                 pinch_dist.set(0.0);
-                // If a pinch just ended, make sure the host has the final crop rect
-                // (the throttle may have skipped the last move).
-                if fingers >= 2 {
-                    let w = 1.0 / scale.get();
-                    let (cx, cy) = center.get();
-                    let _ = dc.send_with_u8_array(&input::set_zoom(cx - w / 2.0, cy - w / 2.0, w, w));
+                // Pinched (nearly) all the way back out → snap to 1× and clear the
+                // transform so the wrap stops being a containing block.
+                if scale.get() <= 1.0001 {
+                    scale.set(1.0);
+                    pan.set((0.0, 0.0));
+                    apply_zoom(1.0, 0.0, 0.0);
                 }
                 // Release a held drag-select — this is a button-up, not a click.
                 if dragging.get() {
@@ -1146,8 +1179,12 @@ fn attach_keyboard(dc: &RtcDataChannel) {
         return; // page has no keyboard UI — nothing to wire
     }
 
-    // Armed sticky modifiers (a `rmd_protocol::modifiers` bitmask).
+    // Armed sticky modifiers (a `rmd_protocol::modifiers` bitmask). Shift here is
+    // ONE-SHOT — it applies to the next letter, then `clear_mods` unsticks it.
     let mods = Rc::new(Cell::new(0u32));
+    // Caps-lock: a separate, latched client-side toggle (not in `mods`, so it
+    // survives `clear_mods`). While on, every letter is sent with Shift.
+    let caps = Rc::new(Cell::new(false));
 
     // Clear the armed modifiers and un-highlight their buttons.
     let clear_mods: Rc<dyn Fn()> = {
@@ -1178,8 +1215,9 @@ fn attach_keyboard(dc: &RtcDataChannel) {
         else {
             continue;
         };
-        // The ?123 layer toggle is presentation only (JS handles the switch).
-        if el.get_attribute("data-layer").is_some() {
+        // Layer/page toggles (123↔ABC, ⇧ on a symbol page) are presentation only —
+        // JS swaps the visible layer; the WASM layer ignores them.
+        if el.get_attribute("data-layer").is_some() || el.get_attribute("data-page").is_some() {
             continue;
         }
         // QWERTY letter keys are owned by the swipe/tap handler below (so a swipe
@@ -1191,6 +1229,7 @@ fn attach_keyboard(dc: &RtcDataChannel) {
         }
         let dc = dc.clone();
         let mods = mods.clone();
+        let caps = caps.clone();
         let clear = clear_mods.clone();
         let doc = document.clone();
         let el_cb = el.clone();
@@ -1200,6 +1239,17 @@ fn attach_keyboard(dc: &RtcDataChannel) {
                 let _ = dc.send_with_u8_array(&input::key(hid, true, m));
                 let _ = dc.send_with_u8_array(&input::key(hid, false, m));
             };
+            // Caps-lock: latch the toggle + its highlight (does not clear mods).
+            if el_cb.get_attribute("data-caps").is_some() {
+                let on = !caps.get();
+                caps.set(on);
+                let _ = if on {
+                    el_cb.class_list().add_1("armed")
+                } else {
+                    el_cb.class_list().remove_1("armed")
+                };
+                return;
+            }
             if let Some(name) = el_cb.get_attribute("data-mod") {
                 // Toggle this sticky modifier + its highlight.
                 let bit = input::mod_bit(&name);
@@ -1241,7 +1291,7 @@ fn attach_keyboard(dc: &RtcDataChannel) {
         cb.forget();
     }
 
-    attach_swipe(dc, &document, &mods, &clear_mods);
+    attach_swipe(dc, &document, &mods, &clear_mods, &caps);
 }
 
 /// Empty the word-suggestion bar.
@@ -1258,10 +1308,10 @@ fn kb_send(dc: &RtcDataChannel, hid: u32, mods: u32) {
 }
 
 /// Type a whole word (lowercase, char→HID) followed by a space.
-fn kb_send_word(dc: &RtcDataChannel, word: &str) {
+fn kb_send_word(dc: &RtcDataChannel, word: &str, caps: bool) {
     for c in word.chars() {
         if let Some((hid, shift)) = input::char_to_hid(c) {
-            kb_send(dc, hid, if shift { input::mod_bit("shift") } else { 0 });
+            kb_send(dc, hid, if shift || caps { input::mod_bit("shift") } else { 0 });
         }
     }
     kb_send(dc, 0x2C, 0); // trailing space
@@ -1307,6 +1357,7 @@ fn attach_swipe(
     document: &web_sys::Document,
     mods: &Rc<Cell<u32>>,
     clear_mods: &Rc<dyn Fn()>,
+    caps: &Rc<Cell<bool>>,
 ) {
     let Ok(Some(klet)) = document.query_selector(".klet") else {
         return;
@@ -1366,6 +1417,7 @@ fn attach_swipe(
         let dc = dc.clone();
         let document = document.clone();
         let mods = mods.clone();
+        let caps = caps.clone();
         let clear = clear_mods.clone();
         let decoder = decoder.clone();
         let path = path.clone();
@@ -1405,15 +1457,15 @@ fn attach_swipe(
             if is_swipe {
                 let words = decoder.decode(&pts, &centers, 5);
                 if let Some(&best) = words.first() {
-                    kb_send_word(&dc, best);
+                    kb_send_word(&dc, best, caps.get());
                     last_word_len.set(best.len() + 1);
-                    show_suggestions(&dc, &document, &words, &last_word_len);
+                    show_suggestions(&dc, &document, &words, &last_word_len, &caps);
                 }
-                clear(); // a completed word clears any armed modifier
+                clear(); // a completed word clears any armed modifier (not caps-lock)
             } else {
-                // Tap: type the letter that was pressed, honouring sticky modifiers.
+                // Tap: type the letter, honouring one-shot shift AND caps-lock.
                 if let Some((hid, shift)) = input::char_to_hid(start_char) {
-                    let m = if shift {
+                    let m = if shift || caps.get() {
                         mods.get() | input::mod_bit("shift")
                     } else {
                         mods.get()
@@ -1437,6 +1489,7 @@ fn show_suggestions(
     document: &web_sys::Document,
     words: &[&str],
     last_word_len: &Rc<Cell<usize>>,
+    caps: &Rc<Cell<bool>>,
 ) {
     let Some(bar) = document.get_element_by_id("kb-suggest") else {
         return;
@@ -1451,12 +1504,13 @@ fn show_suggestions(
         let dc = dc.clone();
         let word = w.to_string();
         let lwl = last_word_len.clone();
+        let caps = caps.clone();
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
             ev.prevent_default();
             for _ in 0..lwl.get() {
                 kb_send(&dc, 0x2A, 0); // backspace the previously inserted word + space
             }
-            kb_send_word(&dc, &word);
+            kb_send_word(&dc, &word, caps.get());
             lwl.set(word.len() + 1);
         });
         btn.add_event_listener_with_callback("pointerdown", cb.as_ref().unchecked_ref())

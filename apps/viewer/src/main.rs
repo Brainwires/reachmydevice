@@ -811,7 +811,8 @@ impl App {
             }
         }
 
-        match RendezvousClient::connect(&account.ws_url(), &token, Some(host.device_id.clone())) {
+        match RendezvousClient::connect(&account.ws_url(), &token, Some(host.device_id.clone()), None)
+        {
             Ok(client) => self.start_session(Box::new(client)),
             Err(e) => {
                 self.error = Some(format!("could not open signaling: {e}"));
@@ -1553,7 +1554,7 @@ fn quick_connect_signaling() -> Option<anyhow::Result<Box<dyn Signaling>>> {
             .unwrap_or_else(|_| "wss://app.reachmy.dev/ws".into());
         tracing::info!(%ws, %peer, "quick-connect via rendezvous");
         return Some(
-            RendezvousClient::connect(&ws, &token, Some(peer))
+            RendezvousClient::connect(&ws, &token, Some(peer), None)
                 .map(|c| Box::new(c) as Box<dyn Signaling>),
         );
     }

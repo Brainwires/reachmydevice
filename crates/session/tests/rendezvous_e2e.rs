@@ -114,9 +114,10 @@ fn connect_two_peers_through_real_rendezvous() {
     let ws_url = format!("ws://{addr}/ws");
 
     // --- rendezvous signaling clients (host learns the viewer; viewer targets host) ---
-    let host_rzv = RendezvousClient::connect(&ws_url, &host_token, None).unwrap();
+    let host_rzv = RendezvousClient::connect(&ws_url, &host_token, None, None).unwrap();
     let viewer_rzv =
-        RendezvousClient::connect(&ws_url, &viewer_token, Some("host-device".to_string())).unwrap();
+        RendezvousClient::connect(&ws_url, &viewer_token, Some("host-device".to_string()), None)
+            .unwrap();
 
     // --- two transports; all signaling flows through the rendezvous clients ---
     let host = Transport::spawn(TransportConfig {

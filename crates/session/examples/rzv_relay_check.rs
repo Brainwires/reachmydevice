@@ -19,8 +19,8 @@ fn main() -> anyhow::Result<()> {
     let dev_b = std::env::var("RMD_DEV_B")?;
 
     // A knows B's id (like a viewer targeting a host); B learns A from the hello.
-    let a = RendezvousClient::connect(&url, &tok_a, Some(dev_b))?;
-    let b = RendezvousClient::connect(&url, &tok_b, None)?;
+    let a = RendezvousClient::connect(&url, &tok_a, Some(dev_b), None)?;
+    let b = RendezvousClient::connect(&url, &tok_b, None, None)?;
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut last_send = Instant::now() - Duration::from_secs(1);

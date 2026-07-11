@@ -30,7 +30,11 @@
     /* Height reserved for the fixed #bar header (button row + padding + notch), so
        the video and keyboard centre in the area BELOW it instead of sliding under. */
     --hdr:calc(50px + env(safe-area-inset-top,0px));
-    --sab:env(safe-area-inset-bottom,0px);}
+    --sab:env(safe-area-inset-bottom,0px);
+    /* rot2 (upside-down): the header moves to the BOTTOM, so the video + keyboard
+       live in the band between the top notch and the bottom header. */
+    --band-h:calc(100vh - env(safe-area-inset-top,0px) - var(--hdr));
+    --band-c:calc(50% + (env(safe-area-inset-top,0px) - var(--hdr)) / 2);}
   *{box-sizing:border-box;}
   html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
     font:14px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
@@ -47,7 +51,27 @@
       8px calc(12px + env(safe-area-inset-left,0px));
     background:rgba(15,17,21,.72);backdrop-filter:blur(6px);font-size:13px;z-index:10;
     transition:opacity .25s;} #bar.idle:not(:hover){opacity:.2;}
-  #barStatus{color:var(--muted);} #bar .sp{flex:1;}
+  /* Connection state as a colour dot (replaces the old status text): green =
+     connected/ready, amber (pulsing) = connecting/reconnecting, red = error. */
+  #barStatus{flex:0 0 auto;width:10px;height:10px;border-radius:50%;background:var(--muted);
+    transition:background .2s;}
+  #barStatus.ok{background:var(--ok);}
+  #barStatus.warn{background:#e0a54a;animation:pulse 1.2s ease-in-out infinite;}
+  #barStatus.err{background:var(--err);}
+  @keyframes pulse{50%{opacity:.3;}}
+  #bar .sp{flex:1;}
+  /* Action bar: each control counter-rotates to stay upright as the view rotates,
+     and at 180° the whole bar hops to the opposite (bottom) edge so — from the
+     user's flipped perspective — the bar is still "on top" and the keyboard "below".
+     The brand hides when rotated to keep the bar tidy. */
+  .rotc{transition:transform .2s;}
+  #bar.brot1 .rotc{transform:rotate(90deg);}
+  #bar.brot2 .rotc{transform:rotate(180deg);}
+  #bar.brot3 .rotc{transform:rotate(-90deg);}
+  #bar.brot1 .brand,#bar.brot2 .brand,#bar.brot3 .brand{display:none;}
+  #bar.at-bottom{top:auto;bottom:0;
+    padding:8px calc(12px + env(safe-area-inset-right,0px))
+      calc(8px + env(safe-area-inset-bottom,0px)) calc(12px + env(safe-area-inset-left,0px));}
 
   #connect{position:fixed;inset:0;overflow-x:hidden;overflow-y:auto;display:grid;place-items:start center;
     grid-template-columns:minmax(0,1fr);
@@ -95,7 +119,17 @@
   .panel{border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:14px;background:#12151c;}
   .panel h2{margin:0 0 4px;font-size:15px;}
 
-  #stage{position:fixed;top:var(--hdr);left:0;right:0;bottom:0;display:grid;place-items:center;background:#000;}
+  #stage{position:fixed;top:var(--hdr);left:0;right:0;bottom:0;display:grid;place-items:center;background:#000;
+    /* Clip the zoomed video to the area BELOW the header, so pinch-zoom (a transform
+       on #zoomwrap) never bleeds over the header — the keyboard/rotate controls stay
+       reachable while zoomed. */
+    overflow:hidden;}
+  /* Pinch-zoom happens here: an inline `transform: translate() scale()` (set by the
+     WASM input layer) zooms + pans ONLY the video. transform-origin is the top-left
+     so the input layer's screen-space math is exact. No transition — it must track
+     the fingers. When unzoomed it carries NO transform, so it doesn't become a
+     containing block and the rotated-view layout is byte-for-byte unchanged. */
+  #zoomwrap{position:absolute;inset:0;display:grid;place-items:center;transform-origin:0 0;}
   #screen{max-width:100vw;max-height:100vh;width:auto;height:auto;background:#000;outline:none;
     transition:transform .2s;
     /* The app owns every touch on the video: one/two/three-finger gestures are
@@ -111,7 +145,8 @@
      header's bottom instead of under it. */
   #screen.rot1,#screen.rot2,#screen.rot3{position:fixed;top:calc(50% + var(--hdr) / 2);left:50%;}
   #screen.rot1,#screen.rot3{max-width:calc(100vh - var(--hdr));max-height:100vw;}
-  #screen.rot2{max-height:calc(100vh - var(--hdr));}
+  /* 180°: header is at the bottom now, so reserve the bottom (+top notch) instead. */
+  #screen.rot2{max-height:var(--band-h);top:var(--band-c);}
   #screen.rot1{transform:translate(-50%,-50%) rotate(90deg);}
   #screen.rot2{transform:translate(-50%,-50%) rotate(180deg);}
   #screen.rot3{transform:translate(-50%,-50%) rotate(-90deg);}
@@ -131,11 +166,16 @@
   #kb-wrap{position:fixed;top:50%;left:50%;width:100vw;height:100vh;
     transform:translate(-50%,-50%);display:flex;align-items:flex-end;justify-content:center;
     pointer-events:none;z-index:60;}
-  /* The keyboard box is sized + placed by JS (syncKbToVideo) to exactly overlay the
-     video's RENDERED rect, so it spans the same width the video occupies and sits
-     below the header (never under/over it). These rules give the shared rotate
-     transform + a fallback box before the sync runs. */
-  #kb-wrap.rot1,#kb-wrap.rot3{width:100vh;height:100vw;}
+  /* Rotated wrap is confined to the area BELOW the header (same framing as the
+     video: long axis = 100vh − header, centre dropped by header/2), so the rotated
+     keyboard's top edge lands exactly at the header's bottom instead of running
+     under it. flex-end then snaps the keys to the landscape bottom; JS caps the
+     keyboard WIDTH to the video's width (syncKbToVideo). */
+  #kb-wrap.rot1,#kb-wrap.rot3{width:calc(100vh - var(--hdr));height:100vw;
+    top:calc(50% + var(--hdr) / 2);}
+  /* 180°: header moved to the bottom, keyboard lands at the portrait TOP (user's
+     "bottom"). Confine it to the band below the notch and above the bottom header. */
+  #kb-wrap.rot2{height:var(--band-h);top:var(--band-c);}
   /* A small symmetric long-axis margin so the 12-key row (which fills 100%) gets a
      little breathing room instead of butting against the ends. */
   #kb-wrap.rot1 #kb,#kb-wrap.rot3 #kb{padding-left:10px;padding-right:10px;}
@@ -143,22 +183,26 @@
   #kb-wrap.rot2{transform:translate(-50%,-50%) rotate(180deg);}
   #kb-wrap.rot3{transform:translate(-50%,-50%) rotate(-90deg);}
   #kb{pointer-events:auto;width:100%;box-sizing:border-box;display:flex;flex-direction:column;
-    gap:4px;padding:4px 4px calc(4px + env(safe-area-inset-bottom));
+    /* Trim the bottom gap under the last row ~55%: the full home-indicator inset is
+       overkill (and, when rotated, it's on the wrong edge). Keep a little clearance. */
+    gap:4px;padding:4px 4px calc(4px + env(safe-area-inset-bottom) * 0.4);
     /* Every key is 1/12 of the row wide, so all rows line up into a uniform grid
        and shorter rows just centre (justify-content) instead of ballooning. The
        12-column basis keeps the whole thing to 4 compact rows like the OS keyboard. */
-    --kw:calc((100% - 44px) / 12);
     background:rgba(15,17,21,.96);border-top:1px solid var(--border);
     user-select:none;-webkit-user-select:none;touch-action:manipulation;}
-  #kb .krow{display:flex;gap:4px;justify-content:center;}
-  #kb .k{flex:0 0 var(--kw);max-width:56px;height:38px;box-sizing:border-box;
+  /* Rows are a 26-column grid (1 key unit = 2 cols); each key sets its own
+     grid-column span, so the staggered left column + wide keys line up into a real
+     keyboard grid (q above-left of a, etc.). */
+  #kb .krow{display:grid;grid-template-columns:repeat(26,minmax(0,1fr));gap:5px;}
+  #kb .k{grid-column:span 2;height:40px;box-sizing:border-box;
     display:flex;align-items:center;justify-content:center;padding:0 1px;
     border-radius:6px;border:1px solid var(--border);background:#2a2f3a;color:var(--text);
-    font-size:15px;font-weight:600;line-height:1;
+    font-size:16px;font-weight:600;line-height:1;
     transition:transform .05s ease,background .09s ease,box-shadow .09s ease;}
-  #kb .k.sm{font-size:10.5px;}
-  #kb .k.mod{font-size:10.5px;}
-  #kb .k.wide{flex-basis:calc(var(--kw) * 3 + 8px);max-width:none;}
+  #kb .k.sm{font-size:11px;}
+  #kb .k.mod{font-size:13px;background:#20242e;}
+  #kb .k.mod.sm{font-size:10.5px;letter-spacing:-.2px;} /* 123 / C-A-D */
   #kb .k.mod.armed{background:var(--accent);color:#fff;border-color:var(--accent);}
   /* Pressed feedback: depress + accent flash (CSS :active for the live press, plus
      a JS-toggled .press so the flash is reliable on touch even after release). */
@@ -173,9 +217,11 @@
   #kb-suggest .sug{flex:0 1 auto;padding:6px 14px;border-radius:8px;border:1px solid var(--border);
     background:#1e222b;color:var(--text);font-size:14px;font-weight:600;touch-action:manipulation;}
   #kb-suggest .sug:active{background:var(--accent);color:#fff;border-color:var(--accent);}
-  #kb .ksym{display:none;}
+  #kb .ksym,#kb .ksym2{display:none;}
   #kb.sym .klet{display:none;}
   #kb.sym .ksym{display:flex;}
+  #kb.sym.sym2 .ksym{display:none;}
+  #kb.sym.sym2 .ksym2{display:flex;}
   /* Swipe trail: a full-screen overlay above the keyboard that traces the finger.
      pointer-events:none so it never intercepts touches. */
   #kb-trail{position:fixed;inset:0;pointer-events:none;z-index:70;}
@@ -193,19 +239,21 @@
   <div id="bar" class="idle hidden">
     <div class="brand"><div class="logo">RMD</div><strong>ReachMyDevice</strong></div>
     <span id="barStatus"></span><div class="sp"></div>
-    <button id="kbd-toggle" class="iconbtn ghost" title="Keyboard" style="display:none">
+    <button id="kbd-toggle" class="iconbtn ghost rotc" title="Keyboard" style="display:none">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M10 13h4"/><path d="M8 16.5h8"/></svg>
     </button>
-    <button id="rotate" class="iconbtn ghost" title="Rotate view 90°" style="display:none">
+    <button id="rotate" class="iconbtn ghost rotc" title="Rotate view 90°" style="display:none">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
     </button>
-    <button id="drag-mode" class="iconbtn ghost" title="Drag-select trigger" style="display:none;font-size:11px;font-weight:700;letter-spacing:.3px"></button>
-    <a href="#" id="disconnect">← Devices</a>
+    <button id="drag-mode" class="iconbtn ghost rotc" title="Drag-select trigger" style="display:none;font-size:11px;font-weight:700;letter-spacing:.3px"></button>
+    <a href="#" id="disconnect" class="iconbtn ghost rotc" title="Back to devices" aria-label="Back to devices">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+    </a>
   </div>
 
   <div id="connect" class="hidden"><div class="card" id="cardBody"></div></div>
 
-  <div id="stage" class="hidden"><video id="screen" playsinline autoplay muted tabindex="0"></video></div>
+  <div id="stage" class="hidden"><div id="zoomwrap"><video id="screen" playsinline autoplay muted tabindex="0"></video></div></div>
   <div id="overlay" class="hidden"><div class="box"><div class="spin"></div>
     <div class="msg" id="ovMsg">Connecting…</div><div class="hint2" id="ovHint"></div></div></div>
 
@@ -228,7 +276,16 @@
     $('stage').classList.remove('hidden'); $('overlay').classList.remove('hidden'); $('bar').classList.remove('hidden');
     $('ovHint').textContent='host '+(q.get('host')||'').slice(0,12)+'…';
     const status=document.createElement('span'); status.id='status'; status.hidden=true; document.body.appendChild(status);
-    new MutationObserver(()=>{const t=status.textContent||''; $('ovMsg').textContent=t; $('barStatus').textContent=t;})
+    // Map the WASM status text → a colour class for the header dot (and keep the full
+    // text on the overlay + as the dot's tooltip). Order matters: "reconnecting"
+    // before "disconnect", "connected" before the error bucket.
+    const statusCls=t=>{t=t.toLowerCase();
+      if(/reconnect|connecting|checking|wait/.test(t))return'warn';
+      if(/connected|ready/.test(t))return'ok';
+      if(/error|reject|disconnect|required|failed/.test(t))return'err';
+      return'';};
+    new MutationObserver(()=>{const t=status.textContent||''; $('ovMsg').textContent=t;
+      const d=$('barStatus'); d.className=statusCls(t); d.title=t;})
       .observe(status,{childList:true,characterData:true,subtree:true});
     const vid=$('screen');
     vid.addEventListener('playing',()=>$('overlay').classList.add('hidden'));
@@ -247,19 +304,26 @@
     // size (the rotate comes from the shared rot class); the rect centre is
     // rotation-invariant, so centring the box on it overlays the two exactly.
     const syncKbToVideo=()=>{
-      if(!rot || kbWrap.classList.contains('hidden')){
-        kbWrap.style.width=kbWrap.style.height=kbWrap.style.left=kbWrap.style.top='';
-        return;
-      }
-      const r=vid.getBoundingClientRect();
-      if(!r.width||!r.height) return;
-      kbWrap.style.width=vid.offsetWidth+'px';
-      kbWrap.style.height=vid.offsetHeight+'px';
-      kbWrap.style.left=(r.left+r.width/2)+'px';
-      kbWrap.style.top=(r.top+r.height/2)+'px';
+      const kb=$('kb');
+      // Rotated: KEEP the default full-landscape-viewport wrap (#kb-wrap.rot*), so the
+      // keyboard's flex-end snaps it to the LANDSCAPE bottom (the header lives on a
+      // side edge in landscape, so it's never under/over it). We only cap the
+      // keyboard's WIDTH to the video's landscape width (offsetWidth) so the keys span
+      // the same width as the video, centred. Portrait (rot 0) uses the CSS default
+      // (full width, glued to the screen bottom) with no cap.
+      kbWrap.style.width=kbWrap.style.height=kbWrap.style.left=kbWrap.style.top='';
+      if(kb) kb.style.maxWidth = (rot && !kbWrap.classList.contains('hidden') && vid.offsetWidth)
+        ? vid.offsetWidth+'px' : '';
     };
     const applyRot=()=>{
       for(const el of [vid,kbWrap]){ el.classList.remove('rot1','rot2','rot3'); if(rot) el.classList.add('rot'+rot); }
+      // Action bar: rotate the controls upright as the view rotates; at 180° also
+      // move the bar to the bottom edge so it stays "on top" for the flipped user
+      // (the video + keyboard reflow to reserve the bottom instead — see CSS).
+      const bar=$('bar');
+      bar.classList.remove('brot1','brot2','brot3','at-bottom');
+      if(rot) bar.classList.add('brot'+rot);
+      if(rot===2) bar.classList.add('at-bottom');
       vid.dataset.rot=rot;
       syncKbToVideo();
     };
@@ -291,43 +355,73 @@
     const kb=$('kb'), kbtn=$('kbd-toggle'); kbtn.style.display='';
     // 4 rows like the OS keyboard, but with every key kept: backspace + arrows go
     // on the letter rows' ends, and all the function/modifier keys live on row 4.
-    const KROWS={
-      letters:[
-        ['q','w','e','r','t','y','u','i','o','p',{l:'⌫',code:'Backspace'}],
-        ['a','s','d','f','g','h','j','k','l'],
-        [{l:'⇧',mod:'shift'},'z','x','c','v','b','n','m',
-          {l:'←',code:'ArrowLeft'},{l:'↑',code:'ArrowUp'},{l:'↓',code:'ArrowDown'},{l:'→',code:'ArrowRight'}]],
-      symbols:[
-        ['1','2','3','4','5','6','7','8','9','0',{l:'⌫',code:'Backspace'}],
-        ['!','@','#','$','%','^','&','*','(',')'],
-        [{l:'⇧',mod:'shift'},'-','_','=','/',';',':',',','.','?','!']],
-      bottom:[{l:'?123',layer:1},{l:'Esc',code:'Escape'},{l:'Tab',code:'Tab'},
-        {l:'Ctrl',mod:'ctrl'},{l:'Alt',mod:'alt'},{l:'Super',mod:'super'},
-        {l:'space',code:'Space',wide:1},{l:'⏎',code:'Enter'},{l:'C-A-D',combo:'ctrl-alt-del'}]};
-    const keyEl=s=>{ if(typeof s==='string') s={l:s,char:s};
+    // Staggered layout on a 26-col grid (1 key unit = span 2). Persistent frame
+    // keys (Tab, Backspace, Caps, Shift, arrows, bottom row) wrap char rows that
+    // swap by layer: letters ↔ symbols ↔ alt-symbols (⇧ toggles alt on a symbol
+    // page). The widening left column (Tab<Caps<Shift<123) creates the stagger.
+    const TAB={l:'⇥',code:'Tab',w:3}, BSP={l:'⌫',code:'Backspace',w:3};
+    const UP={l:'↑',code:'ArrowUp'}, LFT={l:'←',code:'ArrowLeft'},
+          DWN={l:'↓',code:'ArrowDown'}, RGT={l:'→',code:'ArrowRight'};
+    const CAPS={l:'⇪',caps:1,w:4};   // letter layer: caps-lock toggle
+    const SHFT={l:'⇧',shift:1,w:6};  // letter layer: one-shot caps
+    const PAGE={l:'⇧',page:1,w:6};   // symbol layer: alternate symbols
+    const SPC=w=>({sp:1,w});          // grid spacer
+    const LAY={
+      abc:[['q','w','e','r','t','y','u','i','o','p'],
+           ['a','s','d','f','g','h','j','k','l'],
+           ['z','x','c','v','b','n','m']],
+      s1:[['1','2','3','4','5','6','7','8','9','0'],
+          ['-','/',':',';','(',')','$','&','@'],
+          ['.',',','?','!',"'",'"','*']],
+      s2:[['[',']','{','}','#','%','^','*','+','='],
+          ['_','\\','|','~','<','>','`',':',';'],
+          ['.',',','?','!',"'",'"','-']]};
+    const chK=c=>({l:c,char:c});
+    const layerRows=(ch,left,shiftKey)=>[
+      [TAB,...ch[0].map(chK),BSP],
+      [left,...ch[1].map(chK),UP,SPC(2)],
+      [shiftKey,...ch[2].map(chK),LFT,DWN,RGT]];
+    const BOTTOM=[{l:'123',layer:1,w:4},
+      {l:'⌃',mod:'ctrl',w:2},{l:'⌥',mod:'alt',w:2},{l:'⌘',mod:'super',w:2},
+      {l:'⎋',code:'Escape',w:2},{l:'space',code:'Space',w:8,wide:1},
+      {l:'⏎',code:'Enter',w:3},{l:'C-A-D',combo:'ctrl-alt-del',w:3}];
+    const keyEl=s=>{
+      if(s.sp){ const d=document.createElement('div'); d.style.gridColumn='span '+(s.w||2); return d; }
+      const isChar=s.char!=null;
       const b=document.createElement('button');
-      b.className='k'+(s.wide?' wide':'')+(s.mod?' mod':'')
-        +((s.l&&s.l.length>1&&!s.wide&&!s.mod)?' sm':'');
+      b.className='k'+(s.wide?' wide':'')+(!isChar?' mod':'')
+        +((s.l&&s.l.length>1&&!s.wide)?' sm':'');
+      b.style.gridColumn='span '+(s.w||2);
       b.textContent=s.l;
-      if(s.char!=null) b.dataset.char=s.char;
+      if(isChar) b.dataset.char=s.char;
       if(s.code) b.dataset.code=s.code;
       if(s.mod) b.dataset.mod=s.mod;
-      if(s.combo) b.dataset.combo=s.combo;
+      if(s.shift) b.dataset.mod='shift';
+      if(s.caps) b.dataset.caps='1';
+      if(s.page) b.dataset.page='1';
       if(s.layer!=null) b.dataset.layer='1';
+      if(s.combo) b.dataset.combo=s.combo;
       return b; };
     const rowEl=specs=>{ const r=document.createElement('div'); r.className='krow';
       specs.forEach(s=>r.appendChild(keyEl(s))); return r; };
+    const layerEl=(cls,rows)=>{ const d=document.createElement('div'); d.className='klayer '+cls;
+      rows.forEach(r=>d.appendChild(rowEl(r))); return d; };
     // Swipe suggestion bar (top): filled by the WASM decoder after a swipe.
     const sug=document.createElement('div'); sug.id='kb-suggest'; kb.appendChild(sug);
-    const klet=document.createElement('div'); klet.className='klayer klet';
-    KROWS.letters.forEach(r=>klet.appendChild(rowEl(r)));
-    const ksym=document.createElement('div'); ksym.className='klayer ksym';
-    KROWS.symbols.forEach(r=>ksym.appendChild(rowEl(r)));
-    kb.appendChild(klet); kb.appendChild(ksym);
-    kb.appendChild(rowEl(KROWS.bottom));
-    // Layer toggle (?123 ↔ ABC): pure presentation, handled here (WASM ignores it).
-    kb.addEventListener('click',e=>{ const t=e.target.closest('[data-layer]'); if(!t) return;
-      t.textContent=kb.classList.toggle('sym')?'ABC':'?123'; });
+    kb.appendChild(layerEl('klet',  layerRows(LAY.abc, CAPS,   SHFT)));
+    kb.appendChild(layerEl('ksym',  layerRows(LAY.s1,  SPC(4), PAGE)));
+    kb.appendChild(layerEl('ksym2', layerRows(LAY.s2,  SPC(4), PAGE)));
+    kb.appendChild(rowEl(BOTTOM));
+    // Layer toggles (presentation only; the WASM layer ignores data-layer/data-page):
+    // 123 ↔ ABC swaps letters/symbols; ⇧ on a symbol page flips to the alt page.
+    kb.addEventListener('click',e=>{
+      if(e.target.closest('[data-layer]')){
+        const on=kb.classList.toggle('sym'); kb.classList.remove('sym2');
+        const b=kb.querySelector('[data-layer]'); if(b) b.textContent=on?'ABC':'123';
+        return;
+      }
+      if(e.target.closest('[data-page]')) kb.classList.toggle('sym2');
+    });
     // Press feedback: a short click sound + haptic tick + a visual press flash on
     // every key (the WASM layer sends the key on the same pointerdown). The audio
     // context is created/resumed lazily on the first press (a user gesture).

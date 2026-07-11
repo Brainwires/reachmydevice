@@ -35,6 +35,7 @@ features = [
   "Document",
   "Element",
   "HtmlElement",
+  "CssStyleDeclaration",
   "HtmlCanvasElement",
   "HtmlVideoElement",
   "Navigator",

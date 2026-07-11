@@ -4,6 +4,22 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-07-11
+
+Host resilience: recover from a wedged system DNS resolver.
+
+### Fixed
+- **Host no longer goes dark until manually restarted after a network blip.** On a
+  long-running macOS host, a transient network event can permanently wedge the
+  process's system DNS resolver (`getaddrinfo` returns "nodename nor servname" for
+  hours, even though the network is fine and a fresh process resolves instantly), so
+  the daemon stays alive but unreachable and no viewer can connect. The rendezvous
+  client now runs a watchdog: if it can't reach the rendezvous for 150s **and no
+  viewer session is active**, it exits so the supervisor (launchd/systemd
+  `KeepAlive`) relaunches it with a clean resolver. A live peer-to-peer session is
+  never torn down (the guard skips the restart while a session is active), and
+  viewers never self-restart.
+
 ## [0.2.9] - 2026-07-10
 
 Phone-control round 1: host-side pinch-zoom and drag-select for the browser viewer.
