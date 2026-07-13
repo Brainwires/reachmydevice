@@ -98,6 +98,16 @@ pub fn check_compatibility(remote_major: u32) -> Result<(), ProtocolError> {
     }
 }
 
+// --- Hello feature bits (the `Hello.features` bitmask) --------------------
+
+/// The viewer renders its own mouse cursor locally (from the position it commands),
+/// so the host should NOT bake the OS cursor into the captured video. This removes
+/// the cursor from the encode→jitter-buffer→decode pipeline, so the pointer tracks
+/// the user's finger/mouse with zero perceived lag. A host that predates this bit
+/// just keeps drawing the cursor into the frame (harmless — the viewer then shows
+/// both, but old behavior is unchanged).
+pub const FEATURE_CLIENT_CURSOR: u64 = 1 << 0;
+
 // --- Convenience constructors ---------------------------------------------
 
 /// The decodable-codec list a native peer advertises. Native endpoints decode

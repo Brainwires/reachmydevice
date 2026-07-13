@@ -491,6 +491,29 @@ impl CaptureController {
             .collect()
     }
 
+    /// Set whether the OS cursor is baked into the captured video, restarting the
+    /// live stream if the setting actually changed while capturing. A viewer that
+    /// renders its own cursor asks for `false` so the pointer isn't subject to the
+    /// video pipeline's latency (it draws the cursor locally instead). A no-op when
+    /// unchanged, so re-Hellos on the same session don't churn the capture.
+    fn set_show_cursor(&mut self, show: bool) {
+        if self.config.show_cursor == show {
+            return;
+        }
+        self.config.show_cursor = show;
+        if self.handle.is_none() {
+            return; // not capturing yet — the next resume() picks up the new config
+        }
+        match capture::start_capture(self.config.clone(), self.current, self.frame_tx.clone()) {
+            Ok(handle) => {
+                self.handle = Some(handle); // dropping the old session stops it
+                self.force_keyframe.store(true, Ordering::Relaxed);
+                tracing::info!(show_cursor = show, "capture cursor visibility changed");
+            }
+            Err(e) => tracing::warn!(error=%e, "failed to restart capture for cursor change"),
+        }
+    }
+
     /// Switch capture to display `id` (a no-op if already current or invalid).
     fn select(&mut self, id: u32) {
         let idx = id as usize;
@@ -720,6 +743,11 @@ fn handle_control(
                     // Authorize this session: unblocks input/capture/video/file/
                     // clipboard handling and starts the screen stream.
                     authorized.store(true, Ordering::Relaxed);
+                    // If the viewer renders its own cursor, drop the OS cursor from
+                    // the capture (set before resume so the stream starts cursor-less)
+                    // — the pointer is then lag-free client-side, not pipelined video.
+                    let client_cursor = h.features & proto::FEATURE_CLIENT_CURSOR != 0;
+                    capture_ctl.set_show_cursor(!client_cursor);
                     capture_ctl.resume();
                     // Prove the host's identity bound to this DTLS session so the
                     // viewer can authenticate the real endpoint (closes A2 MITM).
