@@ -116,6 +116,13 @@
   }
   pre{background:var(--panel2);border:1px solid var(--border);border-radius:9px;padding:12px;
     overflow:auto;font-size:12.5px;} .hint{color:var(--muted);font-size:12.5px;margin-top:8px;}
+  /* One row per setup command, each with its own copy button. */
+  .cmdlist{display:flex;flex-direction:column;gap:6px;margin:4px 0;}
+  .cmdrow{display:flex;align-items:center;gap:8px;background:var(--panel2);
+    border:1px solid var(--border);border-radius:9px;padding:8px 10px;}
+  .cmdrow code{flex:1;min-width:0;overflow-x:auto;white-space:nowrap;font-size:12.5px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;}
+  .cmdrow .cmdcopy{flex:none;}
   .panel{border:1px solid var(--border);border-radius:12px;padding:16px;margin-top:14px;background:#12151c;}
   .panel h2{margin:0 0 4px;font-size:15px;}
 
@@ -130,6 +137,13 @@
      the fingers. When unzoomed it carries NO transform, so it doesn't become a
      containing block and the rotated-view layout is byte-for-byte unchanged. */
   #zoomwrap{position:absolute;inset:0;display:grid;place-items:center;transform-origin:0 0;}
+  /* Local touch cursor overlay: positioned in viewport px via transform (hotspot =
+     arrow tip at the element's top-left). Above the video, below the header/keyboard. */
+  #cursor{position:fixed;left:0;top:0;z-index:40;pointer-events:none;line-height:0;
+    /* Pivot around the arrow tip so it stays on the target point when rotated to
+       match the video orientation. Hotspot is viewBox (2,1) rendered at 17/22 scale. */
+    transform-origin:1.5px 0.8px;filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.45));}
+  #cursor.hidden{display:none;}
   #screen{max-width:100vw;max-height:100vh;width:auto;height:auto;background:#000;outline:none;
     transition:transform .2s;
     /* The app owns every touch on the video: one/two/three-finger gestures are
@@ -255,7 +269,12 @@
 
   <div id="connect" class="hidden"><div class="card" id="cardBody"></div></div>
 
-  <div id="stage" class="hidden"><div id="zoomwrap"><video id="screen" playsinline autoplay muted tabindex="0"></video></div></div>
+  <div id="stage" class="hidden"><div id="zoomwrap"><video id="screen" playsinline autoplay muted tabindex="0"></video></div><!--
+    Local (touch) cursor. The host hides its OS cursor from the video (we advertise
+    FEATURE_CLIENT_CURSOR in the Hello) and we draw the pointer here at the position we
+    command — zero pipeline lag. Inside #stage so it hides with the video on disconnect;
+    position:fixed still resolves to the viewport (#stage has no transform). Hotspot=tip.
+  --><div id="cursor" class="hidden" aria-hidden="true"><svg width="17" height="17" viewBox="0 0 22 22"><path d="M2 1 L2 17 L6.1 13.3 L8.9 20 L11.7 18.8 L8.9 12.3 L14 12.3 Z" fill="#fff" stroke="#000" stroke-width="1.3" stroke-linejoin="round"/></svg></div></div>
   <div id="overlay" class="hidden"><div class="box"><div class="spin"></div>
     <div class="msg" id="ovMsg">Connecting…</div><div class="hint2" id="ovHint"></div></div></div>
 
@@ -361,11 +380,12 @@
     // keys (Tab, Backspace, Caps, Shift, arrows, bottom row) wrap char rows that
     // swap by layer: letters ↔ symbols ↔ alt-symbols (⇧ toggles alt on a symbol
     // page). The widening left column (Tab<Caps<Shift<123) creates the stagger.
-    const TAB={l:'⇥',code:'Tab',w:3}, BSP={l:'⌫',code:'Backspace',w:3};
+    const ESC={l:'⎋',code:'Escape',w:3}, BSP={l:'⌫',code:'Backspace',w:3};
+    const TAB={l:'⇥',code:'Tab',w:4}; // moved to the home row (old caps-lock slot)
     const UP={l:'↑',code:'ArrowUp'}, LFT={l:'←',code:'ArrowLeft'},
           DWN={l:'↓',code:'ArrowDown'}, RGT={l:'→',code:'ArrowRight'};
-    const CAPS={l:'⇪',caps:1,w:4};   // letter layer: caps-lock toggle
-    const SHFT={l:'⇧',shift:1,w:6};  // letter layer: one-shot caps
+    const SHFT={l:'⇧',shift:1,w:3};  // letter layer: one-shot caps (bottom-left)
+    const CAPS={l:'⇪',caps:1,w:2};   // letter layer: caps-lock toggle (beside shift)
     const PAGE={l:'⇧',page:1,w:6};   // symbol layer: alternate symbols
     const SPC=w=>({sp:1,w});          // grid spacer
     const LAY={
@@ -379,10 +399,18 @@
           ['_','\\','|','~','<','>','`',':',';'],
           ['.',',','?','!',"'",'"','-']]};
     const chK=c=>({l:c,char:c});
-    const layerRows=(ch,left,shiftKey)=>[
-      [TAB,...ch[0].map(chK),BSP],
-      [left,...ch[1].map(chK),UP,SPC(2)],
-      [shiftKey,...ch[2].map(chK),LFT,DWN,RGT]];
+    const rowW=arr=>arr.reduce((a,s)=>a+(s.w||2),0);
+    // Row 1 = Esc + top chars + Backspace. Row 2's left is the home-row key (Tab for
+    // letters). Row 3's left block (`l3`) can be narrower than the reference 6 cols
+    // (shift+caps = 5), so pad before the arrows to keep their column — the up-arrow in
+    // row 2 and the ←↓→ in row 3 stay aligned as an inverted-T.
+    const layerRows=(ch,left,l3)=>{
+      const gap=6-rowW(l3);
+      return [
+        [ESC,...ch[0].map(chK),BSP],
+        [left,...ch[1].map(chK),UP,SPC(2)],
+        [...l3,...ch[2].map(chK),...(gap>0?[SPC(gap)]:[]),LFT,DWN,RGT]];
+    };
     const BOTTOM=[{l:'123',layer:1,w:4},
       {l:'⌃',mod:'ctrl',w:2},{l:'⌥',mod:'alt',w:2},{l:'⌘',mod:'super',w:2},
       {l:'⎋',code:'Escape',w:2},{l:'space',code:'Space',w:8,wide:1},
@@ -410,9 +438,9 @@
       rows.forEach(r=>d.appendChild(rowEl(r))); return d; };
     // Swipe suggestion bar (top): filled by the WASM decoder after a swipe.
     const sug=document.createElement('div'); sug.id='kb-suggest'; kb.appendChild(sug);
-    const klet=kb.appendChild(layerEl('klet',  layerRows(LAY.abc, CAPS,   SHFT)));
-    kb.appendChild(layerEl('ksym',  layerRows(LAY.s1,  SPC(4), PAGE)));
-    kb.appendChild(layerEl('ksym2', layerRows(LAY.s2,  SPC(4), PAGE)));
+    const klet=kb.appendChild(layerEl('klet',  layerRows(LAY.abc, TAB,    [SHFT,CAPS])));
+    kb.appendChild(layerEl('ksym',  layerRows(LAY.s1,  SPC(4), [PAGE])));
+    kb.appendChild(layerEl('ksym2', layerRows(LAY.s2,  SPC(4), [PAGE])));
     kb.appendChild(rowEl(BOTTOM));
     // Layer toggles (presentation only; the WASM layer ignores data-layer/data-page):
     // 123 ↔ ABC swaps letters/symbols; ⇧ on a symbol page flips to the alt page.
@@ -496,7 +524,6 @@
   const passOf=()=>{ try{ return atob((auth||'').slice(6)).split(':').slice(1).join(':'); }catch(e){ return ''; } };
   const esc=s=>(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const wssBase=()=>(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws';
-  const runCmd=t=>`RMD_RENDEZVOUS_URL=${wssBase()} \\\n  RMD_TOKEN=${t} \\\n  rmdd`;
   const fmtSeen=t=>{if(!t)return{txt:'never seen',on:false};const d=new Date(t*1000),m=Math.round((Date.now()-d)/60000);
     return{txt:m<2?'online now':m<60?m+' min ago':d.toLocaleString(),on:m<2};};
   async function api(path,opts){ return fetch(API+path,opts); }
@@ -615,20 +642,41 @@
     $('signout').onclick=()=>{sessionStorage.clear(); localStorage.removeItem('rmd_vtok_'+user); auth=null; go('#/login');};
     wirePanel();
   }
+  // Setup commands, one per line — persisted in rmdd's encrypted settings store
+  // (`rmdd set …`) rather than passed as env vars (which leak in process listings).
+  const setupCmds=t=>[
+    `rmdd set rendezvous_url ${wssBase()}`,
+    `rmdd set token ${t}`,
+    `rmdd set password [password]`,
+    `rmdd`,
+  ];
   function commandPanel(title,token){
+    const rows=setupCmds(token).map(c=>
+      `<div class="cmdrow"><code>${esc(c)}</code><button class="sm ghost cmdcopy">Copy</button></div>`
+    ).join('');
     panelHtml=`<div class="panel"><h2>${esc(title)}</h2>
       <div class="hint" style="margin-top:2px"><b>1.</b> Install once:
         <span class="mono">curl -fsSL https://reachmy.dev/install.sh | sh</span>
         — or <a href="https://github.com/Brainwires/reachmydevice/releases/latest" target="_blank" rel="noopener">download ↗</a>
         and put <span class="mono">rmdd</span> on your PATH.</div>
-      <div class="hint" style="margin:10px 0 4px"><b>2.</b> Run it (grant Screen Recording on first launch):</div>
-      <pre id="cmdPre" class="mono">${esc(runCmd(token))}</pre>
-      <div class="row" style="margin-top:8px"><button class="sm ghost" id="copyCmd">Copy command</button>
+      <div class="hint" style="margin:10px 0 4px"><b>2.</b> Configure &amp; run (grant Screen Recording on first launch):</div>
+      <div class="cmdlist">${rows}</div>
+      <div class="row" style="margin-top:8px"><button class="sm ghost" id="copyAllCmd">Copy all</button>
         <button class="sm ghost" id="closeCmd">Close</button>
         <span class="hint" style="margin:0">Then <b>Refresh</b> — it appears with a green dot.</span></div></div>`;
   }
   function wirePanel(){
-    const c=$('copyCmd'); if(c) c.onclick=()=>{navigator.clipboard.writeText($('cmdPre').textContent);c.textContent='Copied';};
+    // Per-command copy: each button copies its own line.
+    document.querySelectorAll('#panel .cmdcopy').forEach(b=>{
+      b.onclick=()=>{
+        navigator.clipboard.writeText(b.parentElement.querySelector('code').textContent);
+        const o=b.textContent; b.textContent='Copied'; setTimeout(()=>{b.textContent=o;},1200);
+      };
+    });
+    const all=$('copyAllCmd'); if(all) all.onclick=()=>{
+      const t=[...document.querySelectorAll('#panel .cmdrow code')].map(e=>e.textContent).join('\n');
+      navigator.clipboard.writeText(t); all.textContent='Copied'; setTimeout(()=>{all.textContent='Copy all';},1200);
+    };
     const x=$('closeCmd'); if(x) x.onclick=()=>{panelHtml='';renderDevices();};
   }
   async function deviceAction(ds){

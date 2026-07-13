@@ -154,6 +154,21 @@ impl Session {
         self.video.set_playback_rate(1.0);
         self.pc.close();
         self.relay.close();
+        // Hide the local touch cursor so it doesn't linger over the frozen/blank
+        // frame while disconnected/reconnecting — it reappears on the next touch of a
+        // live session (a fresh session starts with no established position).
+        hide_touch_cursor();
+    }
+}
+
+/// Hide the local touch-cursor overlay. Used on teardown/disconnect; the overlay is
+/// otherwise only driven by touch, so nothing would clear it while reconnecting.
+fn hide_touch_cursor() {
+    if let Some(el) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("cursor"))
+    {
+        el.set_class_name("hidden");
     }
 }
 
@@ -570,7 +585,11 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
         let dc_open = dc.clone();
         let cb = Closure::<dyn FnMut()>::new(move || {
             if !*s.hello_sent.borrow() {
-                let hello = rmd_protocol::hello("web-viewer", rmd_protocol::Role::Viewer, 0);
+                let hello = rmd_protocol::hello(
+                    "web-viewer",
+                    rmd_protocol::Role::Viewer,
+                    rmd_protocol::FEATURE_CLIENT_CURSOR,
+                );
                 // Carry the remembered password so a reconnect re-authenticates
                 // without re-prompting (and doesn't stall unauthorized).
                 let hello = match s.password.borrow().as_ref() {
@@ -609,7 +628,7 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
                                         rmd_protocol::hello(
                                             "web-viewer",
                                             rmd_protocol::Role::Viewer,
-                                            0,
+                                            rmd_protocol::FEATURE_CLIENT_CURSOR,
                                         ),
                                         pw,
                                     );
@@ -800,6 +819,49 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
         let pinch_dist = Rc::new(Cell::new(0.0f64)); // previous two-finger distance (0 = not pinching)
         let pinch_cen = Rc::new(Cell::new((0.0f64, 0.0f64))); // previous two-finger centroid (client px)
 
+        // Draw the local touch cursor at the virtual cursor's on-screen point — the
+        // inverse of `norm()` (re-rotate for `data-rot`, then to viewport px via the
+        // video's live bounding rect, which already includes the zoom transform). Only
+        // shown once a touch established a position (`has_pos`); desktop uses the native
+        // pointer. Called after every position/zoom change (all happen on touchmove/end).
+        let place_cursor: Rc<dyn Fn()> = {
+            let video = video.clone();
+            let cursor = cursor.clone();
+            let has_pos = has_pos.clone();
+            let el = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.get_element_by_id("cursor"))
+                .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok());
+            Rc::new(move || {
+                let Some(el) = el.as_ref() else { return };
+                if !has_pos.get() {
+                    el.set_class_name("hidden");
+                    return;
+                }
+                let (nx, ny) = cursor.get();
+                let rect = video.get_bounding_client_rect();
+                let w = rect.width().max(1.0);
+                let h = rect.height().max(1.0);
+                // Re-rotate the normalized point back to box coords, and rotate the
+                // arrow itself by the same amount so it matches the video orientation
+                // (the video is rotated `rot*90°` clockwise). Pivot is the tip (2,1),
+                // set via CSS transform-origin, so the tip stays on the target point.
+                let (bx, by, deg) = match video.get_attribute("data-rot").as_deref() {
+                    Some("1") => (1.0 - ny, nx, 90),
+                    Some("2") => (1.0 - nx, 1.0 - ny, 180),
+                    Some("3") => (ny, 1.0 - nx, 270),
+                    _ => (nx, ny, 0),
+                };
+                let x = rect.left() + bx * w - 1.5;
+                let y = rect.top() + by * h - 0.8;
+                let _ = el.style().set_property(
+                    "transform",
+                    &format!("translate({x:.1}px,{y:.1}px) rotate({deg}deg)"),
+                );
+                el.set_class_name("");
+            })
+        };
+
         // Snapshot the primary touch's client-px position, if any.
         fn primary(ev: &TouchEvent) -> Option<(f64, f64)> {
             ev.touches()
@@ -957,6 +1019,7 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             let pinch_cen = pinch_cen.clone();
             let stage = stage.clone();
             let apply_zoom = apply_zoom.clone();
+            let place_cursor = place_cursor.clone();
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
                 ev.prevent_default();
                 last_touch.set(now_ms());
@@ -1003,6 +1066,7 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                     pinch_dist.set(dist);
                     pinch_cen.set(cen);
                     apply_zoom(s, tx, ty);
+                    place_cursor(); // the zoom moved the cursor's on-screen point
                     return;
                 }
                 let Some((cx, cy)) = primary(&ev) else {
@@ -1034,6 +1098,7 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                     cursor.set((ux, uy));
                     has_pos.set(true);
                     let _ = dc.send_with_u8_array(&input::mouse_move(ux, uy));
+                    place_cursor();
                 }
             });
             video
@@ -1064,6 +1129,7 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             let scale = scale.clone();
             let pan = pan.clone();
             let apply_zoom = apply_zoom.clone();
+            let place_cursor = place_cursor.clone();
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
                 last_touch.set(now_ms());
                 if let Some(p) = primary(&ev) {
@@ -1085,6 +1151,7 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                     scale.set(1.0);
                     pan.set((0.0, 0.0));
                     apply_zoom(1.0, 0.0, 0.0);
+                    place_cursor(); // zoom reset moved the cursor's on-screen point
                 }
                 // Release a held drag-select — this is a button-up, not a click.
                 if dragging.get() {
@@ -1113,6 +1180,7 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 } else {
                     return;
                 };
+                place_cursor(); // show the cursor at the tap point (cold start) / current pos
                 // A clean 1-finger tap arms double-tap-hold.
                 if fingers == 1 {
                     last_tap_ms.set(now_ms());
