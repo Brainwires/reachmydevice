@@ -4,6 +4,24 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.14] - 2026-07-13
+
+### Fixed
+- **Host now allocates its own TURN relay candidate — reliable cross-NAT
+  connections.** The sans-IO `rtc` fork has no TURN client, and the host's manual
+  candidate gather only produced `host` + `srflx` candidates (it skipped `turn:`
+  URLs, assuming "ICE handles it" — it doesn't). So a viewer behind symmetric NAT /
+  CGNAT had no reachable path: the host's srflx mapping wouldn't accept the viewer
+  relay's inbound and there was no host-side relay to fall back on, which showed up
+  as the host being **available but every connect spinning forever** (worst on
+  cellular). The host now drives an `rtc-turn` client on its transport socket:
+  Allocate on coturn → advertise a `relay` candidate → transparently frame media to
+  peers that need the relay (with coturn permissions), refreshing the allocation for
+  the session. Additive and regression-safe: outbound stays direct by default and
+  only routes through the relay for a peer once relayed data is actually received,
+  so a working host/srflx path is untouched. A failed/absent allocation just runs
+  relay-less as before.
+
 ## [0.2.13] - 2026-07-13
 
 ### Fixed

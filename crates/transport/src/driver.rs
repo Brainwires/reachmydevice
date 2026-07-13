@@ -27,6 +27,7 @@ use crate::{
 };
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -52,8 +53,8 @@ use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::{
-    CandidateConfig, CandidateHostConfig, CandidateServerReflexiveConfig, RTCDtlsRole,
-    RTCIceCandidate, RTCIceCandidateInit, RTCIceServer,
+    CandidateConfig, CandidateHostConfig, CandidateRelayConfig, CandidateServerReflexiveConfig,
+    RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit, RTCIceServer,
 };
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::rtp::codec::h264::H264Packet;
@@ -67,6 +68,7 @@ use rtc::rtp_transceiver::{
 };
 use rtc::sansio::Protocol;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtc::turn::client::{Client as TurnClient, ClientConfig as TurnClientConfig, Event as TurnEvent};
 use rtc::stun::addr::MappedAddress;
 use rtc::stun::message::{Getter, Message, TransactionId, BINDING_REQUEST};
 use rtc::stun::xoraddr::XorMappedAddress;
@@ -376,6 +378,268 @@ fn mapped_address(response: &Message) -> Option<SocketAddr> {
     None
 }
 
+/// How long to wait for the TURN Allocate handshake (Allocate → 401 → auth
+/// Allocate → success) before giving up and running relay-less.
+const TURN_SETUP_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// A TURN relay allocation held on the *host's* transport socket, plus the
+/// routing state that makes it transparent to the sans-IO `rtc` engine.
+///
+/// The engine has no TURN client, so on its own the host only ever advertises
+/// `host` + `srflx` candidates — leaving a peer behind symmetric NAT / CGNAT with
+/// no reachable path (its srflx mapping won't accept a relay's inbound). This
+/// wraps the [`TurnClient`] and bridges it into the driver's single-socket loop:
+/// we Allocate a relay on coturn, advertise a `relay` candidate, and then
+/// transparently frame traffic to/from any peer that turns out to need the relay.
+///
+/// Routing is deliberately additive so the common (direct/srflx) path is
+/// untouched when it works: engine outbound goes **direct by default** and is only
+/// wrapped through the relay for a peer once we've actually *received* relayed data
+/// from it (`relayed_peers`). Permissions are installed on coturn for every peer
+/// the engine checks, so a symmetric-NAT peer's checks can bootstrap through our
+/// relay when the direct path never delivers.
+struct TurnRelay {
+    client: TurnClient,
+    /// coturn's address — inbound datagrams from here are TURN protocol, not peer
+    /// media, and are demuxed to the client instead of the peer connection.
+    server_addr: SocketAddr,
+    /// Our allocated relayed transport address (advertised as the relay candidate).
+    relayed_addr: SocketAddr,
+    /// Peers we've received relayed data from → route our outbound to them via the
+    /// relay too (their direct path evidently doesn't reach us).
+    relayed_peers: HashSet<SocketAddr>,
+    /// Peer IPs we've already asked coturn to permit (dedup CreatePermission).
+    permitted: HashSet<IpAddr>,
+}
+
+/// Pick the first usable `turn:` server (URL + credentials) from the ICE list,
+/// preferring UDP. Returns `(server "host:port", username, credential, url)`.
+fn first_turn_server(ice_servers: &[IceServer]) -> Option<(String, String, String, String)> {
+    for s in ice_servers {
+        let (Some(username), Some(credential)) = (&s.username, &s.credential) else {
+            continue;
+        };
+        if username.is_empty() || credential.is_empty() {
+            continue;
+        }
+        // Prefer a UDP turn URL; fall back to any turn URL.
+        let pick = s
+            .urls
+            .iter()
+            .find(|u| u.starts_with("turn:") && u.contains("transport=udp"))
+            .or_else(|| s.urls.iter().find(|u| u.starts_with("turn:")));
+        if let Some(url) = pick {
+            let rest = url.trim_start_matches("turn:");
+            let host_port = rest.split('?').next().unwrap_or(rest).to_string();
+            let host_port = if host_port.contains(':') {
+                host_port
+            } else {
+                format!("{host_port}:{STUN_DEFAULT_PORT}")
+            };
+            return Some((host_port, username.clone(), credential.clone(), url.clone()));
+        }
+    }
+    None
+}
+
+impl TurnRelay {
+    /// Allocate a relay on coturn over `socket` and build the matching `relay`
+    /// candidate. Drives the (blocking, bounded) Allocate handshake inline — the
+    /// same socket the session will use, before the event loop owns it. Returns
+    /// `None` (run relay-less, no regression) if there's no TURN server, the
+    /// server can't be resolved, or the allocation doesn't complete in time.
+    fn setup(
+        socket: &UdpSocket,
+        local_addr: SocketAddr,
+        ice_servers: &[IceServer],
+    ) -> Option<(TurnRelay, RTCIceCandidateInit)> {
+        let (server_str, username, credential, url) = first_turn_server(ice_servers)?;
+        let want_ipv4 = local_addr.is_ipv4();
+        let server_addr = server_str
+            .to_socket_addrs()
+            .ok()?
+            .find(|a| a.is_ipv4() == want_ipv4)?;
+
+        // realm is left empty: coturn returns it in the 401 challenge and the
+        // client adopts it for the long-term MESSAGE-INTEGRITY key.
+        let cfg = TurnClientConfig {
+            stun_serv_addr: server_str.clone(),
+            turn_serv_addr: server_str,
+            local_addr,
+            transport_protocol: TransportProtocol::UDP,
+            username,
+            password: credential,
+            realm: String::new(),
+            software: String::new(),
+            rto_in_ms: 0,
+        };
+        let mut client = match TurnClient::new(cfg) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::debug!("transport: TURN client init failed: {e}");
+                return None;
+            }
+        };
+        if let Err(e) = client.allocate() {
+            tracing::debug!("transport: TURN allocate() failed: {e}");
+            return None;
+        }
+
+        let deadline = Instant::now() + TURN_SETUP_TIMEOUT;
+        let mut buf = vec![0u8; 2048];
+        let mut relayed_addr: Option<SocketAddr> = None;
+        'drive: while Instant::now() < deadline {
+            while let Some(t) = client.poll_write() {
+                let _ = socket.send_to(&t.message, t.transport.peer_addr);
+            }
+            while let Some(ev) = client.poll_event() {
+                match ev {
+                    TurnEvent::AllocateResponse(_, addr) => {
+                        relayed_addr = Some(addr);
+                        break 'drive;
+                    }
+                    TurnEvent::AllocateError(_, e) => {
+                        tracing::warn!("transport: TURN allocate rejected: {e}");
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+            let now = Instant::now();
+            let to = client
+                .poll_timeout()
+                .unwrap_or(now + Duration::from_millis(100))
+                .min(deadline);
+            if to <= now {
+                let _ = client.handle_timeout(now);
+                continue;
+            }
+            let _ = socket.set_read_timeout(Some((to - now).max(Duration::from_millis(1))));
+            match socket.recv_from(&mut buf) {
+                Ok((n, from)) if from == server_addr => {
+                    let _ = client.handle_read(TaggedBytesMut {
+                        now: Instant::now(),
+                        transport: TransportContext {
+                            local_addr,
+                            peer_addr: from,
+                            ecn: None,
+                            transport_protocol: TransportProtocol::UDP,
+                        },
+                        message: BytesMut::from(&buf[..n]),
+                    });
+                }
+                // Stray packet from someone other than coturn this early: ignore.
+                Ok(_) => {}
+                Err(_) => {}
+            }
+            let _ = client.handle_timeout(Instant::now());
+        }
+
+        let relayed_addr = relayed_addr?;
+        let candidate = CandidateRelayConfig {
+            base_config: CandidateConfig {
+                network: "udp".to_owned(),
+                address: relayed_addr.ip().to_string(),
+                port: relayed_addr.port(),
+                component: 1,
+                ..Default::default()
+            },
+            rel_addr: local_addr.ip().to_string(),
+            rel_port: local_addr.port(),
+            url: Some(url),
+        }
+        .new_candidate_relay()
+        .ok()?;
+        let init = RTCIceCandidate::from(&candidate).to_json().ok()?;
+        tracing::info!(relay = %relayed_addr, "transport: TURN relay candidate allocated");
+        Some((
+            TurnRelay {
+                client,
+                server_addr,
+                relayed_addr,
+                relayed_peers: HashSet::new(),
+                permitted: HashSet::new(),
+            },
+            init,
+        ))
+    }
+
+    /// True if `addr` is coturn (so inbound from it is TURN protocol, not peer media).
+    fn is_server(&self, addr: SocketAddr) -> bool {
+        addr == self.server_addr
+    }
+
+    /// Feed an inbound datagram that came from coturn into the TURN client.
+    fn handle_server_input(&mut self, msg: TaggedBytesMut) {
+        let _ = self.client.handle_read(msg);
+    }
+
+    /// Flush the client's queued protocol datagrams (Allocate refresh, permissions,
+    /// ChannelData) to coturn.
+    fn pump_out(&mut self, socket: &UdpSocket) {
+        while let Some(t) = self.client.poll_write() {
+            let _ = socket.send_to(&t.message, t.transport.peer_addr);
+        }
+    }
+
+    /// Drain TURN events: relayed peer datagrams are handed to the peer connection
+    /// as if they'd arrived directly from that peer.
+    fn drain_events<I: Interceptor>(
+        &mut self,
+        pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+        local_addr: SocketAddr,
+    ) {
+        while let Some(ev) = self.client.poll_event() {
+            match ev {
+                TurnEvent::DataIndicationOrChannelData(_, from, data) => {
+                    self.relayed_peers.insert(from);
+                    let _ = pc.handle_read(TaggedBytesMut {
+                        now: Instant::now(),
+                        transport: TransportContext {
+                            local_addr,
+                            peer_addr: from,
+                            ecn: None,
+                            transport_protocol: TransportProtocol::UDP,
+                        },
+                        message: data,
+                    });
+                }
+                TurnEvent::AllocateError(_, e) | TurnEvent::CreatePermissionError(_, e) => {
+                    tracing::debug!("transport: TURN event error: {e}");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Ensure coturn will relay to/from `peer`'s IP (install a permission once),
+    /// then, if we already know `peer` is only reachable via the relay, wrap this
+    /// datagram through it. Returns `true` if the datagram was sent via the relay
+    /// (so the caller must NOT also send it directly).
+    fn route_out(&mut self, peer: SocketAddr, message: &[u8]) -> bool {
+        if self.permitted.insert(peer.ip()) {
+            if let Ok(mut relay) = self.client.relay(self.relayed_addr) {
+                let _ = relay.create_permission(peer);
+            }
+        }
+        if self.relayed_peers.contains(&peer) {
+            if let Ok(mut relay) = self.client.relay(self.relayed_addr) {
+                let _ = relay.send_to(message, peer);
+            }
+            return true;
+        }
+        false
+    }
+
+    fn poll_timeout(&mut self) -> Option<Instant> {
+        self.client.poll_timeout()
+    }
+
+    fn handle_timeout(&mut self, now: Instant) {
+        let _ = self.client.handle_timeout(now);
+    }
+}
+
 /// Host: offerer + video sender, with sender-side GCC + TWCC.
 fn run_host(
     config: TransportConfig,
@@ -471,6 +735,24 @@ fn run_host(
             )));
         }
 
+        // Allocate a TURN relay on the same socket and advertise a `relay`
+        // candidate. This is what lets a peer behind symmetric NAT / CGNAT connect:
+        // without it the host only offers host+srflx and such peers have no
+        // reachable path. Best-effort — a failed/absent allocation just runs
+        // relay-less (host+srflx only), exactly as before.
+        let mut turn = match TurnRelay::setup(&socket, local_addr, &config.ice_servers) {
+            Some((relay, init)) => {
+                if let Err(e) = pc.add_local_candidate(init.clone()) {
+                    tracing::debug!("transport: add relay candidate failed: {e}");
+                }
+                let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
+                    init.candidate,
+                )));
+                Some(relay)
+            }
+            None => None,
+        };
+
         // Packetizer for outbound encoded frames. The payloader is selected from the
         // codec's MIME type (H264Payloader or Av1Payloader) by the fork.
         let packetizer: Box<dyn Packetizer> = Box::new(new_packetizer(
@@ -503,7 +785,14 @@ fn run_host(
         };
 
         match event_loop(
-            &mut pc, &socket, local_addr, &cmd_rx, &event_tx, &mut state, None,
+            &mut pc,
+            &socket,
+            local_addr,
+            &cmd_rx,
+            &event_tx,
+            &mut state,
+            None,
+            turn.as_mut(),
         )? {
             LoopOutcome::Shutdown => return Ok(()),
             LoopOutcome::Reconnect(_) => {
@@ -608,6 +897,7 @@ fn run_viewer(
             &event_tx,
             &mut state,
             pending.take(),
+            None,
         )? {
             LoopOutcome::Shutdown => return Ok(()),
             LoopOutcome::Reconnect(offer) => {
@@ -729,6 +1019,7 @@ fn event_loop<I: Interceptor>(
     event_tx: &Sender<TransportEvent>,
     state: &mut RoleState,
     initial_signal: Option<SignalMsg>,
+    mut turn: Option<&mut TurnRelay>,
 ) -> anyhow::Result<LoopOutcome> {
     let mut connected = false;
     let mut read_buf = vec![0u8; 2048];
@@ -747,11 +1038,29 @@ fn event_loop<I: Interceptor>(
             return Ok(LoopOutcome::Shutdown);
         }
 
-        // 2. Flush all pending outbound datagrams.
+        // 2. Flush all pending outbound datagrams. With a TURN relay, a datagram to
+        //    a peer we only reach via the relay is wrapped through coturn instead of
+        //    sent directly (route_out also installs the coturn permission). Peers on
+        //    a working direct/srflx path are unaffected — they go straight out.
         while let Some(msg) = pc.poll_write() {
-            if let Err(e) = socket.send_to(&msg.message, msg.transport.peer_addr) {
-                tracing::debug!("transport: socket send_to error: {e}");
+            let peer = msg.transport.peer_addr;
+            let relayed = turn
+                .as_mut()
+                .map(|t| t.route_out(peer, &msg.message))
+                .unwrap_or(false);
+            if !relayed {
+                if let Err(e) = socket.send_to(&msg.message, peer) {
+                    tracing::debug!("transport: socket send_to error: {e}");
+                }
             }
+        }
+
+        // 2b. Flush the TURN client's own datagrams (allocation refresh, permission
+        //     requests, ChannelData) and surface any relayed peer datagrams into the
+        //     peer connection as if they'd arrived directly.
+        if let Some(t) = turn.as_mut() {
+            t.pump_out(socket);
+            t.drain_events(pc, local_addr);
         }
 
         // 3. Surface connection-state and ICE-candidate events.
@@ -778,15 +1087,25 @@ fn event_loop<I: Interceptor>(
         }
 
         // 6. Service the sans-IO timer, then wait (bounded) for the next
-        //    datagram so both timeouts and commands stay responsive.
+        //    datagram so both timeouts and commands stay responsive. The TURN
+        //    client's refresh timer is driven each pass and folded into the wait so
+        //    we never sleep past an allocation/permission refresh.
         let now = Instant::now();
-        let deadline = pc.poll_timeout();
-        if let Some(eto) = deadline {
+        if let Some(t) = turn.as_mut() {
+            t.handle_timeout(now);
+        }
+        let pc_deadline = pc.poll_timeout();
+        if let Some(eto) = pc_deadline {
             if eto <= now {
                 pc.handle_timeout(now).context("handle_timeout")?;
                 continue; // re-run the pump immediately after a fired timer
             }
         }
+        let turn_deadline = turn.as_mut().and_then(|t| t.poll_timeout());
+        let deadline = match (pc_deadline, turn_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
 
         let wait = deadline
             .map(|eto| eto.saturating_duration_since(now))
@@ -798,7 +1117,7 @@ fn event_loop<I: Interceptor>(
 
         match socket.recv_from(&mut read_buf) {
             Ok((n, peer_addr)) => {
-                pc.handle_read(TaggedBytesMut {
+                let msg = TaggedBytesMut {
                     now: Instant::now(),
                     transport: TransportContext {
                         local_addr,
@@ -807,8 +1126,21 @@ fn event_loop<I: Interceptor>(
                         transport_protocol: TransportProtocol::UDP,
                     },
                     message: BytesMut::from(&read_buf[..n]),
-                })
-                .context("handle_read")?;
+                };
+                // Datagrams from coturn are TURN protocol (allocate/permission
+                // responses, relayed peer data) — feed them to the TURN client and
+                // immediately surface any relayed media. Everything else is direct
+                // peer traffic for the peer connection.
+                match turn.as_mut() {
+                    Some(t) if t.is_server(peer_addr) => {
+                        t.handle_server_input(msg);
+                        t.pump_out(socket);
+                        t.drain_events(pc, local_addr);
+                    }
+                    _ => {
+                        pc.handle_read(msg).context("handle_read")?;
+                    }
+                }
             }
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
