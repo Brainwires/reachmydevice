@@ -22,6 +22,8 @@ use rmd_transport::IceServer;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+mod service;
+
 #[cfg(feature = "tray")]
 mod tray;
 
@@ -156,6 +158,24 @@ fn read_token(
     )
 }
 
+/// Log a clear "not set up yet" message and block forever. A supervised daemon
+/// missing its config must not *exit* — an exit restart-loops under systemd/launchd.
+/// Instead it parks here (no busy loop) until the service is stopped (SIGTERM),
+/// then dies cleanly. The user configures it with `rmdd set …` then `rmdd restart`.
+fn park_unconfigured(reason: &str) -> ! {
+    tracing::warn!(
+        "rmdd is not set up ({reason}). Configure it, then (re)start the service:\n  \
+         rmdd set rendezvous_url wss://<your-rendezvous>/ws\n  \
+         rmdd set token <device-token>\n  \
+         rmdd set password <connection-password>    # optional but recommended\n  \
+         rmdd restart\n\
+         Idling — won't auto-exit, so the service won't restart-loop. Stop the service to exit."
+    );
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
 /// Handle the `rmdd set|unset|list` settings subcommands. These load (or
 /// first-run create) the device identity, open the encrypted settings store, and
 /// mutate it — then exit without starting a session. `list` prints keys only,
@@ -263,6 +283,14 @@ fn main() -> anyhow::Result<()> {
                      rmdd set <k> <v>     store a secret setting (encrypted at rest)\n  \
                      rmdd unset <k>       remove a setting\n  \
                      rmdd list            list setting keys (values never printed)\n\n\
+                     Daemon (background service — systemd --user / launchd):\n  \
+                     rmdd enable          install + enable autostart, start it\n  \
+                     rmdd disable         disable autostart\n  \
+                     rmdd status          show service status\n  \
+                     rmdd start           start the service (no-op if running)\n  \
+                     rmdd stop            stop the service\n  \
+                     rmdd restart         restart the service\n  \
+                     rmdd log [-f]        show the service log (-f to follow)\n\n\
                      Settings (via `rmdd set`):\n  \
                      rendezvous_url  wss://<host>/ws — enables rendezvous mode\n  \
                      token           device bearer token (rendezvous mode)\n  \
@@ -290,6 +318,20 @@ fn main() -> anyhow::Result<()> {
         Some("set") | Some("unset") | Some("list")
     ) {
         return run_settings_command(&args);
+    }
+    // Daemon management (`rmdd enable|disable|status|start|stop|restart`) — routes
+    // to the platform init system (systemd --user / launchd). Runs and exits.
+    if matches!(
+        args.first().map(String::as_str),
+        Some("enable")
+            | Some("disable")
+            | Some("status")
+            | Some("start")
+            | Some("stop")
+            | Some("restart")
+            | Some("log")
+    ) {
+        return service::run_command(&args);
     }
 
     tracing_subscriber::fmt()
@@ -324,9 +366,18 @@ fn main() -> anyhow::Result<()> {
         .filter(|u| !u.is_empty())
         .map(str::to_string)
         .or_else(|| std::env::var("RMD_RENDEZVOUS_URL").ok());
+    // Whether we're actually configured to serve. A supervised daemon that isn't
+    // set up must NOT exit (that restart-loops under systemd/launchd) — it parks and
+    // waits to be stopped. Configured = a rendezvous URL + a readable token, OR an
+    // explicit LAN relay (`RMD_SIGNAL_ADDR`) for the dev flow.
+    let lan_dev = std::env::var("RMD_SIGNAL_ADDR").is_ok();
     let token = match &rendezvous_url {
-        Some(_) => Some(read_token(settings.as_ref())?),
-        None => None,
+        Some(_) => match read_token(settings.as_ref()) {
+            Ok(t) => Some(t),
+            Err(_) => park_unconfigured("a rendezvous URL is set but no device token"),
+        },
+        None if lan_dev => None,
+        None => park_unconfigured("no rendezvous URL or device token configured"),
     };
     let token_str = token.as_deref().map(|z| z.as_str());
 

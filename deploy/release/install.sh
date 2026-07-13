@@ -329,5 +329,36 @@ for b in $installed; do
 done
 [ "$ok" = 1 ] || die "validation failed — the binaries did not run"
 
+# --- Optional: auto-start rmdd as a background service ---------------------
+# Delegates to `rmdd enable`, which writes + enables the platform unit
+# (systemd --user on Linux, launchd agent on macOS). The service just runs bare
+# rmdd, which idles until configured (`rmdd set …`) — so enabling it before setup
+# never restart-loops. Controlled by RMD_SERVICE (1/yes = on, 0/no = skip); when
+# unset it prompts on a terminal, and skips silently when piped non-interactively.
+case " $installed " in
+  *" rmdd "*)
+    ans="${RMD_SERVICE:-}"
+    if [ -z "$ans" ]; then
+      if [ -r /dev/tty ]; then
+        printf '\033[1;32m==>\033[0m Set up rmdd to auto-start as a background service (systemd/launchd)? [y/N] '
+        read ans < /dev/tty || ans=""
+      else
+        ans="n"
+      fi
+    fi
+    case "$ans" in
+      y|Y|yes|YES|on|1)
+        say "Enabling the rmdd background service"
+        if "$BINDIR/rmdd" enable; then
+          say "Service enabled — it idles until you configure it:"
+          say "  rmdd set rendezvous_url wss://<host>/ws  &&  rmdd set token <token>  &&  rmdd restart"
+        else
+          warn "Couldn't enable the service automatically — run  rmdd enable  yourself."
+        fi ;;
+      *)
+        say "Skipped service setup.  Enable later with:  rmdd enable" ;;
+    esac ;;
+esac
+
 say "Done.  Run  rmd  to view a device — or  rmdd  on the machine you want to control."
 [ -z "$PATH_NOTE" ] || say "$PATH_NOTE"
