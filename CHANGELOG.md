@@ -4,6 +4,41 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.15] - 2026-07-13
+
+### Added
+- **Daemon management built into `rmdd`.** `rmdd enable | disable | status | start |
+  stop | restart | log [-f]` manage the host as a background service via the
+  platform init system — **systemd `--user`** on Linux, a **launchd** agent on
+  macOS — all per-user (no sudo). The generated unit runs bare `rmdd`, which reads
+  its config from the encrypted settings store, so **no token is ever written into a
+  unit file or plist**. `rmdd log` tails `journalctl --user -u rmd-host` (Linux) or
+  the agent log (macOS). The installer gains an optional prompt (or `RMD_SERVICE=1`)
+  that sets this up by delegating to `rmdd enable`.
+- On Linux the generated unit captures the caller's `DISPLAY` (so `DISPLAY=:99 rmdd
+  enable` targets a headless Xvfb), enables lingering (starts at boot, survives
+  logout), and uses `Restart=always`.
+
+### Changed
+- **An unconfigured daemon no longer exits — it idles.** Previously a host missing
+  its rendezvous URL / device token exited with an error, which **restart-looped**
+  under a supervisor. It now logs the exact `rmdd set …` steps and parks (no busy
+  loop) until the service is stopped, so enabling the service before configuring it
+  is safe. (Dev LAN mode via `RMD_SIGNAL_ADDR` is unchanged.)
+
+### Fixed
+- **Reliable rapid cross-NAT reconnects.** The TURN relay was re-allocated on every
+  session rebuild, but a second Allocate on the same socket 5-tuple is rejected by
+  coturn (Allocation Mismatch) while the previous allocation lingers, dropping
+  reconnects to relay-less (which fails on symmetric NAT). The relay is now allocated
+  once for the socket's lifetime and re-advertised per session; reconnects also skip
+  the ~4s Allocate handshake.
+- **Lag-free cursor.** The host now drops the OS cursor from the captured video when
+  the viewer advertises it renders its own (`FEATURE_CLIENT_CURSOR` in the Hello), so
+  the pointer isn't subject to the encode → jitter-buffer → decode pipeline. The
+  web-viewer draws a local pointer that tracks touch instantly and rotates with the
+  video. (Client half already deployed to `/app`.)
+
 ## [0.2.14] - 2026-07-13
 
 ### Fixed
