@@ -1106,8 +1106,21 @@ fn drain_reads<I: Interceptor>(
             RTCMessage::DataChannelMessage(_id, msg) => {
                 let _ = event_tx.send(TransportEvent::Data(msg.data.freeze()));
             }
-            RTCMessage::RtcpPacket(_, _) => {
-                // Processed by interceptors already; nothing app-visible here.
+            RTCMessage::RtcpPacket(_, packets) => {
+                // Most RTCP (RR/SR/NACK/TWCC) is consumed by interceptors. But a
+                // Picture Loss Indication / Full Intra Request is the viewer asking
+                // for a fresh keyframe after it lost packets it can't recover via
+                // NACK — surface it so the host forces an IDR right away instead of
+                // leaving the last frame stale until the ~2s periodic keyframe.
+                use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+                use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+                let wants_keyframe = packets.iter().any(|p| {
+                    let any = p.as_any();
+                    any.is::<PictureLossIndication>() || any.is::<FullIntraRequest>()
+                });
+                if wants_keyframe {
+                    let _ = event_tx.send(TransportEvent::KeyframeRequested);
+                }
             }
         }
     }

@@ -407,6 +407,12 @@ where
                 }
             }
             TransportEvent::Video { .. } => {} // host does not receive video
+            TransportEvent::KeyframeRequested => {
+                // The viewer's RTCP (PLI/FIR) asked for a fresh keyframe after loss.
+                // Force an IDR so it recovers now rather than waiting for the next
+                // periodic keyframe. Cheap and idempotent (a swap-once flag).
+                capture_ctl.force_keyframe.store(true, Ordering::Relaxed);
+            }
         }
     }
 }

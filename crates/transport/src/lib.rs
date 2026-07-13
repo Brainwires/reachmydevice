@@ -112,6 +112,11 @@ pub enum TransportEvent {
     Video { annexb: Bytes, ts_hint: u64 },
     /// A data-channel message (control / input).
     Data(Bytes),
+    /// The remote peer requested a keyframe via RTCP (PLI/FIR) — typically after
+    /// packet loss left it unable to decode. The host should force an IDR so the
+    /// viewer recovers immediately instead of waiting for the next periodic
+    /// keyframe (~2s), which is what leaves the "last update" stale after a loss.
+    KeyframeRequested,
 }
 
 /// Commands from the [`Transport`] handle to the driver thread.

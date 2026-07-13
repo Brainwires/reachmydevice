@@ -4,6 +4,21 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-07-13
+
+### Fixed
+- **Host now answers the viewer's keyframe requests, so a lost frame recovers
+  immediately instead of staying stale.** After packet loss the browser sends an
+  RTCP Picture Loss Indication (PLI/FIR) asking for a fresh keyframe, but the host
+  ignored all incoming RTCP — so when the *last* frame of a burst was lost and
+  couldn't be repaired by NACK retransmission, the viewer showed a stale frame
+  (out of sync with the real screen) until the next periodic keyframe (~2s later).
+  The host now decodes PLI/FIR and forces an IDR right away. This is worst at the
+  start of a session (loss is highest before congestion control converges), which
+  matches the "dropped last update, smooths out over time" symptom. Requests
+  coalesce through the existing swap-once keyframe flag, so sustained loss can't
+  cause a keyframe storm.
+
 ## [0.2.12] - 2026-07-13
 
 ### Changed

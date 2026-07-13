@@ -395,6 +395,9 @@ impl ViewerSession {
                                     }
                                 }
                             }
+                            // Host-only event: the viewer is the media receiver, so it
+                            // never sees a keyframe request of its own.
+                            TransportEvent::KeyframeRequested => {}
                         }
                     }
                 })?;
