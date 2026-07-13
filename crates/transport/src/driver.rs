@@ -564,6 +564,14 @@ impl TurnRelay {
         ))
     }
 
+    /// Reset per-viewer routing state for a new session while keeping the (shared)
+    /// allocation. Old peer addresses won't match a new viewer, and permissions are
+    /// re-created lazily as the engine checks the new viewer's candidates.
+    fn reset_session(&mut self) {
+        self.relayed_peers.clear();
+        self.permitted.clear();
+    }
+
     /// True if `addr` is coturn (so inbound from it is TURN protocol, not peer media).
     fn is_server(&self, addr: SocketAddr) -> bool {
         addr == self.server_addr
@@ -648,6 +656,16 @@ fn run_host(
     bitrate_bps: Arc<AtomicU32>,
 ) -> anyhow::Result<()> {
     let (socket, local_addr) = bind_socket(config.bind_addr)?;
+
+    // Allocate the TURN relay ONCE for the socket's lifetime, not per session: a
+    // second Allocate on the same 5-tuple while the previous allocation still lingers
+    // on coturn is rejected (Allocation Mismatch), which would drop reconnects back to
+    // relay-less and break cross-NAT rapid reconnects. We keep the one allocation and
+    // just re-advertise its candidate (and reset per-viewer routing state) each session.
+    let (mut turn, turn_cand) = match TurnRelay::setup(&socket, local_addr, &config.ice_servers) {
+        Some((relay, cand)) => (Some(relay), Some(cand)),
+        None => (None, None),
+    };
 
     // One iteration per viewer session: build a fresh peer connection (offer +
     // control data channel), serve it, and rebuild from scratch when it drops so
@@ -735,23 +753,19 @@ fn run_host(
             )));
         }
 
-        // Allocate a TURN relay on the same socket and advertise a `relay`
-        // candidate. This is what lets a peer behind symmetric NAT / CGNAT connect:
-        // without it the host only offers host+srflx and such peers have no
-        // reachable path. Best-effort — a failed/absent allocation just runs
-        // relay-less (host+srflx only), exactly as before.
-        let mut turn = match TurnRelay::setup(&socket, local_addr, &config.ice_servers) {
-            Some((relay, init)) => {
-                if let Err(e) = pc.add_local_candidate(init.clone()) {
-                    tracing::debug!("transport: add relay candidate failed: {e}");
-                }
-                let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
-                    init.candidate,
-                )));
-                Some(relay)
+        // (Re)advertise the persistent TURN relay candidate on this fresh peer
+        // connection and reset its per-viewer routing state. This is what lets a peer
+        // behind symmetric NAT / CGNAT connect (the host otherwise offers host+srflx
+        // only). The allocation itself was made once above and survives rebuilds.
+        if let (Some(relay), Some(cand)) = (turn.as_mut(), turn_cand.as_ref()) {
+            relay.reset_session();
+            if let Err(e) = pc.add_local_candidate(cand.clone()) {
+                tracing::debug!("transport: add relay candidate failed: {e}");
             }
-            None => None,
-        };
+            let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
+                cand.candidate.clone(),
+            )));
+        }
 
         // Packetizer for outbound encoded frames. The payloader is selected from the
         // codec's MIME type (H264Payloader or Av1Payloader) by the fork.
