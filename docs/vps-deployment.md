@@ -120,3 +120,24 @@ since a host `iptables` ban would only hit the proxy — see the README.
   short-lived `<expiry>:rmd` username. The host, native viewer, and browser
   viewer all fetch it.
 - Postgres is an optional swap for SQLite at higher scale (sqlx supports both).
+
+## Relay entitlement (pluggable; default open)
+
+`GET /api/ice` asks a **relay-entitlement policy** whether the requesting user may
+use TURN before minting credentials. The open-source default
+([`crates/entitlement`](../crates/entitlement)) is `AllowAll` — every registered
+device may relay, exactly as before — so self-hosting needs no configuration and
+sees no behavior change.
+
+The policy is a seam, not a fork: `AppState::new(pool, cfg, entitlement)` takes an
+`Arc<dyn RelayEntitlement>`, and `router_with(state, extra)` merges extra routes.
+A downstream build can inject its own policy (e.g. gate relay on a paid
+subscription) without modifying this crate. When relay is withheld the endpoint
+still returns STUN so sessions stay peer-to-peer, and annotates the body:
+
+```json
+{ "ice_servers": [ /* stun only */ ], "relay": { "allowed": false, "reason": "no_subscription" } }
+```
+
+Brainwires' hosted service uses such a policy; that billing layer is a **private,
+separately-licensed component** and is not part of this repository.

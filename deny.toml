@@ -19,8 +19,11 @@ ignore = []
 
 [licenses]
 version = 2
-# Permissive licenses compatible with our MIT OR Apache-2.0 distribution.
+# Our own crates ship under the Elastic License 2.0 (source-available; see
+# LICENSE). Dependencies must still be permissive and compatible with
+# redistribution under those terms.
 allow = [
+    "Elastic-2.0",
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",

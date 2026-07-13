@@ -9,6 +9,7 @@ members = [
     "crates/codec",
     "crates/input",
     "crates/session",
+    "crates/entitlement",
     "apps/host",
     "apps/viewer",
     "apps/signal-dev",
@@ -21,10 +22,13 @@ members = [
 exclude = ["third_party", "apps/web-viewer"]
 
 [workspace.package]
-version = "0.2.15"
+version = "0.2.16"
 edition = "2021"
 rust-version = "1.82"
-license = "MIT OR Apache-2.0"
+# Relicensed from "MIT OR Apache-2.0" at 0.2.16: internal/commercial self-hosting
+# stays free, but offering the software as a hosted/managed service is not
+# permitted (see LICENSE + NOTICE). Prior releases remain MIT/Apache.
+license = "Elastic-2.0"
 repository = "https://github.com/Brainwires/reachmydevice"
 authors = ["Brainwires"]
 
@@ -54,6 +58,9 @@ rmd-capture = { path = "crates/capture" }
 rmd-codec = { path = "crates/codec" }
 rmd-input = { path = "crates/input" }
 rmd-session = { path = "crates/session" }
+# Relay-entitlement seam: the open-source default is `AllowAll`; a private plugin
+# can inject a paid policy when composing the server (see apps/rendezvous).
+rmd-entitlement = { path = "crates/entitlement" }
 
 # Fast, small release binaries; keep debug symbols off the hot path.
 [profile.release]

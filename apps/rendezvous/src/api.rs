@@ -274,39 +274,61 @@ pub async fn ice_servers(
     State(state): State<AppState>,
     Query(q): Query<IceQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
-    // Authenticate the device (this also refreshes its `last_seen`).
-    if device_id_for_token(&state.pool, &q.token).await?.is_none() {
-        return Err(AppError::Unauthorized);
-    }
+    // Authenticate the device and resolve its owning user (also refreshes
+    // `last_seen`). Only registered devices can even reach the relay gate.
+    let user_id = match user_id_for_token(&state.pool, &q.token).await? {
+        Some(id) => id,
+        None => return Err(AppError::Unauthorized),
+    };
+
+    // Ask the relay-entitlement policy whether this user may use TURN. The
+    // open-source default (`AllowAll`) always allows; a paid build gates on an
+    // active subscription + fair-use. A denial is *not* an error — we still hand
+    // back STUN so the session can go peer-to-peer — but we annotate the reason
+    // so the console can prompt the user to subscribe.
+    let decision = state.entitlement.allow_relay(user_id).await;
 
     let mut servers: Vec<serde_json::Value> = Vec::new();
+    let mut relay_denied: Option<&'static str> = None;
     match &state.config.turn {
         Some(turn) => {
-            let expiry = now_unix() as u64 + turn.ttl_secs;
-            let username = format!("{expiry}:rmd");
-            // HMAC accepts a key of any length, so this never fails.
-            let mut mac = Hmac::<Sha1>::new_from_slice(turn.secret.as_bytes())
-                .expect("HMAC accepts keys of any length");
-            mac.update(username.as_bytes());
-            let credential = base64::engine::general_purpose::STANDARD
-                .encode(mac.finalize().into_bytes());
             let (host, port) = (&turn.host, turn.port);
+            // The coturn STUN endpoint is always safe to hand out (no bandwidth
+            // cost); only the relaying `turn:` creds are gated.
             servers.push(serde_json::json!({ "urls": [format!("stun:{host}:{port}")] }));
-            servers.push(serde_json::json!({
-                "urls": [
-                    format!("turn:{host}:{port}?transport=udp"),
-                    format!("turn:{host}:{port}?transport=tcp"),
-                ],
-                "username": username,
-                "credential": credential,
-            }));
+            if decision.allowed() {
+                let expiry = now_unix() as u64 + turn.ttl_secs;
+                let username = format!("{expiry}:rmd");
+                // HMAC accepts a key of any length, so this never fails.
+                let mut mac = Hmac::<Sha1>::new_from_slice(turn.secret.as_bytes())
+                    .expect("HMAC accepts keys of any length");
+                mac.update(username.as_bytes());
+                let credential = base64::engine::general_purpose::STANDARD
+                    .encode(mac.finalize().into_bytes());
+                servers.push(serde_json::json!({
+                    "urls": [
+                        format!("turn:{host}:{port}?transport=udp"),
+                        format!("turn:{host}:{port}?transport=tcp"),
+                    ],
+                    "username": username,
+                    "credential": credential,
+                }));
+            } else {
+                relay_denied = decision.reason();
+            }
         }
         None => {
             servers.push(serde_json::json!({ "urls": ["stun:stun.l.google.com:19302"] }));
         }
     }
 
-    Ok(Json(serde_json::json!({ "ice_servers": servers })))
+    let mut resp = serde_json::json!({ "ice_servers": servers });
+    // 402-style hint (kept in the 200 body so STUN-only clients still work):
+    // present only when TURN is configured but withheld for this user.
+    if let Some(reason) = relay_denied {
+        resp["relay"] = serde_json::json!({ "allowed": false, "reason": reason });
+    }
+    Ok(Json(resp))
 }
 
 // --- auth helpers ----------------------------------------------------------
@@ -389,6 +411,34 @@ pub async fn touch_last_seen(pool: &SqlitePool, device_id: &str) {
         .bind(device_id)
         .execute(pool)
         .await;
+}
+
+/// Resolve a device bearer token → the owning account's `user_id`, if the token
+/// is valid and unexpired. Also stamps the device's `last_seen`. Used by the ICE
+/// endpoint, where the relay-entitlement policy is keyed by user.
+pub async fn user_id_for_token(pool: &SqlitePool, token: &str) -> AppResult<Option<i64>> {
+    let token_hash = auth::hash_token(token);
+    let now = now_unix();
+    let row: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT d.user_id, d.id \
+         FROM device_tokens t JOIN devices d ON d.id = t.device_pk \
+         WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)",
+    )
+    .bind(&token_hash)
+    .bind(now)
+    .fetch_optional(pool)
+    .await?;
+    if let Some((user_id, device_pk)) = row {
+        sqlx::query("UPDATE devices SET last_seen = ? WHERE id = ?")
+            .bind(now)
+            .bind(device_pk)
+            .execute(pool)
+            .await
+            .ok();
+        Ok(Some(user_id))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Resolve a device bearer token → its `device_id`, if valid and unexpired.

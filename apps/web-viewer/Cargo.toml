@@ -3,7 +3,7 @@ name = "rmd-web-viewer"
 version = "0.2.0"
 edition = "2021"
 rust-version = "1.92"
-license = "MIT OR Apache-2.0"
+license = "Elastic-2.0"
 description = "ReachMyDevice browser viewer — WASM, connects over WebRTC and decodes H.264 in the browser."
 repository = "https://github.com/Brainwires/reachmydevice"
 
