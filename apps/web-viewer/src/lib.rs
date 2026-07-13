@@ -228,16 +228,24 @@ async fn run() -> Result<(), String> {
         password: Rc::new(RefCell::new(None)),
     });
 
-    // Rebuild the connection when the tab becomes visible again with no healthy
-    // session (the classic phone case: suspend freezes JS + kills the socket, and
-    // the dead session never recovers on its own).
+    // Reconnect ONLY on foreground. Backgrounding (lock/switch apps) is treated as
+    // an intentional disconnect: tear the session down so the host stops capturing,
+    // and never reconnect while hidden. Becoming visible again rebuilds it.
     {
         let app = app.clone();
         let document2 = document.clone();
         let cb = Closure::<dyn FnMut()>::new(move || {
             if document2.hidden() {
-                return; // only act on becoming visible
+                // Backgrounded → end the session (host capture stops); do NOT reconnect.
+                if let Some(s) = app.current.borrow_mut().take() {
+                    s.teardown();
+                }
+                app.connecting.set(false); // drop any pending reconnect guard
+                web_sys::console::log_1(&"[rmd] hidden; disconnecting until foreground".into());
+                set_status("disconnected (backgrounded)");
+                return;
             }
+            // Became visible → reconnect if there's no healthy session.
             let healthy = app.current.borrow().as_ref().is_some_and(|s| {
                 matches!(
                     s.pc.connection_state(),
@@ -354,7 +362,16 @@ fn schedule_reconnect(app: Rc<App>) {
 /// touch faster to *drain* the backlog and catch up — never dropping frames. The
 /// hint is re-asserted every tick, so a background→resume self-heals within a second.
 fn start_latency_control(session: &Rc<Session>, receiver: RtcRtpReceiver) {
-    apply_low_latency_hints(&receiver);
+    // ADAPTIVE jitter buffer. A fixed target of 0 gives the lowest latency on a good
+    // link but starves (freezes) on a slow/jittery one, where a cushion is needed to
+    // ride out late frames. So we keep the target small when playback is smooth and
+    // GROW it whenever the video actually freezes (a whole second with no frames
+    // played), then shrink it back once things settle — low latency when we can,
+    // smoothness when we must.
+    let buf_ms = Rc::new(Cell::new(80.0f64)); // current jitterBufferTarget, ms
+    const FLOOR: f64 = 50.0;
+    const CEIL: f64 = 1000.0;
+    apply_jitter_target(&receiver, buf_ms.get());
     let Some(window) = web_sys::window() else {
         return;
     };
@@ -364,10 +381,12 @@ fn start_latency_control(session: &Rc<Session>, receiver: RtcRtpReceiver) {
     // derive the delay over just the last interval, not the lifetime average.
     let prev = Rc::new(RefCell::new((0.0_f64, 0.0_f64)));
     let cb = Closure::<dyn FnMut()>::new(move || {
-        apply_low_latency_hints(&receiver);
+        apply_jitter_target(&receiver, buf_ms.get());
         let pc = pc.clone();
         let video = video.clone();
         let prev = prev.clone();
+        let buf_ms = buf_ms.clone();
+        let receiver = receiver.clone();
         spawn_local(async move {
             let Ok(stats) = JsFuture::from(pc.get_stats()).await else {
                 return;
@@ -379,20 +398,38 @@ fn start_latency_control(session: &Rc<Session>, receiver: RtcRtpReceiver) {
             *prev.borrow_mut() = (jbd, jbe);
             let emitted = jbe - pjbe;
             if emitted <= 0.0 {
-                return; // no new frames this interval (stalled / paused)
+                // A whole second with no frames played = a freeze. Add a cushion and
+                // apply it immediately so the buffer can refill instead of starving.
+                let n = (buf_ms.get() + 250.0).min(CEIL);
+                buf_ms.set(n);
+                apply_jitter_target(&receiver, n);
+                video.set_playback_rate(1.0);
+                return;
             }
+            let target_s = buf_ms.get() / 1000.0;
             let delay = (jbd - pjbd) / emitted; // avg playout delay, seconds
-            // >0.30s behind → drain at 1.25×; ease back to 1× once we're near live.
-            let target = if delay > 0.30 {
-                1.25
-            } else if delay < 0.12 {
-                1.0
+            let excess = delay - target_s; // lag beyond our cushion → catch this up
+            // FAST-FORWARD: play faster to drain accumulated lag back toward live —
+            // the further behind, the brisker (screen content tolerates a quick
+            // catch-up). Rate hint helps on browsers that honour it for a MediaStream.
+            let rate = if excess > 0.6 {
+                1.35
+            } else if excess > 0.30 {
+                1.22
+            } else if excess > 0.12 {
+                1.10
             } else {
-                video.playback_rate()
+                1.0
             };
-            if (video.playback_rate() - target).abs() > 0.01 {
-                video.set_playback_rate(target);
+            if (video.playback_rate() - rate).abs() > 0.01 {
+                video.set_playback_rate(rate);
             }
+            // No freeze this second → the cushion isn't needed; shrink it toward the
+            // floor PROPORTIONALLY (fast) so the browser drains the buffer back to
+            // live within a few seconds. A real freeze re-grows it, so a jittery link
+            // just settles at the smallest cushion that stays smooth. This shrink is
+            // the primary catch-up on browsers that ignore playbackRate for a stream.
+            buf_ms.set((FLOOR + (buf_ms.get() - FLOOR) * 0.55).max(FLOOR));
         });
     });
     if let Ok(id) = window
@@ -403,21 +440,21 @@ fn start_latency_control(session: &Rc<Session>, receiver: RtcRtpReceiver) {
     cb.forget();
 }
 
-/// Ask the receiver to keep its playout/jitter buffer as small as possible. Two
-/// property names for two eras: `playoutDelayHint` (seconds, Chrome) and the spec
-/// `jitterBufferTarget` (milliseconds, Chrome 114+ / Safari 17+). Set both; whichever
-/// the browser doesn't know is ignored.
-fn apply_low_latency_hints(receiver: &RtcRtpReceiver) {
+/// Set the receiver's playout/jitter-buffer target. Two property names for two eras:
+/// `playoutDelayHint` (seconds, Chrome) and the spec `jitterBufferTarget`
+/// (milliseconds, Chrome 114+ / Safari 17+). Set both; whichever the browser doesn't
+/// know is ignored.
+fn apply_jitter_target(receiver: &RtcRtpReceiver, target_ms: f64) {
     let r: &JsValue = receiver.as_ref();
     let _ = js_sys::Reflect::set(
         r,
         &JsValue::from_str("playoutDelayHint"),
-        &JsValue::from_f64(0.0),
+        &JsValue::from_f64(target_ms / 1000.0),
     );
     let _ = js_sys::Reflect::set(
         r,
         &JsValue::from_str("jitterBufferTarget"),
-        &JsValue::from_f64(0.0),
+        &JsValue::from_f64(target_ms),
     );
 }
 
@@ -505,8 +542,18 @@ fn wire_pc_callbacks(session: &Rc<Session>, app: &Rc<App>) {
                 web_sys::RtcPeerConnectionState::Failed
                     | web_sys::RtcPeerConnectionState::Disconnected
             ) {
-                set_status("disconnected — reconnecting…");
-                schedule_reconnect(app.clone());
+                // Only auto-reconnect while the tab is FOREGROUND. A drop while hidden
+                // (backgrounded/locked) is an intentional disconnect — stay down and
+                // let the visibilitychange handler reconnect when it's foreground again.
+                let hidden = web_sys::window()
+                    .and_then(|w| w.document())
+                    .is_some_and(|d| d.hidden());
+                if hidden {
+                    set_status("disconnected (backgrounded)");
+                } else {
+                    set_status("disconnected — reconnecting…");
+                    schedule_reconnect(app.clone());
+                }
             }
         });
         pc.set_onconnectionstatechange(Some(cb.as_ref().unchecked_ref()));
