@@ -4,6 +4,18 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-07-13
+
+### Changed
+- **DNS-wedge watchdog now self-recovers instead of just exiting.** When the host
+  can't reach the rendezvous for 150s with no active session (the wedged-resolver
+  case), it now **re-execs itself in place** (`exec`, same PID) to get a fresh DNS
+  resolver, rather than `exit(1)` and relying on a launchd/systemd `KeepAlive`
+  supervisor. So a host started **by hand** (e.g. a clamshell Mac) recovers on its
+  own instead of going dark. Still supervisor-friendly — re-exec keeps the same PID,
+  so it won't double-launch under `KeepAlive`. Falls back to `exit(1)` only if
+  `exec` fails.
+
 ## [0.2.11] - 2026-07-11
 
 ### Fixed

@@ -105,6 +105,25 @@ impl Signaling for RendezvousClient {
     }
 }
 
+/// Restart the process **in place** to shed a wedged system DNS resolver, without
+/// depending on a supervisor. On Unix we `exec` ourselves: same PID (so a launchd/
+/// systemd `KeepAlive` supervisor doesn't double-launch us) but a fresh process
+/// image + resolver connection. If `exec` fails (or non-Unix), fall back to `exit(1)`
+/// so a supervisor, if any, still relaunches us. Never returns.
+fn restart_for_fresh_resolver() -> ! {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        if let Ok(exe) = std::env::current_exe() {
+            let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+            // `exec` only returns on error.
+            let err = std::process::Command::new(&exe).args(&args).exec();
+            tracing::error!(error = %err, "re-exec failed; exiting for a supervisor to relaunch");
+        }
+    }
+    std::process::exit(1);
+}
+
 /// The async client loop: connect the signaling WebSocket and relay both ways,
 /// **reconnecting with backoff** whenever it drops. A long-lived host's socket
 /// WILL be reset (idle timeout, a Cloudflare/proxy blip, a rendezvous restart);
@@ -157,9 +176,9 @@ async fn run(
                         tracing::error!(
                             secs = since.elapsed().as_secs(),
                             "rendezvous unreachable for too long with no active session — \
-                             exiting so the supervisor relaunches with a fresh DNS resolver"
+                             restarting in place for a fresh DNS resolver"
                         );
-                        std::process::exit(1);
+                        restart_for_fresh_resolver();
                     }
                 }
                 tokio::time::sleep(backoff).await;
