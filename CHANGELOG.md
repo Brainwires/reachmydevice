@@ -4,6 +4,12 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+### Documentation
+- README gains a **Configuration** section documenting every host/viewer environment
+  variable and its `rmdd set` settings-store key. Notably `RMD_BIND`: on a
+  firewalled/public host, pin the transport UDP port and open it — a random ephemeral
+  port is blocked, which forces ICE onto the (flaky) relay instead of a direct path.
+
 ## [0.2.15] - 2026-07-13
 
 ### Added

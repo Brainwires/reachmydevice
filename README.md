@@ -113,13 +113,69 @@ Debian/Ubuntu, and plain `.tar.gz` archives — each with a minisign `.minisig`.
    to get bearer tokens.
 3. **Run the host daemon** (`rmdd`) on the machine to control:
    ```sh
-   RMD_RENDEZVOUS_URL=wss://<domain>/ws RMD_TOKEN=<host-token> \
-     RMD_ICE=stun:stun.l.google.com:19302  rmdd
+   rmdd set rendezvous_url wss://<domain>/ws
+   rmdd set token <host-token>
+   rmdd set password <a-connection-password>   # optional; viewers must enter it
+   rmdd                                          # or: rmdd enable  — run as a background service
    ```
-   (From a source checkout instead: `cargo run --release -p rmd-host`.)
+   Secrets go in `rmdd`'s **encrypted settings store** (above); every knob also has an
+   env var — see [Configuration](#configuration). (From a source checkout instead:
+   `cargo run --release -p rmd-host`.)
 4. **Run the viewer** (`rmd`) anywhere and pick the host from the device list, or **pair directly with no account**
    from the viewer's *Pair a device* screen (share a one-time code — QR/PAKE). The env-var path also works
    for scripted/headless viewers.
+
+## Configuration
+
+`rmdd` resolves each setting in this order: **encrypted settings store**
+(`rmdd set <key> <value>` — recommended for secrets; never appears in `ps`) →
+**environment variable** → built-in default.
+
+**Host (`rmdd`)**
+
+| Variable | Default | Meaning | `rmdd set` key |
+|---|---|---|---|
+| `RMD_RENDEZVOUS_URL` | — | Rendezvous `wss://…/ws`; enables rendezvous mode | `rendezvous_url` |
+| `RMD_TOKEN` / `RMD_TOKEN_FILE` | — | Device bearer token (prefer the store or a `0600` file — env leaks in `ps`) | `token` |
+| `RMD_NAME` | hostname | Device name shown to viewers | — |
+| `RMD_ICE` | — | Comma-separated STUN/TURN URLs | — |
+| `RMD_BIND` | `0.0.0.0:0` | Transport UDP bind address. **On a firewalled/public host, pin a fixed port and open it** — a random port is blocked, forcing ICE onto the relay | — |
+| `RMD_DISPLAY` | `0` | Display index to capture | — |
+| `RMD_WIDTH` / `RMD_HEIGHT` | `1920` / `1080` | Capture/encode size (advisory on X11 — native resolution wins) | `width` / `height` |
+| `RMD_FPS` | `30` | Frame rate | `fps` |
+| `RMD_BITRATE` | `8000000` | Target bitrate in bps (GCC adapts down) | `bitrate` |
+| `RMD_CODEC` | `h264` | `h264` \| `av1` (AV1 needs `--features av1`) | — |
+| `RMD_AUDIO` | off | Set to enable host→viewer Opus audio | — |
+| `RMD_KEY_PASSPHRASE` | — | Encrypt the device identity key at rest | — |
+| `RMD_AUTHORIZED_KEYS` | `~/.config/rmd/authorized_keys` | Allow-list file for unattended access | — |
+| `RMD_REQUIRE_AUTH` | off | Force the unattended-access gate (auto-on when the allow-list exists) | — |
+| `RMD_NO_KEEPAWAKE` | off | Don't inhibit system sleep | — |
+| `RMD_TRAY` | off | `=1` runs the desktop tray (needs `--features tray`) | — |
+| `RMD_SIGNAL_ADDR` | `127.0.0.1:9000` | LAN dev signaling relay (used when no rendezvous URL is set) | — |
+
+The connection password is store-only: `rmdd set password <pw>`. On Linux, X11
+capture/input use **`DISPLAY`** / **`XAUTHORITY`** — point them at the target server
+(e.g. `DISPLAY=:99` for a headless Xvfb).
+
+**Run `rmdd` as a background service** (per-user; systemd `--user` on Linux, launchd
+on macOS):
+
+```sh
+rmdd enable        # install + enable autostart + start
+# disable | status | start | stop | restart | log [-f]
+```
+
+**Viewer (`rmd`):** `RMD_SERVER` (account server, default `https://app.reachmy.dev`),
+`RMD_TOKEN` + `RMD_PEER_DEVICE_ID` (scripted/headless connect), `RMD_BIND`.
+
+**Rendezvous server:** `RMD_RZ_ADDR`, `RMD_TURN_ENABLED` / `RMD_TURN_HOST` /
+`RMD_TURN_PORT` / `RMD_TURN_SECRET` / `RMD_TURN_TTL`, `RMD_RZ_ADMIN_TOKEN`,
+`RMD_RZ_OPEN_REGISTRATION`, `RMD_WEBVIEWER_DIR`, `DATABASE_URL` — see
+[`deploy/.env.example`](deploy/.env.example) and
+[`docs/vps-deployment.md`](docs/vps-deployment.md).
+
+**Installer** (`install.sh`): `RMD_MODE`, `RMD_PREFIX`, `RMD_VERSION`, `RMD_SERVICE`
+(set up the service), `RMD_NO_PATH`, `RMD_FORCE`, `RMD_PURGE` — see the script header.
 
 ## Build
 
