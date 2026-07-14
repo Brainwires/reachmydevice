@@ -4,6 +4,29 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.16] - 2026-07-14
+
+### Fixed
+- **Host no longer wedges into a permanently unreachable state after a network blip.**
+  The rendezvous reconnect loop called `connect_async` with no timeout. On macOS a
+  network interruption can leave the system resolver wedged, so the `getaddrinfo`
+  inside that connect blocks *forever* without ever erroring — the loop hung on a
+  single `.await`, and the existing "unreachable too long" watchdog (which only runs
+  when a connect *returns a failure*) never fired. The host stayed alive but dark: no
+  viewer could reach it, and only a manual restart cleared it. Each connect attempt is
+  now bounded by a **15s timeout**, so a wedged resolver counts as a normal failure
+  that feeds the watchdog, which then re-execs in place for a fresh resolver.
+- **Dead half-open rendezvous sockets are now detected.** If the connection silently
+  went away (peer/NAT dropped with no RST), the read side could block for minutes
+  before the OS surfaced a write error. A **90s liveness deadline** — no inbound frame,
+  not even a keepalive pong — now tears the socket down and reconnects promptly.
+
+### Changed
+- Web-viewer touch polish: three-finger scroll is **3× faster** (1:1 felt sluggish);
+  the local cursor **re-orients immediately when the view is rotated** (previously it
+  waited for the next mouse move); and a gesture that has ever had 3+ fingers no longer
+  lurches the pinch-zoom during its transient two-finger phases.
+
 ### Documentation
 - README gains a **Configuration** section documenting every host/viewer environment
   variable and its `rmdd set` settings-store key. Notably `RMD_BIND`: on a

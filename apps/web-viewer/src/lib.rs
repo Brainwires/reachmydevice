@@ -794,7 +794,7 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
     // (no crop); we don't send SetZoom in this mode.
     {
         const SENS: f64 = 1.0; // finger→cursor gain; 1.0 = comparable distance
-        const SCROLL_SENS: f64 = 1.0; // finger px → wheel px, content-follows-finger
+        const SCROLL_SENS: f64 = 3.0; // finger px → wheel px (amplified; 1:1 felt sluggish)
         const TAP_MS: f64 = 300.0; // max press time for a two-finger tap = right-click
         const LONGPRESS_MS: i32 = 400; // press-and-hold time to arm a drag-select
         const DOUBLE_TAP_MS: f64 = 300.0; // max gap for double-tap-hold to arm a drag
@@ -861,6 +861,22 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 el.set_class_name("");
             })
         };
+
+        // Re-orient the cursor when the view rotates. The rotate control (page UI) sets
+        // `data-rot` + a CSS transform that transitions over ~0.2s; nothing else re-runs
+        // `place_cursor` until the next touch, so the arrow wouldn't re-rotate on its own.
+        // `transitionstart` fixes the angle immediately (data-rot is already set),
+        // `transitionend` finalizes the on-screen position once the video settles.
+        {
+            let place_cursor = place_cursor.clone();
+            let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
+                place_cursor();
+            });
+            for name in ["transitionstart", "transitionend"] {
+                let _ = video.add_event_listener_with_callback(name, cb.as_ref().unchecked_ref());
+            }
+            cb.forget();
+        }
 
         // Snapshot the primary touch's client-px position, if any.
         fn primary(ev: &TouchEvent) -> Option<(f64, f64)> {
@@ -1020,10 +1036,19 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             let stage = stage.clone();
             let apply_zoom = apply_zoom.clone();
             let place_cursor = place_cursor.clone();
+            let max_fingers = max_fingers.clone();
             let cb = Closure::<dyn FnMut(TouchEvent)>::new(move |ev: TouchEvent| {
                 ev.prevent_default();
                 last_touch.set(now_ms());
                 let n = ev.touches().length();
+                // A gesture that has ever had 3+ fingers is a scroll, not a pinch. Skip
+                // the pinch math on its transient 2-finger phases (fingers land/lift one
+                // at a time) — otherwise `s = s0 * dist/pinch_dist` runs against a stale
+                // baseline and lurches the zoom/pan. Just re-baseline and let it scroll.
+                if n == 2 && max_fingers.get() >= 3 {
+                    pinch_dist.set(0.0);
+                    return;
+                }
                 if n == 2 {
                     // Two-finger pinch: LOCAL zoom+pan of the video, screen-space. The
                     // grabbed content point (under the previous centroid) is moved to

@@ -147,6 +147,19 @@ async fn run(
     // is active, exit so the supervisor (launchd/systemd KeepAlive) relaunches us
     // with a clean resolver. `None` (the viewer) never self-restarts.
     const WATCHDOG: Duration = Duration::from_secs(150);
+    // Bound each connect attempt. A wedged macOS resolver makes the `getaddrinfo`
+    // inside `connect_async` block FOREVER without ever erroring, so without this cap
+    // the loop hangs on one `.await` and the watchdog below (which only runs when a
+    // connect *returns* a failure) never gets a chance to fire — the host stays alive
+    // but permanently unreachable. A timeout turns that hang into a normal, countable
+    // retry.
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+    // Tear down a connection that has gone silent. A half-open socket (peer/NAT
+    // vanished with no RST) can leave `read.next()` blocked for many minutes before
+    // the OS write path finally errors. We ping every 30s; if we hear *nothing* back
+    // (not even a pong) for this long, treat the socket as dead and reconnect rather
+    // than sit there looking connected but delivering nothing.
+    const LIVENESS: Duration = Duration::from_secs(90);
     let mut first_fail: Option<Instant> = None;
 
     // The viewer (which knows the target upfront) re-announces until the host is
@@ -166,10 +179,27 @@ async fn run(
 
     loop {
         // (Re)connect + re-authenticate (registers this device's socket again).
-        let ws = match tokio_tungstenite::connect_async(&url).await {
-            Ok((ws, _resp)) => ws,
-            Err(e) => {
-                tracing::warn!(error = %e, "rendezvous connect failed; retrying in {backoff:?}");
+        // `connect_async` is wrapped in a timeout so a wedged resolver can't hang the
+        // loop indefinitely (see CONNECT_TIMEOUT); a timeout is treated as a connect
+        // failure so it counts toward the watchdog like any other unreachable state.
+        let attempt = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async(&url),
+        )
+        .await;
+        let ws = match attempt {
+            Ok(Ok((ws, _resp))) => ws,
+            failed => {
+                match &failed {
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "rendezvous connect failed; retrying in {backoff:?}")
+                    }
+                    Err(_elapsed) => tracing::warn!(
+                        "rendezvous connect timed out after {CONNECT_TIMEOUT:?} \
+                         (possibly a wedged DNS resolver); retrying in {backoff:?}"
+                    ),
+                    Ok(Ok(_)) => unreachable!("Ok(Ok(_)) is the success arm above"),
+                }
                 let since = first_fail.get_or_insert_with(Instant::now);
                 if let Some(active) = &session_active {
                     if since.elapsed() >= WATCHDOG && !active.load(Ordering::Relaxed) {
@@ -194,6 +224,9 @@ async fn run(
         // Per-connection: viewers must re-announce on a fresh socket; a keepalive
         // ping keeps the connection off idle-timeout kill lists.
         let mut received_any = false;
+        // Liveness: bumped on every inbound frame (including pong replies to our
+        // keepalive ping). If it goes stale past LIVENESS the socket is dead.
+        let mut last_recv = Instant::now();
         let mut announce = tokio::time::interval(Duration::from_millis(500));
         let mut keepalive = tokio::time::interval(Duration::from_secs(30));
         keepalive.reset(); // don't fire immediately on connect
@@ -211,6 +244,15 @@ async fn run(
                         }
                     }
                     _ = keepalive.tick() => {
+                        // A dead half-open socket won't error on write for minutes;
+                        // catch it by the absence of any reply since the last ping.
+                        if last_recv.elapsed() >= LIVENESS {
+                            tracing::warn!(
+                                secs = last_recv.elapsed().as_secs(),
+                                "rendezvous silent past liveness deadline; reconnecting"
+                            );
+                            return Ok(Stop::SocketClosed);
+                        }
                         write.send(Message::Ping(Vec::new().into())).await?;
                     }
                     maybe = out_rx.recv() => {
@@ -230,6 +272,8 @@ async fn run(
                     }
                     frame = read.next() => {
                         let Some(frame) = frame else { return Ok(Stop::SocketClosed); };
+                        // Any frame (text, pong, ping) proves the socket is alive.
+                        last_recv = Instant::now();
                         let Message::Text(text) = frame? else { continue; };
                         let Ok(inbound) = serde_json::from_str::<Inbound>(text.as_str()) else {
                             tracing::debug!("bad rendezvous frame");
