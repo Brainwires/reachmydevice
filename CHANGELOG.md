@@ -4,6 +4,14 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+### Changed
+- **Web-viewer keeps the session alive when the page loses focus.** Backgrounding a
+  tab / switching apps no longer tears the connection down (it did before, which on
+  desktop killed a perfectly good session and on mobile — where `visibilitychange`
+  fires constantly — cycled reconnects and re-prompted the connection password). The
+  session now stays connected through a blur; auto-reconnect happens **only on
+  regaining focus** when the session isn't already healthy.
+
 ## [0.2.17] - 2026-07-14
 
 ### Security (rendezvous)

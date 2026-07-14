@@ -243,24 +243,21 @@ async fn run() -> Result<(), String> {
         password: Rc::new(RefCell::new(None)),
     });
 
-    // Reconnect ONLY on foreground. Backgrounding (lock/switch apps) is treated as
-    // an intentional disconnect: tear the session down so the host stops capturing,
-    // and never reconnect while hidden. Becoming visible again rebuilds it.
+    // Losing focus / backgrounding must NOT tear the session down — keeping a live
+    // connection through a blur is the whole point on desktop (and stops mobile
+    // browsers, which fire visibilitychange constantly, from cycling reconnects +
+    // re-prompting the password). We act ONLY when the page (re)gains focus: if the
+    // session isn't healthy by then, reconnect. A drop while hidden is handled by the
+    // connection-state watcher, which defers its reconnect to the next foreground.
     {
         let app = app.clone();
         let document2 = document.clone();
         let cb = Closure::<dyn FnMut()>::new(move || {
+            // Hidden → do nothing; leave the existing session running.
             if document2.hidden() {
-                // Backgrounded → end the session (host capture stops); do NOT reconnect.
-                if let Some(s) = app.current.borrow_mut().take() {
-                    s.teardown();
-                }
-                app.connecting.set(false); // drop any pending reconnect guard
-                web_sys::console::log_1(&"[rmd] hidden; disconnecting until foreground".into());
-                set_status("disconnected (backgrounded)");
                 return;
             }
-            // Became visible → reconnect if there's no healthy session.
+            // Became visible → reconnect ONLY if there's no healthy session.
             let healthy = app.current.borrow().as_ref().is_some_and(|s| {
                 matches!(
                     s.pc.connection_state(),
