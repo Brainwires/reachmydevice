@@ -1,6 +1,7 @@
 //! Database pool, migrations, and shared application state.
 
 use crate::config::Config;
+use rmd_entitlement::RelayEntitlement;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use std::sync::Arc;
 
@@ -13,6 +14,29 @@ pub struct AppState {
     pub hub: Arc<crate::signaling::Hub>,
     /// Per-username login throttle (credential-stuffing backoff).
     pub throttle: Arc<crate::throttle::LoginThrottle>,
+    /// Relay-access policy. The open-source default is `AllowAll`; a private
+    /// plugin can inject a paid policy (see `AppState::new`).
+    pub entitlement: Arc<dyn RelayEntitlement>,
+}
+
+impl AppState {
+    /// Assemble shared state around an already-opened pool and a relay policy.
+    ///
+    /// The default binary passes `rmd_entitlement::allow_all()`; a paid build
+    /// injects its own [`RelayEntitlement`] here without touching this crate.
+    pub fn new(
+        pool: SqlitePool,
+        config: Config,
+        entitlement: Arc<dyn RelayEntitlement>,
+    ) -> Self {
+        Self {
+            pool,
+            config: Arc::new(config),
+            hub: Arc::new(crate::signaling::Hub::new()),
+            throttle: Arc::new(crate::throttle::LoginThrottle::new()),
+            entitlement,
+        }
+    }
 }
 
 /// Open the SQLite pool and run migrations.

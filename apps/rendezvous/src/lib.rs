@@ -26,23 +26,39 @@ pub mod throttle;
 
 pub use config::Config;
 pub use db::AppState;
+// The relay-entitlement seam. The default is open (`allow_all`); a private paid
+// build injects its own policy via `AppState::new` + `router_with`.
+pub use rmd_entitlement::{allow_all, RelayDecision, RelayEntitlement};
 
-/// Open + migrate the database and construct shared state.
-pub async fn init_state(cfg: Config) -> anyhow::Result<AppState> {
+/// Open the SQLite pool, run migrations, and seed runtime settings.
+///
+/// Split out from [`init_state`] so a paid build can open the pool, hand it to
+/// its own entitlement provider, and assemble state via [`AppState::new`].
+pub async fn open_pool(cfg: &Config) -> anyhow::Result<sqlx::SqlitePool> {
     let pool = db::connect_and_migrate(&cfg.database_url).await?;
     // Seed runtime settings (e.g. open_registration) from env defaults on first
     // boot, without clobbering operator changes.
-    db::seed_settings(&pool, &cfg).await?;
-    Ok(AppState {
-        pool,
-        config: Arc::new(cfg),
-        hub: Arc::new(signaling::Hub::new()),
-        throttle: Arc::new(throttle::LoginThrottle::new()),
-    })
+    db::seed_settings(&pool, cfg).await?;
+    Ok(pool)
+}
+
+/// Open + migrate the database and construct shared state with the **default,
+/// open** relay policy. Paid builds compose the pieces themselves instead (see
+/// [`open_pool`] + [`AppState::new`] + [`router_with`]).
+pub async fn init_state(cfg: Config) -> anyhow::Result<AppState> {
+    let pool = open_pool(&cfg).await?;
+    Ok(AppState::new(pool, cfg, allow_all()))
 }
 
 /// Build the router with all routes + middleware (rate limiting, tracing).
 pub fn router(state: AppState) -> Router {
+    router_with(state, Router::new())
+}
+
+/// Like [`router`], but merges an `extra` set of already-stateful routes a
+/// private plugin supplies (e.g. Stripe checkout/webhook/portal). The extra
+/// routes sit behind the same rate-limit / auth-logging / tracing layers.
+pub fn router_with(state: AppState, extra: Router) -> Router {
     // Per-IP rate limiting on all routes (protects auth + signaling connect).
     let governor = Arc::new(
         GovernorConfigBuilder::default()
@@ -92,15 +108,24 @@ pub fn router(state: AppState) -> Router {
             .route("/app/", get(webviewer_unavailable))
     };
 
-    app.layer(axum::middleware::from_fn(security::log_auth_failures))
+    // Bind the core state first (Router<AppState> → Router<()>), then merge the
+    // plugin's already-stateful `extra` routes, then apply the shared layers so
+    // they cover both. Merging happens on matched `Router<()>` state types.
+    app.with_state(state)
+        .merge(extra)
+        .layer(axum::middleware::from_fn(security::log_auth_failures))
         .layer(GovernorLayer { config: governor })
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .with_state(state)
 }
 
 /// Serve the app on an already-bound listener (keeps `axum` out of callers).
 pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
-    let app = router(state);
+    serve_router(router(state), listener).await
+}
+
+/// Serve an already-built router (used by a paid build that composed its own
+/// routes via [`router_with`]).
+pub async fn serve_router(app: Router, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

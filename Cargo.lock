@@ -4942,6 +4942,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmd-entitlement"
+version = "0.2.16"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "rmd-host"
 version = "0.2.16"
 dependencies = [
@@ -4996,6 +5003,7 @@ dependencies = [
  "hex",
  "hmac",
  "rand 0.9.4",
+ "rmd-entitlement",
  "rmd-protocol",
  "serde",
  "serde_json",

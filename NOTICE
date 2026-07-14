@@ -1,0 +1,28 @@
+ReachMyDevice
+Copyright (c) Brainwires
+
+This software is licensed under the Elastic License 2.0 (see LICENSE).
+
+In plain terms (the LICENSE controls):
+
+  * You MAY use, copy, modify, and self-host ReachMyDevice for any purpose,
+    including inside a company, at no charge.
+
+  * You MAY NOT provide ReachMyDevice to third parties as a hosted or managed
+    service that gives users access to a substantial set of its features
+    (i.e. you may not turn it into a competing SaaS).
+
+Relicensing note
+----------------
+ReachMyDevice was previously distributed under "MIT OR Apache-2.0". Versions
+released up to and including 0.2.15 remain available under those permissive
+terms; relicensing is not retroactive. Version 0.2.16 and later are licensed
+under the Elastic License 2.0.
+
+Private commercial components
+-----------------------------
+The paid hosted-relay layer (Stripe subscription billing and the relay
+entitlement policy) is NOT part of this repository and is NOT covered by this
+license. It is proprietary to Brainwires and is not distributed here. This
+repository ships only the open extension point (`crates/entitlement`) whose
+default policy leaves relay fully open for self-hosters.
