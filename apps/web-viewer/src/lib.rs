@@ -1366,6 +1366,65 @@ fn attach_keyboard(dc: &RtcDataChannel) {
         })
     };
 
+    // Hold-to-repeat for non-modifier keys (character keys + named-code keys like
+    // Backspace / arrows): after a short initial delay, holding the key resends it on
+    // a fixed cadence, like a hardware keyboard's auto-repeat. Modifiers, caps-lock,
+    // layer toggles and the Ctrl-Alt-Del combo never repeat. Only one key repeats at
+    // a time; the interval and its closure are dropped on release, so nothing leaks.
+    const REPEAT_TICK_MS: i32 = 55; // cadence once armed (~18 keys/s)
+    const REPEAT_DELAY_TICKS: u32 = 7; // ticks before the first repeat (~385 ms)
+    let rpt_handle: Rc<Cell<Option<i32>>> = Rc::new(Cell::new(None));
+    let rpt_closure: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let stop_repeat: Rc<dyn Fn()> = {
+        let rpt_handle = rpt_handle.clone();
+        let rpt_closure = rpt_closure.clone();
+        Rc::new(move || {
+            if let (Some(id), Some(w)) = (rpt_handle.take(), web_sys::window()) {
+                w.clear_interval_with_handle(id);
+            }
+            rpt_closure.borrow_mut().take();
+        })
+    };
+    let start_repeat: Rc<dyn Fn(u32, u32)> = {
+        let dc = dc.clone();
+        let rpt_handle = rpt_handle.clone();
+        let rpt_closure = rpt_closure.clone();
+        let stop_repeat = stop_repeat.clone();
+        Rc::new(move |hid: u32, m: u32| {
+            stop_repeat(); // only one key repeats at a time
+            let Some(w) = web_sys::window() else {
+                return;
+            };
+            let dc = dc.clone();
+            let ticks = Cell::new(0u32);
+            let cb = Closure::<dyn FnMut()>::new(move || {
+                let n = ticks.get() + 1;
+                ticks.set(n);
+                if n >= REPEAT_DELAY_TICKS {
+                    kb_send(&dc, hid, m);
+                }
+            });
+            if let Ok(id) = w.set_interval_with_callback_and_timeout_and_arguments_0(
+                cb.as_ref().unchecked_ref(),
+                REPEAT_TICK_MS,
+            ) {
+                rpt_handle.set(Some(id));
+            }
+            *rpt_closure.borrow_mut() = Some(cb);
+        })
+    };
+    // Any pointer release / cancel anywhere ends the current repeat.
+    {
+        let stop_repeat = stop_repeat.clone();
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| stop_repeat());
+        if let Some(w) = web_sys::window() {
+            for ev in ["pointerup", "pointercancel"] {
+                let _ = w.add_event_listener_with_callback(ev, cb.as_ref().unchecked_ref());
+            }
+        }
+        cb.forget();
+    }
+
     let Ok(btns) = document.query_selector_all("#kb .k") else {
         return;
     };
@@ -1394,8 +1453,11 @@ fn attach_keyboard(dc: &RtcDataChannel) {
         let clear = clear_mods.clone();
         let doc = document.clone();
         let el_cb = el.clone();
+        let start_repeat = start_repeat.clone();
+        let stop_repeat = stop_repeat.clone();
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
             ev.prevent_default(); // no text selection / double-tap-zoom / synthetic mouse
+            stop_repeat(); // a new press cancels any key still auto-repeating
             let send_key = |hid: u32, m: u32| {
                 let _ = dc.send_with_u8_array(&input::key(hid, true, m));
                 let _ = dc.send_with_u8_array(&input::key(hid, false, m));
@@ -1435,6 +1497,7 @@ fn attach_keyboard(dc: &RtcDataChannel) {
                         mods.get()
                     };
                     send_key(hid, m);
+                    start_repeat(hid, m); // hold to repeat
                 }
                 clear();
                 clear_suggestions(&doc);
@@ -1446,7 +1509,9 @@ fn attach_keyboard(dc: &RtcDataChannel) {
                 clear_suggestions(&doc);
             } else if let Some(code) = el_cb.get_attribute("data-code") {
                 if let Some(hid) = input::code_to_hid(&code) {
-                    send_key(hid, mods.get());
+                    let m = mods.get();
+                    send_key(hid, m);
+                    start_repeat(hid, m); // hold to repeat (e.g. Backspace, arrows)
                 }
                 clear();
                 clear_suggestions(&doc);

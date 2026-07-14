@@ -4,6 +4,12 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+### Added
+- **On-screen keyboard: hold-to-repeat.** Holding a non-modifier key (character keys
+  and named-code keys like **Backspace** / arrows / space) now auto-repeats after a
+  short delay, like a hardware keyboard. Modifiers, caps-lock, layer toggles and the
+  Ctrl-Alt-Del combo never repeat; releasing (pointerup/cancel) stops it.
+
 ### Fixed
 - **Three-finger scroll (and mouse wheel) now respect the view rotation.** The scroll
   delta was sent in raw screen space, so in a rotated view (landscape) it scrolled the
