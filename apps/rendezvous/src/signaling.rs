@@ -127,10 +127,15 @@ impl Hub {
     }
 }
 
-/// Query string on the WS upgrade: `?token=<device bearer token>`.
+/// Query string on the WS upgrade. Prefer `?ticket=<one-time>` (from
+/// `GET /api/ws-ticket`) so the long-lived bearer token never rides in the URL
+/// (H3); `?token=<bearer>` stays accepted for existing clients.
 #[derive(Deserialize)]
 pub struct WsAuth {
-    token: String,
+    #[serde(default)]
+    ticket: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
 }
 
 /// Inbound client frame (public for fuzz harnesses).
@@ -146,10 +151,20 @@ pub async fn ws_handler(
     State(state): State<AppState>,
     Query(auth): Query<WsAuth>,
 ) -> Response {
-    // Authenticate the device token before accepting the socket.
-    let device_id = match crate::api::device_id_for_token(&state.pool, &auth.token).await {
-        Ok(Some(id)) => id,
-        _ => return crate::error::AppError::Unauthorized.into_response(),
+    // Authenticate before accepting the socket: a one-time ticket (preferred) or
+    // the device bearer token (deprecated fallback).
+    let device_id = if let Some(ticket) = auth.ticket.as_deref() {
+        match state.ws_tickets.redeem(ticket) {
+            Some(id) => id,
+            None => return crate::error::AppError::Unauthorized.into_response(),
+        }
+    } else if let Some(token) = auth.token.as_deref() {
+        match crate::api::device_id_for_token(&state.pool, token).await {
+            Ok(Some(id)) => id,
+            _ => return crate::error::AppError::Unauthorized.into_response(),
+        }
+    } else {
+        return crate::error::AppError::Unauthorized.into_response();
     };
     ws.on_upgrade(move |socket| handle_socket(socket, state, device_id))
 }

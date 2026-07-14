@@ -14,6 +14,18 @@ pub struct AppState {
     pub hub: Arc<crate::signaling::Hub>,
     /// Per-username login throttle (credential-stuffing backoff).
     pub throttle: Arc<crate::throttle::LoginThrottle>,
+    /// Caps concurrent Argon2 verifications. Each verify costs 64 MiB / 3 passes,
+    /// so an unbounded flood of auth'd endpoints would OOM a small VPS. This bounds
+    /// the in-flight count; excess requests queue on the permit instead.
+    pub argon2_gate: Arc<tokio::sync::Semaphore>,
+    /// Short-lived, single-use WebSocket tickets (keeps long-lived bearer tokens
+    /// out of `/ws?…` URLs and proxy logs). Keyed ticket → (device_id, expiry).
+    pub ws_tickets: Arc<crate::auth::TicketStore>,
+    /// Per-user cache of the current ephemeral TURN credential. `/api/ice` reuses
+    /// a still-valid cred instead of minting a fresh one every call, which caps
+    /// credential churn (an authed device can't spew unbounded shareable creds).
+    /// user_id → (username, credential, expiry_unix).
+    pub ice_cache: Arc<std::sync::Mutex<std::collections::HashMap<i64, (String, String, i64)>>>,
     /// Relay-access policy. The open-source default is `AllowAll`; a private
     /// plugin can inject a paid policy (see `AppState::new`).
     pub entitlement: Arc<dyn RelayEntitlement>,
@@ -29,11 +41,19 @@ impl AppState {
         config: Config,
         entitlement: Arc<dyn RelayEntitlement>,
     ) -> Self {
+        // Cap concurrent Argon2 to a few permits — enough for real login
+        // concurrency on a small box, far below what would exhaust its RAM.
+        let argon2_permits = std::thread::available_parallelism()
+            .map(|n| n.get().clamp(2, 4))
+            .unwrap_or(2);
         Self {
             pool,
             config: Arc::new(config),
             hub: Arc::new(crate::signaling::Hub::new()),
             throttle: Arc::new(crate::throttle::LoginThrottle::new()),
+            argon2_gate: Arc::new(tokio::sync::Semaphore::new(argon2_permits)),
+            ws_tickets: Arc::new(crate::auth::TicketStore::new()),
+            ice_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             entitlement,
         }
     }
@@ -101,25 +121,30 @@ pub fn parse_bool(s: &str) -> bool {
     s == "true" || s == "1"
 }
 
-/// Insert a new account **iff** the `users` table is empty (first-account
-/// bootstrap) or `open` is true. A single atomic statement so concurrent
-/// first-account requests can't both slip through the bootstrap window.
-/// Returns the number of rows inserted (0 = refused because signup is closed).
-/// A `UNIQUE` violation (username taken) surfaces as `Err`.
+/// Insert a new account, in one atomic statement so concurrent first-account
+/// requests can't both slip through. It succeeds when:
+///   - the `users` table is empty **and** `allow_bootstrap` is true (first-account
+///     bootstrap — gated by a bootstrap token when one is configured, see
+///     `api::register_user`), or
+///   - `open` is true (runtime open-registration).
+/// Returns rows inserted (0 = refused). A `UNIQUE` violation (username taken)
+/// surfaces as `Err`.
 pub async fn create_user_if_allowed(
     pool: &SqlitePool,
     username: &str,
     password_hash: &str,
     open: bool,
+    allow_bootstrap: bool,
 ) -> sqlx::Result<u64> {
     let res = sqlx::query(
         "INSERT INTO users (username, password_hash, created_at) \
          SELECT ?, ?, ? \
-         WHERE (SELECT COUNT(*) FROM users) = 0 OR ? = 1",
+         WHERE ((SELECT COUNT(*) FROM users) = 0 AND ? = 1) OR ? = 1",
     )
     .bind(username)
     .bind(password_hash)
     .bind(now_unix())
+    .bind(allow_bootstrap as i64)
     .bind(open as i64)
     .execute(pool)
     .await?;
@@ -145,6 +170,9 @@ mod tests {
             database_url: url.to_string(),
             allow_open_registration: false,
             admin_token: None,
+            bootstrap_token: None,
+            trusted_proxy_header: None,
+            token_ttl_secs: None,
             turn: None,
         }
     }
@@ -163,18 +191,21 @@ mod tests {
             Some("false")
         );
 
-        // Empty table → first account bootstraps even though signup is closed.
-        assert_eq!(create_user_if_allowed(&pool, "alice", "h1", false).await.unwrap(), 1);
-        // Now a user exists and signup is closed → refused.
-        assert_eq!(create_user_if_allowed(&pool, "bob", "h2", false).await.unwrap(), 0);
+        // Empty table but bootstrap gated off (a bootstrap token is required and
+        // wasn't presented) → refused even though the table is empty.
+        assert_eq!(create_user_if_allowed(&pool, "x", "h0", false, false).await.unwrap(), 0);
+        // Empty table + bootstrap allowed → first account bootstraps though closed.
+        assert_eq!(create_user_if_allowed(&pool, "alice", "h1", false, true).await.unwrap(), 1);
+        // Now a user exists and signup is closed → refused (bootstrap no longer applies).
+        assert_eq!(create_user_if_allowed(&pool, "bob", "h2", false, true).await.unwrap(), 0);
         // Flip the runtime toggle on → allowed again.
         set_setting(&pool, SETTING_OPEN_REGISTRATION, bool_str(true)).await.unwrap();
         assert!(parse_bool(
             &get_setting(&pool, SETTING_OPEN_REGISTRATION).await.unwrap().unwrap()
         ));
-        assert_eq!(create_user_if_allowed(&pool, "bob", "h2", true).await.unwrap(), 1);
+        assert_eq!(create_user_if_allowed(&pool, "bob", "h2", true, false).await.unwrap(), 1);
         // Duplicate username → UNIQUE violation (not a silent 0-rows).
-        let err = create_user_if_allowed(&pool, "alice", "h3", true).await.unwrap_err();
+        let err = create_user_if_allowed(&pool, "alice", "h3", true, false).await.unwrap_err();
         assert!(matches!(err, sqlx::Error::Database(d) if d.is_unique_violation()));
     }
 }

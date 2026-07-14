@@ -4,6 +4,43 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.17] - 2026-07-14
+
+### Security (rendezvous)
+Full hardening pass on the rendezvous TURN-credential broker (from a security audit),
+so it can safely front first-party apps as a shared STUN/TURN service:
+
+- **Trusted-proxy client IP.** The real client IP (for the rate limiter + auth-failure
+  logging) is now taken **only** from a configured `RMD_TRUSTED_PROXY_HEADER`
+  (e.g. `cf-connecting-ip`); a client-supplied `X-Forwarded-For` can no longer forge
+  the IP to dodge limits or poison fail2ban. Unset ⇒ socket-peer only.
+- **Real per-client rate limiting.** `tower_governor` now keys on the trust-resolved
+  client IP instead of the ingress-proxy IP (which had collapsed every request into one
+  global bucket).
+- **Tokens out of URLs.** `GET /api/ice` accepts `Authorization: Bearer` (the `?token=`
+  query is a deprecated fallback), and `/ws` accepts a short-lived single-use ticket
+  from `GET /api/ws-ticket`, so long-lived bearer tokens stop leaking into proxy/access
+  logs and `Referer`.
+- **First-account land-grab closed.** `RMD_RZ_BOOTSTRAP_TOKEN` gates first-account
+  creation (and provisioning while signup is closed); without it the empty-table
+  bootstrap no longer lets a stranger claim the instance.
+- **Argon2 DoS bounded.** Password verification runs under a small concurrency semaphore
+  on the blocking pool, so an auth-endpoint flood can't OOM/peg a small VPS.
+- **TURN credentials are user-bound + short-lived.** Minted username is now
+  `<expiry>:<user_id>` (was a shared constant) with a **600s** default TTL (`RMD_TURN_TTL`),
+  and `/api/ice` reuses a cached live credential per user rather than minting unbounded
+  shareable creds.
+- **Device tokens expire + rotate.** New tokens get a default **90-day** expiry
+  (`RMD_RZ_TOKEN_TTL`, `0` = none); re-registering a device invalidates its prior tokens.
+
+Backward compatible: existing clients keep working via the `?token=` fallbacks.
+
+### Security (coturn deployment)
+- Documented + shipped a coturn lockdown: **`--denied-peer-ip`** for RFC1918 / loopback /
+  link-local (incl. the `169.254.169.254` cloud-metadata address) / multicast / CGNAT +
+  IPv6 ULA/link-local (closes the open-relay / SSRF hole), and coturn-native
+  **`--unauthorized-ratelimit`** to throttle credential-guessing floods per source IP.
+
 ## [0.2.16] - 2026-07-14
 
 ### Fixed

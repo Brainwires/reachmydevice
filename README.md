@@ -173,10 +173,30 @@ rmdd enable        # install + enable autostart + start
 `RMD_TOKEN` + `RMD_PEER_DEVICE_ID` (scripted/headless connect), `RMD_BIND`.
 
 **Rendezvous server:** `RMD_RZ_ADDR`, `RMD_TURN_ENABLED` / `RMD_TURN_HOST` /
-`RMD_TURN_PORT` / `RMD_TURN_SECRET` / `RMD_TURN_TTL`, `RMD_RZ_ADMIN_TOKEN`,
-`RMD_RZ_OPEN_REGISTRATION`, `RMD_WEBVIEWER_DIR`, `DATABASE_URL` — see
+`RMD_TURN_PORT` / `RMD_TURN_SECRET` / `RMD_TURN_TTL` (ephemeral-cred lifetime,
+default **600s**), `RMD_RZ_ADMIN_TOKEN`, `RMD_RZ_OPEN_REGISTRATION`,
+`RMD_WEBVIEWER_DIR`, `DATABASE_URL` — see
 [`deploy/.env.example`](deploy/.env.example) and
-[`docs/vps-deployment.md`](docs/vps-deployment.md).
+[`docs/vps-deployment.md`](docs/vps-deployment.md). Hardening knobs:
+
+- `RMD_RZ_BOOTSTRAP_TOKEN` — required to create the **first** account over HTTP (and
+  to provision further accounts while signup is closed). Set this on any
+  internet-reachable deployment to prevent a first-account land-grab.
+- `RMD_TRUSTED_PROXY_HEADER` — name of the forwarding header set by your trusted
+  ingress (`cf-connecting-ip` behind Cloudflare, `x-real-ip` behind nginx). The real
+  client IP (for rate-limiting + auth-failure logging) is taken **only** from this
+  header; unset ⇒ trust the socket peer only and ignore client-supplied
+  `X-Forwarded-For` (prevents IP-spoofed rate-limit / log evasion).
+- `RMD_RZ_TOKEN_TTL` — lifetime of newly issued device tokens in seconds (default
+  **90 days**; `0` = no expiry). Re-registering a device rotates its token.
+
+**Relay access model:** the open-source build gates the TURN relay only on "must be a
+registered device with a valid token" (the default `AllowAll` entitlement); keep
+`RMD_RZ_OPEN_REGISTRATION=false` so only accounts you provision can obtain relay
+credentials. Apps integrate by calling `GET /api/ice` with `Authorization: Bearer
+<device-token>` **server-side** — the shared `RMD_TURN_SECRET` never leaves the server.
+A subscription-gated (paid) policy is a separate private component; see
+[`crates/entitlement`](crates/entitlement).
 
 **Installer** (`install.sh`): `RMD_MODE`, `RMD_PREFIX`, `RMD_VERSION`, `RMD_SERVICE`
 (set up the service), `RMD_NO_PATH`, `RMD_FORCE`, `RMD_PURGE` — see the script header.

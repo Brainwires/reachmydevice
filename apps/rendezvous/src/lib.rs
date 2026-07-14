@@ -59,11 +59,21 @@ pub fn router(state: AppState) -> Router {
 /// private plugin supplies (e.g. Stripe checkout/webhook/portal). The extra
 /// routes sit behind the same rate-limit / auth-logging / tracing layers.
 pub fn router_with(state: AppState, extra: Router) -> Router {
-    // Per-IP rate limiting on all routes (protects auth + signaling connect).
+    // Config needed by the shared layers before `state` is moved into the router.
+    let trusted_header: Option<Arc<str>> =
+        state.config.trusted_proxy_header.as_deref().map(Arc::from);
+    let cfg = state.config.clone();
+
+    // Per-IP rate limiting on all routes (protects auth + signaling connect),
+    // keyed by the *trust-resolved* client IP so it's a real per-client limit
+    // rather than one global bucket behind the ingress proxy.
     let governor = Arc::new(
         GovernorConfigBuilder::default()
             .per_second(5)
             .burst_size(20)
+            .key_extractor(security::TrustedIpKeyExtractor {
+                trusted_header: trusted_header.clone(),
+            })
             .finish()
             .expect("valid governor config"),
     );
@@ -90,6 +100,8 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         )
         // ICE/TURN servers (STUN + ephemeral coturn creds) for an authed device.
         .route("/api/ice", get(api::ice_servers))
+        // One-time WebSocket ticket (keeps bearer tokens out of `/ws?…` URLs).
+        .route("/api/ws-ticket", get(api::ws_ticket))
         .route("/ws", get(signaling::ws_handler))
         // Stateless direct-pairing mailbox (no account) — QR/PAKE flow.
         .route("/pair", get(signaling::ws_pair_handler));
@@ -113,7 +125,10 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
     // they cover both. Merging happens on matched `Router<()>` state types.
     app.with_state(state)
         .merge(extra)
-        .layer(axum::middleware::from_fn(security::log_auth_failures))
+        .layer(axum::middleware::from_fn_with_state(
+            cfg,
+            security::log_auth_failures,
+        ))
         .layer(GovernorLayer { config: governor })
         .layer(tower_http::trace::TraceLayer::new_for_http())
 }
