@@ -727,6 +727,22 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
         let norm = norm.clone();
         move |ev: &MouseEvent| norm(ev.client_x() as f64, ev.client_y() as f64)
     };
+    // Rotate a screen-space delta (px) into host space for the current `data-rot`.
+    // Scroll/wheel deltas need the same rotation `norm` applies to positions — it's
+    // `norm`'s linear part (the inverse of CSS `rotate(rot*90deg)` clockwise) —
+    // otherwise a swipe/scroll in a rotated (e.g. landscape) view moves the wrong
+    // axis. Portrait (`rot` 0) is the identity, which is why it already felt right.
+    let rot_delta = {
+        let video = video.clone();
+        move |dx: f64, dy: f64| -> (f64, f64) {
+            match video.get_attribute("data-rot").as_deref() {
+                Some("1") => (dy, -dx),
+                Some("2") => (-dx, -dy),
+                Some("3") => (-dy, dx),
+                _ => (dx, dy),
+            }
+        }
+    };
 
     // mousemove
     {
@@ -1019,6 +1035,7 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
         {
             let dc = dc.clone();
             let norm = norm.clone();
+            let rot_delta = rot_delta.clone();
             let moved = moved.clone();
             let start = start.clone();
             let prev = prev.clone();
@@ -1102,9 +1119,11 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                     clear_lp(&lp_handle); // a moving finger isn't a long-press
                 }
                 if n >= 3 {
-                    // Three-finger swipe → wheel scroll. Content follows the
-                    // fingers (drag down → content down), in raw client px.
-                    let (dx, dy) = ((cx - px) * SCROLL_SENS, (cy - py) * SCROLL_SENS);
+                    // Three-finger swipe → wheel scroll. Content follows the fingers
+                    // (drag down → content down), rotated into host space so it's
+                    // correct in a landscape/rotated view (not just portrait).
+                    let (dx, dy) =
+                        rot_delta((cx - px) * SCROLL_SENS, (cy - py) * SCROLL_SENS);
                     if dx != 0.0 || dy != 0.0 {
                         let _ = dc.send_with_u8_array(&input::mouse_scroll(dx, dy));
                     }
@@ -1227,9 +1246,11 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
     // wheel
     {
         let dc = dc.clone();
+        let rot_delta = rot_delta.clone();
         let cb = Closure::<dyn FnMut(WheelEvent)>::new(move |ev: WheelEvent| {
             ev.prevent_default();
-            let _ = dc.send_with_u8_array(&input::mouse_scroll(-ev.delta_x(), -ev.delta_y()));
+            let (dx, dy) = rot_delta(-ev.delta_x(), -ev.delta_y());
+            let _ = dc.send_with_u8_array(&input::mouse_scroll(dx, dy));
         });
         video
             .add_event_listener_with_callback("wheel", cb.as_ref().unchecked_ref())

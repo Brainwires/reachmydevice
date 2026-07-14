@@ -4,6 +4,12 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+### Fixed
+- **Three-finger scroll (and mouse wheel) now respect the view rotation.** The scroll
+  delta was sent in raw screen space, so in a rotated view (landscape) it scrolled the
+  wrong axis — portrait (no rotation) worked by luck. It's now rotated into host space
+  with the same transform `norm()` applies to cursor/tap positions.
+
 ### Changed
 - **Web-viewer keeps the session alive when the page loses focus.** Backgrounding a
   tab / switching apps no longer tears the connection down (it did before, which on
