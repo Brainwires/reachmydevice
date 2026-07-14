@@ -11,6 +11,11 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
   with the same transform `norm()` applies to cursor/tap positions.
 
 ### Changed
+- **Web-viewer: the header stays a fixed top bar in every orientation.** Rotating the
+  view (esp. the 180° flip) no longer moves the toolbar to the opposite edge or rotates
+  its controls — only the video, cursor, gestures and on-screen keyboard rotate; the
+  app frame stays put. The flipped-portrait video now fills the area below the header,
+  rotated in place.
 - **Web-viewer keeps the session alive when the page loses focus.** Backgrounding a
   tab / switching apps no longer tears the connection down (it did before, which on
   desktop killed a perfectly good session and on mobile — where `visibilitychange`

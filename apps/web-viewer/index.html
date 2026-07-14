@@ -60,10 +60,9 @@
   #barStatus.err{background:var(--err);}
   @keyframes pulse{50%{opacity:.3;}}
   #bar .sp{flex:1;}
-  /* Action bar: each control counter-rotates to stay upright as the view rotates,
-     and at 180° the whole bar hops to the opposite (bottom) edge so — from the
-     user's flipped perspective — the bar is still "on top" and the keyboard "below".
-     The brand hides when rotated to keep the bar tidy. */
+  /* The action bar is a fixed top toolbar in EVERY orientation — only the video +
+     cursor + gestures + keyboard rotate, the app frame does not. (The .brot*/.at-bottom
+     rules below are legacy — no longer applied by applyRot — kept inert for now.) */
   .rotc{transition:transform .2s;}
   #bar.brot1 .rotc{transform:rotate(90deg);}
   #bar.brot2 .rotc{transform:rotate(180deg);}
@@ -159,8 +158,9 @@
      header's bottom instead of under it. */
   #screen.rot1,#screen.rot2,#screen.rot3{position:fixed;top:calc(50% + var(--hdr) / 2);left:50%;}
   #screen.rot1,#screen.rot3{max-width:calc(100vh - var(--hdr));max-height:100vw;}
-  /* 180°: header is at the bottom now, so reserve the bottom (+top notch) instead. */
-  #screen.rot2{max-height:var(--band-h);top:var(--band-c);}
+  /* 180°: the header stays at the top, so the flipped-portrait video fills the same
+     area as portrait (below the header), just rotated 180° in place. */
+  #screen.rot2{max-width:100vw;max-height:calc(100vh - var(--hdr));}
   #screen.rot1{transform:translate(-50%,-50%) rotate(90deg);}
   #screen.rot2{transform:translate(-50%,-50%) rotate(180deg);}
   #screen.rot3{transform:translate(-50%,-50%) rotate(-90deg);}
@@ -189,7 +189,7 @@
     top:calc(50% + var(--hdr) / 2);}
   /* 180°: header moved to the bottom, keyboard lands at the portrait TOP (user's
      "bottom"). Confine it to the band below the notch and above the bottom header. */
-  #kb-wrap.rot2{height:var(--band-h);top:var(--band-c);}
+  #kb-wrap.rot2{height:calc(100vh - var(--hdr));top:calc(50% + var(--hdr) / 2);}
   /* A small symmetric long-axis margin so the 12-key row (which fills 100%) gets a
      little breathing room instead of butting against the ends. */
   #kb-wrap.rot1 #kb,#kb-wrap.rot3 #kb{padding-left:10px;padding-right:10px;}
@@ -338,13 +338,10 @@
     };
     const applyRot=()=>{
       for(const el of [vid,kbWrap]){ el.classList.remove('rot1','rot2','rot3'); if(rot) el.classList.add('rot'+rot); }
-      // Action bar: rotate the controls upright as the view rotates; at 180° also
-      // move the bar to the bottom edge so it stays "on top" for the flipped user
-      // (the video + keyboard reflow to reserve the bottom instead — see CSS).
-      const bar=$('bar');
-      bar.classList.remove('brot1','brot2','brot3','at-bottom');
-      if(rot) bar.classList.add('brot'+rot);
-      if(rot===2) bar.classList.add('at-bottom');
+      // The app frame (header) stays put — a normal top bar in every orientation.
+      // Only the video, cursor, gestures and keyboard rotate. (We clear any legacy
+      // rotate/move classes in case an older build left them on.)
+      $('bar').classList.remove('brot1','brot2','brot3','at-bottom');
       vid.dataset.rot=rot;
       syncKbToVideo();
     };
