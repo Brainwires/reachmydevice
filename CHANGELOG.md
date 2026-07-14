@@ -5,6 +5,8 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 ## [Unreleased]
 
 ### Added
+- **On-screen keyboard: double-tap space → ". "** (delete the trailing space, type a
+  period + space), matching iOS/Android behavior.
 - **On-screen keyboard: hold-to-repeat.** Holding a non-modifier key (character keys
   and named-code keys like **Backspace** / arrows / space) now auto-repeats after a
   short delay, like a hardware keyboard. Modifiers, caps-lock, layer toggles and the
@@ -22,6 +24,9 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
   its controls — only the video, cursor, gestures and on-screen keyboard rotate; the
   app frame stays put. The flipped-portrait video now fills the area below the header,
   rotated in place.
+- **Web-viewer header no longer fades** (it stayed at 20% opacity when idle). It's now
+  always solid, so the zoomed video is cleanly cut off at the safe area below it and
+  never appears to bleed under the notch / status bar.
 - **Web-viewer keeps the session alive when the page loses focus.** Backgrounding a
   tab / switching apps no longer tears the connection down (it did before, which on
   desktop killed a perfectly good session and on mobile — where `visibilitychange`

@@ -1343,6 +1343,10 @@ fn attach_keyboard(dc: &RtcDataChannel) {
     // Caps-lock: a separate, latched client-side toggle (not in `mods`, so it
     // survives `clear_mods`). While on, every letter is sent with Shift.
     let caps = Rc::new(Cell::new(false));
+    // Double-tap the space bar → ". " (delete the just-typed space, type a period +
+    // space), like iOS. `last_space` is the ms timestamp of the previous space tap.
+    const DOUBLE_SPACE_MS: f64 = 350.0;
+    let last_space = Rc::new(Cell::new(0.0f64));
 
     // Clear the armed one-shot modifiers and un-highlight their buttons. Caps-lock
     // is NOT in `mods`, so it survives; the letter-case visual then reflects caps.
@@ -1455,6 +1459,7 @@ fn attach_keyboard(dc: &RtcDataChannel) {
         let el_cb = el.clone();
         let start_repeat = start_repeat.clone();
         let stop_repeat = stop_repeat.clone();
+        let last_space = last_space.clone();
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
             ev.prevent_default(); // no text selection / double-tap-zoom / synthetic mouse
             stop_repeat(); // a new press cancels any key still auto-repeating
@@ -1510,8 +1515,25 @@ fn attach_keyboard(dc: &RtcDataChannel) {
             } else if let Some(code) = el_cb.get_attribute("data-code") {
                 if let Some(hid) = input::code_to_hid(&code) {
                     let m = mods.get();
-                    send_key(hid, m);
-                    start_repeat(hid, m); // hold to repeat (e.g. Backspace, arrows)
+                    let now = now_ms();
+                    if code == "Space"
+                        && last_space.get() > 0.0
+                        && now - last_space.get() < DOUBLE_SPACE_MS
+                    {
+                        // Double-tap space → replace the trailing space with ". ".
+                        send_key(0x2A, 0); // Backspace: delete the just-typed space
+                        if let Some((ph, psh)) = input::char_to_hid('.') {
+                            send_key(ph, if psh { input::mod_bit("shift") } else { 0 });
+                        }
+                        send_key(0x2C, 0); // Space after the period
+                        last_space.set(0.0); // consumed — a 3rd quick tap won't chain
+                    } else {
+                        send_key(hid, m);
+                        start_repeat(hid, m); // hold to repeat (e.g. Backspace, arrows)
+                        if code == "Space" {
+                            last_space.set(now);
+                        }
+                    }
                 }
                 clear();
                 clear_suggestions(&doc);
