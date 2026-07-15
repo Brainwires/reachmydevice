@@ -428,7 +428,7 @@
     };
     const BOTTOM=[{l:'123',layer:1,w:4},
       {l:'⌃',mod:'ctrl',w:2},{l:'⌥',mod:'alt',w:2},{l:'⌘',mod:'super',w:2},
-      {l:'⎋',code:'Escape',w:2},{l:'🎤',mic:1,w:2},{l:'space',code:'Space',w:6,wide:1},
+      {l:'⎋',code:'Escape',w:2},{l:'space',code:'Space',w:6,wide:1},{l:'🎤',mic:1,w:2},
       {l:'⏎',code:'Enter',w:3},{l:'C-A-D',combo:'ctrl-alt-del',w:3}];  // 26 cols
     const keyEl=s=>{
       if(s.sp){ const d=document.createElement('div'); d.style.gridColumn='span '+(s.w||2); return d; }
@@ -485,9 +485,14 @@
       rec.lang = navigator.language || 'en-US';
       rec.interimResults = false; rec.continuous = false; rec.maxAlternatives = 1;
       const b = micEl();
-      rec.onstart = () => { listening = true; if(b) b.classList.add('armed'); };
-      rec.onend   = () => { listening = false; if(b) b.classList.remove('armed'); rec = null; };
-      rec.onerror = () => { listening = false; if(b) b.classList.remove('armed'); };
+      let stopped = false;
+      // Stop tone fires once, whether recognition finishes (onend) or fails (onerror).
+      const onStop = () => { if(stopped) return; stopped = true; listening = false;
+        if(b) b.classList.remove('armed'); dictStopSound(); };
+      rec.onstart = () => { listening = true; stopped = false;
+        if(b) b.classList.add('armed'); dictStartSound(); };
+      rec.onend   = () => { onStop(); rec = null; };
+      rec.onerror = () => { onStop(); };
       rec.onresult = (ev) => {
         let text = '';
         for(let i=ev.resultIndex; i<ev.results.length; i++)
@@ -513,8 +518,24 @@
       g.gain.exponentialRampToValueAtTime(0.0001,t+0.055);
       o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t+0.06);
     }catch(e){} };
+    // Distinct dictation tones (these replace the key click on the 🎤 key): a rising
+    // pair when listening starts, a falling pair when it stops (finished OR failed).
+    const dictTone=(f1,f2)=>{ try{
+      actx=actx||new (window.AudioContext||window.webkitAudioContext)();
+      if(actx.state==='suspended') actx.resume();
+      const play=(freq,at,dur)=>{ const t=actx.currentTime+at, o=actx.createOscillator(), g=actx.createGain();
+        o.type='sine'; o.frequency.value=freq;
+        g.gain.setValueAtTime(0.0001,t);
+        g.gain.exponentialRampToValueAtTime(0.09,t+0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+        o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t+dur+0.02); };
+      play(f1,0,0.12); play(f2,0.1,0.16);
+    }catch(e){} };
+    const dictStartSound=()=>dictTone(587,880);  // rising  D5 → A5 = "listening"
+    const dictStopSound =()=>dictTone(784,523);   // falling G5 → C5 = "stopped"
     kb.addEventListener('pointerdown',e=>{ const k=e.target.closest('.k'); if(!k) return;
-      clickSound();
+      // The 🎤 key's audio feedback is the dictation start/stop tone, not the click.
+      if(!k.dataset.mic) clickSound();
       if(navigator.vibrate) navigator.vibrate(8);
       k.classList.add('press'); setTimeout(()=>k.classList.remove('press'),110);
     });
