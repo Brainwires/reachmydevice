@@ -22,7 +22,7 @@ members = [
 exclude = ["third_party", "apps/web-viewer"]
 
 [workspace.package]
-version = "0.2.17"
+version = "0.2.18"
 edition = "2021"
 rust-version = "1.82"
 # Relicensed from "MIT OR Apache-2.0" at 0.2.16: internal/commercial self-hosting

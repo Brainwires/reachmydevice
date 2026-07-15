@@ -4,6 +4,8 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.18] - 2026-07-15
+
 ### Added
 - **On-screen keyboard: 🎤 dictation (speech-to-text).** A mic key runs the browser's
   Web Speech API and types the recognized text to the host over the encrypted data
@@ -17,12 +19,21 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
   Ctrl-Alt-Del combo never repeat; releasing (pointerup/cancel) stops it.
 
 ### Fixed
+- **Switching the connecting device no longer hangs the first attempt.** Moving from
+  one viewer (e.g. desktop) to another (e.g. phone) on the same host used to stall until
+  a manual retry: the host is a single-peer state machine, and the newcomer either got
+  nothing on its first announce or got replayed the *previous* viewer's stale offer,
+  forcing a fragile rebuild dance that only recovered after the old peer connection hit
+  its ICE timeout. The host now detects a genuine device switch and mints a **fresh**
+  offer for the newcomer (full rebuild), completing in one clean offer/answer. A second
+  device connecting while one is active is a clean **takeover** (newest wins).
 - **Password entry no longer kills the connection.** The web-viewer asked for the
   connection password with a synchronous `window.prompt()`, which **freezes the JS
   event loop** — stopping WebRTC's ICE consent-keepalives and dropping the (relay)
   connection mid-authentication (endless "checking password…" / reconnect churn on
   mobile). Replaced with a non-blocking in-page modal, so the connection stays alive
-  while you type.
+  while you type. The password field now also auto-focuses (deferred a tick past the
+  show, so the caret — and the mobile soft-keyboard — land immediately).
 - **Three-finger scroll (and mouse wheel) now respect the view rotation.** The scroll
   delta was sent in raw screen space, so in a rotated view (landscape) it scrolled the
   wrong axis — portrait (no rotation) worked by luck. It's now rotated into host space
