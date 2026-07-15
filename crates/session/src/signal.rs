@@ -19,6 +19,14 @@ pub trait Signaling: Send {
     fn send(&self, msg: &SignalMsg) -> anyhow::Result<()>;
     /// Non-blocking receive of an inbound signaling message.
     fn try_recv(&self) -> Option<SignalMsg>;
+    /// Host only: has the addressed peer switched to a *different* viewer device
+    /// since the last poll? Consumes the flag (edge-triggered). The host reacts by
+    /// minting a fresh offer for the newcomer instead of replaying the previous
+    /// viewer's stale one. Defaults to `false` for transports without a notion of a
+    /// switchable peer (e.g. the point-to-point LAN [`SignalClient`]).
+    fn take_peer_switched(&self) -> bool {
+        false
+    }
 }
 
 impl Signaling for SignalClient {

@@ -51,6 +51,9 @@ struct Inbound {
 pub struct RendezvousClient {
     out_tx: tok_mpsc::UnboundedSender<SignalMsg>,
     inbound: Mutex<std_mpsc::Receiver<SignalMsg>>,
+    /// Set by the relay loop when the addressed peer becomes a *different* viewer
+    /// device (a "switch"); consumed by the host via [`Signaling::take_peer_switched`].
+    peer_switched: Arc<AtomicBool>,
 }
 
 impl RendezvousClient {
@@ -67,6 +70,8 @@ impl RendezvousClient {
         let url = format!("{ws_url}?token={token}");
         let (out_tx, out_rx) = tok_mpsc::unbounded_channel::<SignalMsg>();
         let (in_tx, in_rx) = std_mpsc::channel::<SignalMsg>();
+        let peer_switched = Arc::new(AtomicBool::new(false));
+        let peer_switched_thread = peer_switched.clone();
 
         std::thread::Builder::new()
             .name("rmd-rendezvous".into())
@@ -81,8 +86,14 @@ impl RendezvousClient {
                         return;
                     }
                 };
-                if let Err(e) = rt.block_on(run(url, peer_device_id, out_rx, in_tx, session_active))
-                {
+                if let Err(e) = rt.block_on(run(
+                    url,
+                    peer_device_id,
+                    out_rx,
+                    in_tx,
+                    session_active,
+                    peer_switched_thread,
+                )) {
                     tracing::error!(error=%e, "rendezvous client ended");
                 }
             })?;
@@ -90,6 +101,7 @@ impl RendezvousClient {
         Ok(Self {
             out_tx,
             inbound: Mutex::new(in_rx),
+            peer_switched,
         })
     }
 }
@@ -102,6 +114,9 @@ impl Signaling for RendezvousClient {
     }
     fn try_recv(&self) -> Option<SignalMsg> {
         self.inbound.lock().ok()?.try_recv().ok()
+    }
+    fn take_peer_switched(&self) -> bool {
+        self.peer_switched.swap(false, Ordering::Relaxed)
     }
 }
 
@@ -137,6 +152,7 @@ async fn run(
     mut out_rx: tok_mpsc::UnboundedReceiver<SignalMsg>,
     in_tx: std_mpsc::Sender<SignalMsg>,
     session_active: Option<Arc<AtomicBool>>,
+    peer_switched: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     use std::time::Duration;
 
@@ -283,6 +299,26 @@ async fn run(
                         // Treat a `hello` from a *new* peer as first contact (the host
                         // re-learns the viewer after a reconnect / a different viewer).
                         let first_contact = peer.as_deref() != Some(inbound.from.as_str());
+                        // A genuine device *switch*: a DIFFERENT viewer takes over an
+                        // already-learned peer (host only; `is_viewer` hosts start with
+                        // `peer == None`, so the initial connect is not a switch). The
+                        // cached `last_offer`/`sent_candidates` describe the OLD viewer's
+                        // peer connection; replaying them to the newcomer forces a fragile
+                        // stale-offer → answer → rebuild dance that routinely stalls on the
+                        // first attempt (until the old PC finally hits its ICE timeout).
+                        // Instead drop the stale state and flag the host to mint a FRESH
+                        // offer (→ `request_ice_restart` → rebuild); that offer is routed
+                        // to the new peer and completes in one clean exchange.
+                        let switched = !is_viewer && first_contact && peer.is_some();
+                        if switched {
+                            last_offer = None;
+                            sent_candidates.clear();
+                            peer_switched.store(true, Ordering::Relaxed);
+                            tracing::info!(
+                                from = %inbound.from,
+                                "rendezvous: viewer switched device; requesting a fresh offer"
+                            );
+                        }
                         if first_contact {
                             peer = Some(inbound.from.clone());
                             for msg in pending.drain(..) {
