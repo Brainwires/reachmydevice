@@ -655,6 +655,16 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
     }
 }
 
+/// Whether the password modal is currently shown (its `#pwmodal` lacks `.hidden`).
+/// The document key handler checks this so it doesn't steal keystrokes from the field.
+fn password_modal_open() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("pwmodal"))
+        .map(|m| !m.class_list().contains("hidden"))
+        .unwrap_or(false)
+}
+
 /// Find the `#pwinput` password field.
 fn pw_input() -> Option<web_sys::HtmlInputElement> {
     web_sys::window()?
@@ -1357,6 +1367,13 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             let dc = dc.clone();
             let cb = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
                 move |ev: web_sys::KeyboardEvent| {
+                    // While the password modal is open, its input field owns the
+                    // keyboard — don't intercept/forward keystrokes to the host, or the
+                    // field can never receive text (that was the "can't type the
+                    // password" bug).
+                    if password_modal_open() {
+                        return;
+                    }
                     // Physical/Bluetooth keyboard path (the on-screen keyboard sends
                     // HID directly via `attach_keyboard`).
                     if let Some(hid) = input::code_to_hid(&ev.code()) {
