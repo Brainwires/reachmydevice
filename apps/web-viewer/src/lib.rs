@@ -684,7 +684,19 @@ fn show_password_modal() {
     }
     if let Some(inp) = pw_input() {
         inp.set_value("");
-        let _ = inp.focus();
+        // Focus on the *next* tick: the field just went from `display:none` to
+        // visible, and a synchronous `focus()` on a not-yet-laid-out element is
+        // silently dropped by most browsers. A 0ms timeout lands the caret (and
+        // pops the mobile soft-keyboard) reliably once layout has happened.
+        let cb = Closure::once_into_js(move || {
+            let _ = inp.focus();
+        });
+        if let Some(win) = web_sys::window() {
+            let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(
+                cb.unchecked_ref(),
+                0,
+            );
+        }
     }
 }
 
