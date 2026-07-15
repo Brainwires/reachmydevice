@@ -132,10 +132,19 @@ struct Session {
     /// of stalling at "connected" with no video (the host won't stream until
     /// authorized).
     password: Rc<RefCell<Option<String>>>,
+    /// Set when the host asks for a password: the async modal reads this to send the
+    /// password-bearing Hello on submit. Shared with [`App`] so the once-wired modal
+    /// handler can reach the current session's control channel.
+    pending_pw: Rc<RefCell<Option<PwTarget>>>,
     /// `setInterval` handle for the live-latency monitor (see
     /// [`start_latency_control`]); cleared on teardown so it doesn't outlive the pc.
     latency_timer: RefCell<Option<i32>>,
 }
+
+/// What the non-blocking password modal needs to authenticate on submit: the
+/// control data channel to send the Hello over, and the shared password cell to
+/// remember it for reconnects.
+type PwTarget = (RtcDataChannel, Rc<RefCell<Option<String>>>);
 
 impl Session {
     /// Stop this session's callbacks from firing and close its transports. Called
@@ -189,6 +198,8 @@ struct App {
     /// The host's connection password, remembered across reconnects (see
     /// [`Session::password`]).
     password: Rc<RefCell<Option<String>>>,
+    /// The current session's password-modal target (see [`Session::pending_pw`]).
+    pending_pw: Rc<RefCell<Option<PwTarget>>>,
 }
 
 #[wasm_bindgen(start)]
@@ -241,7 +252,9 @@ async fn run() -> Result<(), String> {
         current: RefCell::new(None),
         connecting: Cell::new(false),
         password: Rc::new(RefCell::new(None)),
+        pending_pw: Rc::new(RefCell::new(None)),
     });
+    wire_password_modal(&app);
 
     // Losing focus / backgrounding must NOT tear the session down — keeping a live
     // connection through a blur is the whole point on desktop (and stops mobile
@@ -333,6 +346,7 @@ async fn connect(app: Rc<App>) {
         video: app.video.clone(),
         hello_sent: RefCell::new(false),
         password: app.password.clone(),
+        pending_pw: app.pending_pw.clone(),
         latency_timer: RefCell::new(None),
     });
 
@@ -616,25 +630,16 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
                     if let Some(rmd_protocol::pb::envelope::Payload::HelloAck(ack)) = env.payload {
                         if ack.password_required {
                             // Host wants a connection password (or the remembered one
-                            // was wrong): prompt, remember it (for reconnects), and
-                            // re-send the Hello with it (not via the URL).
-                            match prompt_password() {
-                                Some(pw) => {
-                                    *s.password.borrow_mut() = Some(pw.clone());
-                                    let hello = rmd_protocol::with_password(
-                                        rmd_protocol::hello(
-                                            "web-viewer",
-                                            rmd_protocol::Role::Viewer,
-                                            rmd_protocol::FEATURE_CLIENT_CURSOR,
-                                        ),
-                                        pw,
-                                    );
-                                    let _ = dc_msg
-                                        .send_with_u8_array(&rmd_protocol::encode(&hello));
-                                    set_status("checking password…");
-                                }
-                                None => set_status("connection password required"),
-                            }
+                            // was wrong). Ask via a NON-BLOCKING modal — a synchronous
+                            // prompt() would freeze the JS event loop, stopping
+                            // WebRTC's ICE consent-keepalives and killing the (relay)
+                            // connection mid-auth. The once-wired modal handler
+                            // (`wire_password_modal`) reads `pending_pw` and re-sends
+                            // the password-bearing Hello over the control channel.
+                            *s.pending_pw.borrow_mut() =
+                                Some((dc_msg.clone(), s.password.clone()));
+                            show_password_modal();
+                            set_status("connection password required");
                         } else if !ack.accepted {
                             set_status(&format!("rejected: {}", ack.reason));
                         } else {
@@ -650,13 +655,102 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
     }
 }
 
-/// Prompt the user for the host's connection password (browser dialog). Returns
-/// `None` if they cancel or leave it blank. Kept out of the URL/history.
-fn prompt_password() -> Option<String> {
-    let win = web_sys::window()?;
-    match win.prompt_with_message("This host requires a connection password:") {
-        Ok(Some(s)) if !s.is_empty() => Some(s),
-        _ => None,
+/// Find the `#pwinput` password field.
+fn pw_input() -> Option<web_sys::HtmlInputElement> {
+    web_sys::window()?
+        .document()?
+        .get_element_by_id("pwinput")?
+        .dyn_into::<web_sys::HtmlInputElement>()
+        .ok()
+}
+
+/// Show the non-blocking password modal (clears + focuses the field).
+fn show_password_modal() {
+    if let Some(m) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("pwmodal"))
+    {
+        let _ = m.class_list().remove_1("hidden");
+    }
+    if let Some(inp) = pw_input() {
+        inp.set_value("");
+        let _ = inp.focus();
+    }
+}
+
+/// Hide the password modal + clear the field.
+fn hide_password_modal() {
+    if let Some(m) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("pwmodal"))
+    {
+        let _ = m.class_list().add_1("hidden");
+    }
+    if let Some(inp) = pw_input() {
+        inp.set_value("");
+    }
+}
+
+/// Wire the password modal's OK / Enter / Cancel handlers ONCE. On submit it reads
+/// the current [`App::pending_pw`] target and sends the password-bearing Hello over
+/// the control channel — without ever blocking the event loop (unlike a `prompt()`).
+fn wire_password_modal(app: &Rc<App>) {
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let submit: Rc<dyn Fn()> = {
+        let app = app.clone();
+        Rc::new(move || {
+            let Some(inp) = pw_input() else { return };
+            let pw = inp.value();
+            if pw.is_empty() {
+                return;
+            }
+            if let Some((dc, pwcell)) = app.pending_pw.borrow_mut().take() {
+                *pwcell.borrow_mut() = Some(pw.clone());
+                let hello = rmd_protocol::with_password(
+                    rmd_protocol::hello(
+                        "web-viewer",
+                        rmd_protocol::Role::Viewer,
+                        rmd_protocol::FEATURE_CLIENT_CURSOR,
+                    ),
+                    pw,
+                );
+                let _ = dc.send_with_u8_array(&rmd_protocol::encode(&hello));
+                set_status("checking password…");
+            }
+            hide_password_modal();
+        })
+    };
+    // OK button.
+    if let Some(ok) = document.get_element_by_id("pwok") {
+        let submit = submit.clone();
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| submit());
+        let _ = ok.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
+    // Enter in the field.
+    if let Some(inp) = document.get_element_by_id("pwinput") {
+        let submit = submit.clone();
+        let cb = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+            move |e: web_sys::KeyboardEvent| {
+                if e.key() == "Enter" {
+                    e.prevent_default();
+                    submit();
+                }
+            },
+        );
+        let _ = inp.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
+    // Cancel button.
+    if let Some(c) = document.get_element_by_id("pwcancel") {
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
+            hide_password_modal();
+            set_status("connection password required");
+        });
+        let _ = c.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+        cb.forget();
     }
 }
 

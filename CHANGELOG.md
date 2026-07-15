@@ -17,6 +17,12 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
   Ctrl-Alt-Del combo never repeat; releasing (pointerup/cancel) stops it.
 
 ### Fixed
+- **Password entry no longer kills the connection.** The web-viewer asked for the
+  connection password with a synchronous `window.prompt()`, which **freezes the JS
+  event loop** — stopping WebRTC's ICE consent-keepalives and dropping the (relay)
+  connection mid-authentication (endless "checking password…" / reconnect churn on
+  mobile). Replaced with a non-blocking in-page modal, so the connection stays alive
+  while you type.
 - **Three-finger scroll (and mouse wheel) now respect the view rotation.** The scroll
   delta was sent in raw screen space, so in a rotated view (landscape) it scrolled the
   wrong axis — portrait (no rotation) worked by luck. It's now rotated into host space

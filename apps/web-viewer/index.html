@@ -172,6 +172,14 @@
     border-radius:50%;margin:0 auto 14px;animation:spin 1s linear infinite;}
   @keyframes spin{to{transform:rotate(360deg);}}
   #overlay .msg{font-size:15px;} #overlay .hint2{color:var(--muted);font-size:12.5px;margin-top:8px;}
+  /* Non-blocking password modal. High z-index so it sits above the video + keyboard. */
+  #pwmodal{position:fixed;inset:0;z-index:90;display:grid;place-items:center;background:rgba(0,0,0,.55);
+    padding:calc(16px + env(safe-area-inset-top,0)) 16px calc(16px + env(safe-area-inset-bottom,0)) 16px;}
+  .pwbox{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;
+    width:min(92vw,340px);box-shadow:0 12px 44px rgba(0,0,0,.55);}
+  .pwtitle{font-weight:600;margin-bottom:12px;}
+  #pwinput{width:100%;margin-bottom:14px;}
+  .pwrow{display:flex;gap:10px;justify-content:flex-end;}
   /* Full custom on-screen keyboard. We render every key (each sends HID via the
      WASM layer), so — unlike the OS keyboard — it can rotate WITH the view. The
      wrap covers the screen (dims swapped for 90/270, like the video) and rotates
@@ -278,6 +286,15 @@
   --><div id="cursor" class="hidden" aria-hidden="true"><svg width="17" height="17" viewBox="0 0 22 22"><path d="M2 1 L2 17 L6.1 13.3 L8.9 20 L11.7 18.8 L8.9 12.3 L14 12.3 Z" fill="#fff" stroke="#000" stroke-width="1.3" stroke-linejoin="round"/></svg></div></div>
   <div id="overlay" class="hidden"><div class="box"><div class="spin"></div>
     <div class="msg" id="ovMsg">Connecting…</div><div class="hint2" id="ovHint"></div></div></div>
+
+  <!-- Non-blocking connection-password modal (a synchronous prompt() would freeze
+       the event loop and kill the live WebRTC connection mid-auth). Wired in WASM. -->
+  <div id="pwmodal" class="hidden"><div class="pwbox">
+    <div class="pwtitle">Connection password</div>
+    <input id="pwinput" type="password" inputmode="text" autocomplete="off"
+           autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Password">
+    <div class="pwrow"><button id="pwcancel" class="ghost">Cancel</button><button id="pwok">Connect</button></div>
+  </div></div>
 
   <!-- Full custom on-screen keyboard (built by JS below, wired to HID in WASM).
        Rendered by us so it rotates with the view. -->
