@@ -1439,9 +1439,12 @@ fn attach_keyboard(dc: &RtcDataChannel) {
         else {
             continue;
         };
-        // Layer/page toggles (123↔ABC, ⇧ on a symbol page) are presentation only —
-        // JS swaps the visible layer; the WASM layer ignores them.
-        if el.get_attribute("data-layer").is_some() || el.get_attribute("data-page").is_some() {
+        // Layer/page toggles (123↔ABC, ⇧ on a symbol page) and the 🎤 dictation key
+        // are handled in JS (index.html) — the WASM layer ignores them here.
+        if el.get_attribute("data-layer").is_some()
+            || el.get_attribute("data-page").is_some()
+            || el.get_attribute("data-mic").is_some()
+        {
             continue;
         }
         // QWERTY letter keys are owned by the swipe/tap handler below (so a swipe
@@ -1545,6 +1548,32 @@ fn attach_keyboard(dc: &RtcDataChannel) {
     }
 
     attach_swipe(dc, &document, &mods, &clear_mods, &caps);
+    attach_dictation(dc);
+}
+
+/// Wire the on-screen 🎤 dictation key. The JS mic handler (index.html) runs the
+/// Web Speech API and dispatches the recognized text as an `rmd-dictate`
+/// CustomEvent; here we type that text to the host char-by-char, so it travels
+/// over the same encrypted data channel as any other key.
+fn attach_dictation(dc: &RtcDataChannel) {
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let dc = dc.clone();
+    let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+        let text = ev
+            .dyn_ref::<web_sys::CustomEvent>()
+            .and_then(|ce| ce.detail().as_string())
+            .unwrap_or_default();
+        for c in text.chars() {
+            if let Some((hid, shift)) = input::char_to_hid(c) {
+                kb_send(&dc, hid, if shift { input::mod_bit("shift") } else { 0 });
+            }
+        }
+    });
+    let _ =
+        document.add_event_listener_with_callback("rmd-dictate", cb.as_ref().unchecked_ref());
+    cb.forget();
 }
 
 /// Toggle the `#kb.up` class so the letter labels render uppercase (via CSS

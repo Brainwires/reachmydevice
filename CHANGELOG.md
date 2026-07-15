@@ -5,6 +5,10 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 ## [Unreleased]
 
 ### Added
+- **On-screen keyboard: 🎤 dictation (speech-to-text).** A mic key runs the browser's
+  Web Speech API and types the recognized text to the host over the encrypted data
+  channel. Whether recognition is on-device is browser-decided (Safari/iOS uses the OS
+  dictation; Chrome streams to Google). The key hides itself where the API is absent.
 - **On-screen keyboard: double-tap space → ". "** (delete the trailing space, type a
   period + space), matching iOS/Android behavior.
 - **On-screen keyboard: hold-to-repeat.** Holding a non-modifier key (character keys

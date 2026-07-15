@@ -411,8 +411,8 @@
     };
     const BOTTOM=[{l:'123',layer:1,w:4},
       {l:'⌃',mod:'ctrl',w:2},{l:'⌥',mod:'alt',w:2},{l:'⌘',mod:'super',w:2},
-      {l:'⎋',code:'Escape',w:2},{l:'space',code:'Space',w:8,wide:1},
-      {l:'⏎',code:'Enter',w:3},{l:'C-A-D',combo:'ctrl-alt-del',w:3}];
+      {l:'⎋',code:'Escape',w:2},{l:'🎤',mic:1,w:2},{l:'space',code:'Space',w:6,wide:1},
+      {l:'⏎',code:'Enter',w:3},{l:'C-A-D',combo:'ctrl-alt-del',w:3}];  // 26 cols
     const keyEl=s=>{
       if(s.sp){ const d=document.createElement('div'); d.style.gridColumn='span '+(s.w||2); return d; }
       const isChar=s.char!=null;
@@ -429,6 +429,7 @@
       if(s.page) b.dataset.page='1';
       if(s.layer!=null) b.dataset.layer='1';
       if(s.combo) b.dataset.combo=s.combo;
+      if(s.mic) b.dataset.mic='1';
       return b; };
     const rowEl=specs=>{ const r=document.createElement('div'); r.className='krow';
       specs.forEach(s=>r.appendChild(keyEl(s))); return r; };
@@ -448,8 +449,39 @@
         const b=kb.querySelector('[data-layer]'); if(b) b.textContent=on?'ABC':'123';
         return;
       }
-      if(e.target.closest('[data-page]')) kb.classList.toggle('sym2');
+      if(e.target.closest('[data-page]')){ kb.classList.toggle('sym2'); return; }
+      if(e.target.closest('[data-mic]')){ toggleDictation(); return; }
     });
+
+    // --- Dictation (speech → text) via the Web Speech API -----------------------
+    // Availability + whether it's truly on-device is browser-decided: Safari/iOS
+    // uses the OS dictation (often on-device); Chrome streams audio to Google. The
+    // recognised text is dispatched as an `rmd-dictate` CustomEvent; the WASM input
+    // layer types it to the host (so it flows over the same encrypted data channel).
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const micEl = () => kb.querySelector('[data-mic]');
+    let rec = null, listening = false;
+    const toggleDictation = () => {
+      if(!SR) return;
+      if(listening){ try{ rec && rec.stop(); }catch(_){} return; }
+      rec = new SR();
+      rec.lang = navigator.language || 'en-US';
+      rec.interimResults = false; rec.continuous = false; rec.maxAlternatives = 1;
+      const b = micEl();
+      rec.onstart = () => { listening = true; if(b) b.classList.add('armed'); };
+      rec.onend   = () => { listening = false; if(b) b.classList.remove('armed'); rec = null; };
+      rec.onerror = () => { listening = false; if(b) b.classList.remove('armed'); };
+      rec.onresult = (ev) => {
+        let text = '';
+        for(let i=ev.resultIndex; i<ev.results.length; i++)
+          if(ev.results[i].isFinal) text += ev.results[i][0].transcript;
+        text = text.trim();
+        if(text) document.dispatchEvent(new CustomEvent('rmd-dictate',{detail:text+' '}));
+      };
+      try{ rec.start(); }catch(_){ listening = false; }
+    };
+    // No speech support → hide the mic key so we don't offer a dead button.
+    if(!SR){ const b=micEl(); if(b) b.style.display='none'; }
     // Press feedback: a short click sound + haptic tick + a visual press flash on
     // every key (the WASM layer sends the key on the same pointerdown). The audio
     // context is created/resumed lazily on the first press (a user gesture).
