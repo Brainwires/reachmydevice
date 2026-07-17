@@ -776,10 +776,29 @@
     };
     const x=$('closeCmd'); if(x) x.onclick=()=>{panelHtml='';renderDevices();};
   }
+  async function doConnect(hostId){
+    try{ const t=await viewerToken(); location.href=`/app/?token=${encodeURIComponent(t)}&host=${encodeURIComponent(hostId)}`; }
+    catch(e){ alert('Could not get a viewer token: '+(e.message||e)); }
+  }
+  // Hosts the viewer has learned need a connection password: prompt for it INSIDE
+  // this tap. iOS only raises the soft keyboard when focus() runs in a trusted user
+  // gesture, so focusing here (not on the reloaded viewer page, where the modal pops
+  // from a network callback) is what makes the keyboard appear with zero extra taps.
+  // The password rides to the viewer via sessionStorage (never the URL) and goes out
+  // in its first Hello, so the session authenticates without a second prompt.
+  function connectWithPassword(hostId){
+    const m=$('pwmodal'),inp=$('pwinput'),ok=$('pwok'),cancel=$('pwcancel');
+    inp.value=''; m.classList.remove('hidden'); inp.focus();
+    const done=()=>{ m.classList.add('hidden'); ok.onclick=cancel.onclick=inp.onkeydown=null; };
+    const submit=()=>{ const pw=inp.value; done(); if(pw) sessionStorage.setItem('rmd_pw_pending',pw); doConnect(hostId); };
+    ok.onclick=submit;
+    inp.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); submit(); } };
+    cancel.onclick=done;
+  }
   async function deviceAction(ds){
     if(ds.act==='connect'){
-      try{ const t=await viewerToken(); location.href=`/app/?token=${encodeURIComponent(t)}&host=${encodeURIComponent(ds.id)}`; }
-      catch(e){ alert('Could not get a viewer token: '+(e.message||e)); }
+      if(localStorage.getItem('rmd_pwreq_'+ds.id)==='1') connectWithPassword(ds.id);
+      else doConnect(ds.id);
     } else if(ds.act==='cmd'){
       try{ const t=await issueToken(ds.id,ds.name,ds.role); commandPanel('Run “'+ds.name+'” — new token issued',t); renderDevices(); }
       catch(e){ alert('Failed to issue a token: '+(e.message||e)); }

@@ -256,6 +256,14 @@ async fn run() -> Result<(), String> {
     });
     wire_password_modal(&app);
 
+    // A password entered on the device list's Connect prompt (inside a trusted tap,
+    // so iOS raised the keyboard) is handed here via sessionStorage. Seed it so the
+    // first Hello carries it and the host authenticates us straight away — no second,
+    // keyboard-less prompt on this freshly-reloaded page.
+    if let Some(pw) = take_pending_password() {
+        *app.password.borrow_mut() = Some(pw);
+    }
+
     // Losing focus / backgrounding must NOT tear the session down — keeping a live
     // connection through a blur is the whole point on desktop (and stops mobile
     // browsers, which fire visibilitychange constantly, from cycling reconnects +
@@ -629,13 +637,12 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
                 if let Ok(env) = rmd_protocol::decode(&bytes) {
                     if let Some(rmd_protocol::pb::envelope::Payload::HelloAck(ack)) = env.payload {
                         if ack.password_required {
-                            // Host wants a connection password (or the remembered one
-                            // was wrong). Ask via a NON-BLOCKING modal — a synchronous
-                            // prompt() would freeze the JS event loop, stopping
-                            // WebRTC's ICE consent-keepalives and killing the (relay)
-                            // connection mid-auth. The once-wired modal handler
-                            // (`wire_password_modal`) reads `pending_pw` and re-sends
-                            // the password-bearing Hello over the control channel.
+                            // Remember this host needs a password so next time the
+                            // device list prompts inside the Connect tap (where iOS
+                            // will actually raise the keyboard). This on-page modal is
+                            // the fallback — it appears from a network callback with no
+                            // user gesture, so the soft keyboard won't auto-open here.
+                            remember_password_required(&s.host_id, true);
                             *s.pending_pw.borrow_mut() =
                                 Some((dc_msg.clone(), s.password.clone()));
                             show_password_modal();
@@ -643,6 +650,13 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
                         } else if !ack.accepted {
                             set_status(&format!("rejected: {}", ack.reason));
                         } else {
+                            // Accepted. Keep the per-host hint accurate: if we got in
+                            // WITHOUT a password this host doesn't need one (forget it);
+                            // if a password got us in, remember it for next time.
+                            remember_password_required(
+                                &s.host_id,
+                                s.password.borrow().is_some(),
+                            );
                             set_status("connected");
                         }
                     }
@@ -700,6 +714,31 @@ fn show_password_modal() {
             );
         }
     }
+}
+
+/// Remember (in `localStorage`) whether a given host needs a connection password,
+/// so the device list can prompt for it *inside the Connect tap* next time — the
+/// only place iOS will raise the soft keyboard. Keyed per host id.
+fn remember_password_required(host: &str, required: bool) {
+    if let Some(ls) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let key = format!("rmd_pwreq_{host}");
+        if required {
+            let _ = ls.set_item(&key, "1");
+        } else {
+            let _ = ls.remove_item(&key);
+        }
+    }
+}
+
+/// Take a password handed off from the device list's Connect prompt (via
+/// `sessionStorage`, never the URL). Consumed once so it doesn't linger. When
+/// present it's sent in the very first Hello, so a password host authenticates
+/// without the viewer ever having to pop its own (keyboard-less) modal.
+fn take_pending_password() -> Option<String> {
+    let ss = web_sys::window()?.session_storage().ok().flatten()?;
+    let pw = ss.get_item("rmd_pw_pending").ok().flatten()?;
+    let _ = ss.remove_item("rmd_pw_pending");
+    (!pw.is_empty()).then_some(pw)
 }
 
 /// Hide the password modal + clear the field.
