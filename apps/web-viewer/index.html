@@ -191,13 +191,15 @@
   #overlay .msg{font-size:15px;} #overlay .hint2{color:var(--muted);font-size:12.5px;margin-top:8px;}
   /* Non-blocking password modal. High z-index so it sits above the video + keyboard. */
   #pwmodal{position:fixed;inset:0;z-index:90;display:grid;place-items:center;background:rgba(0,0,0,.55);
-    opacity:1;transition:opacity .12s;
     padding:calc(16px + env(safe-area-inset-top,0)) 16px calc(16px + env(safe-area-inset-bottom,0)) 16px;}
-  /* Hide it WITHOUT display:none so #pwinput stays laid out and focusable. An input
-     inside a display:none subtree can't take focus; flipping display:none→grid and
-     calling focus() the same frame drops the caret + soft-keyboard on iOS (the input
-     isn't laid out yet). opacity-hide keeps it always rendered, so focus() lands. */
-  #pwmodal.hidden{display:grid!important;opacity:0;pointer-events:none;}
+  /* Hide with visibility (NOT display:none, NOT opacity). display:none→grid + focus()
+     the same frame drops the caret/keyboard on iOS (input not laid out yet); opacity:0
+     keeps it a "rendered" password field, which makes iOS see TWO password fields on
+     the sign-in page and offer to SET a password instead of autofilling the saved one.
+     visibility:hidden keeps the box laid out (so focus() lands when shown) yet the
+     field is non-focusable, unpainted, click-through, and invisible to autofill while
+     hidden — so it can't hijack sign-in or auto-focus on load. */
+  #pwmodal.hidden{display:grid!important;visibility:hidden;}
   .pwbox{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;
     width:min(92vw,340px);box-shadow:0 12px 44px rgba(0,0,0,.55);}
   .pwtitle{font-weight:600;margin-bottom:12px;}
