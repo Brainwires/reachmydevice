@@ -261,6 +261,14 @@ async fn run() -> Result<(), String> {
     // first Hello carries it and the host authenticates us straight away — no second,
     // keyboard-less prompt on this freshly-reloaded page.
     if let Some(pw) = take_pending_password() {
+        store_host_password(&app.cfg.host_id, &pw); // persist so a reload re-authenticates on the first Hello
+        *app.password.borrow_mut() = Some(pw);
+    } else if let Some(pw) = load_host_password(&app.cfg.host_id) {
+        // Reload / direct URL: reuse the password this tab already authenticated with,
+        // so the first Hello carries it — no fragile mid-session password prompt.
+        web_sys::console::log_1(
+            &"[rmd] seeded connection password from session — first Hello will carry it".into(),
+        );
         *app.password.borrow_mut() = Some(pw);
     }
 
@@ -366,6 +374,13 @@ async fn connect(app: Rc<App>) {
 
     // Announce presence so the host learns our device id and sends its offer.
     relay.send_hello(&app.cfg.host_id);
+    web_sys::console::log_1(
+        &format!(
+            "[rmd] connect: announced to host (first Hello will carry password={})",
+            app.password.borrow().is_some()
+        )
+        .into(),
+    );
     set_status("connecting…");
 }
 
@@ -375,6 +390,7 @@ fn schedule_reconnect(app: Rc<App>) {
     if app.connecting.get() {
         return; // already scheduled or in progress
     }
+    web_sys::console::log_1(&"[rmd] scheduling reconnect (1s backoff)".into());
     app.connecting.set(true); // hold the guard across the backoff delay
     let cb = Closure::once_into_js(move || {
         app.connecting.set(false); // release so connect() can re-acquire
@@ -557,6 +573,15 @@ fn wire_pc_callbacks(session: &Rc<Session>, app: &Rc<App>) {
         let s = session.clone();
         let cb = Closure::<dyn FnMut(RtcDataChannelEvent)>::new(move |ev: RtcDataChannelEvent| {
             let dc = ev.channel();
+            // Each control channel the host opens is a fresh auth + input context. Re-arm
+            // `hello_sent` so wire_data_channel's onopen re-sends the (password-bearing)
+            // Hello AND re-attaches input to THIS channel. Without this, a channel the host
+            // recreates after an in-viewer password prompt / renegotiation gets no input
+            // listeners — they stayed bound to the first, now-dead channel — so video keeps
+            // flowing but keyboard/mouse control silently dies (only reproduces when the
+            // password is entered in the viewer, not on the connect screen).
+            *s.hello_sent.borrow_mut() = false;
+            web_sys::console::log_1(&"[rmd] control channel opened — rearming hello + input".into());
             wire_data_channel(&s, &dc);
             *s.control.borrow_mut() = Some(dc);
         });
@@ -571,11 +596,13 @@ fn wire_pc_callbacks(session: &Rc<Session>, app: &Rc<App>) {
         let cb = Closure::<dyn FnMut()>::new(move || {
             let st = pc2.connection_state();
             web_sys::console::log_1(&format!("[rmd] pc state: {st:?}").into());
-            if matches!(
-                st,
-                web_sys::RtcPeerConnectionState::Failed
-                    | web_sys::RtcPeerConnectionState::Disconnected
-            ) {
+            // Only a FAILED connection needs a full rebuild. `Disconnected` is usually a
+            // TRANSIENT ICE blip (or the tail of a renegotiation) that WebRTC recovers
+            // from on its own within a few seconds — tearing down + reconnecting on every
+            // `Disconnected` turned a recoverable hiccup into a connect→disconnect→
+            // reconnect loop (which also orphaned relay allocations). Let it self-heal;
+            // ICE escalates to `Failed` if it truly can't recover, and we rebuild then.
+            if matches!(st, web_sys::RtcPeerConnectionState::Failed) {
                 // Only auto-reconnect while the tab is FOREGROUND. A drop while hidden
                 // (backgrounded/locked) is an intentional disconnect — stay down and
                 // let the visibilitychange handler reconnect when it's foreground again.
@@ -588,6 +615,8 @@ fn wire_pc_callbacks(session: &Rc<Session>, app: &Rc<App>) {
                     set_status("disconnected — reconnecting…");
                     schedule_reconnect(app.clone());
                 }
+            } else if matches!(st, web_sys::RtcPeerConnectionState::Disconnected) {
+                set_status("connection unstable — recovering…");
             }
         });
         pc.set_onconnectionstatechange(Some(cb.as_ref().unchecked_ref()));
@@ -617,6 +646,13 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
                 };
                 let _ = dc_open.send_with_u8_array(&rmd_protocol::encode(&hello));
                 *s.hello_sent.borrow_mut() = true;
+                web_sys::console::log_1(
+                    &format!(
+                        "[rmd] dc open → sent Hello (password={}) + attaching input",
+                        s.password.borrow().is_some()
+                    )
+                    .into(),
+                );
                 attach_input(&s, &dc_open);
                 set_status("session ready");
             }
@@ -636,6 +672,13 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
                 let bytes = js_sys::Uint8Array::new(&buf).to_vec();
                 if let Ok(env) = rmd_protocol::decode(&bytes) {
                     if let Some(rmd_protocol::pb::envelope::Payload::HelloAck(ack)) = env.payload {
+                        web_sys::console::log_1(
+                            &format!(
+                                "[rmd] HelloAck: password_required={} accepted={}",
+                                ack.password_required, ack.accepted
+                            )
+                            .into(),
+                        );
                         if ack.password_required {
                             // Remember this host needs a password so next time the
                             // device list prompts inside the Connect tap (where iOS
@@ -741,6 +784,26 @@ fn take_pending_password() -> Option<String> {
     (!pw.is_empty()).then_some(pw)
 }
 
+/// Remember a host's connection password for THIS tab (sessionStorage — per-tab,
+/// cleared on close; never the browser password MANAGER, which must not cache it or
+/// it clobbers the web-app login). This lets a page reload / direct URL re-send the
+/// password in the FIRST Hello so the host authenticates immediately — the same
+/// reliable path the device-screen Connect prompt uses. The alternative (the
+/// mid-session `password_required` modal) needs a second round-trip that a flaky
+/// mobile relay can drop mid-prompt, hanging the session on "checking password".
+fn store_host_password(host: &str, pw: &str) {
+    if let Some(ss) = web_sys::window().and_then(|w| w.session_storage().ok().flatten()) {
+        let _ = ss.set_item(&format!("rmd_pwsess_{host}"), pw);
+    }
+}
+
+/// Read a host's remembered per-tab connection password (see [`store_host_password`]).
+fn load_host_password(host: &str) -> Option<String> {
+    let ss = web_sys::window()?.session_storage().ok().flatten()?;
+    let pw = ss.get_item(&format!("rmd_pwsess_{host}")).ok().flatten()?;
+    (!pw.is_empty()).then_some(pw)
+}
+
 /// Hide the password modal + clear the field.
 fn hide_password_modal() {
     if let Some(m) = web_sys::window()
@@ -771,6 +834,9 @@ fn wire_password_modal(app: &Rc<App>) {
             }
             if let Some((dc, pwcell)) = app.pending_pw.borrow_mut().take() {
                 *pwcell.borrow_mut() = Some(pw.clone());
+                // Remember it for this tab so a reload/reconnect authenticates on the
+                // first Hello (reliable) instead of re-opening this fragile modal.
+                store_host_password(&app.cfg.host_id, &pw);
                 let hello = rmd_protocol::with_password(
                     rmd_protocol::hello(
                         "web-viewer",
@@ -2020,6 +2086,20 @@ async fn handle_signal(session: &Rc<Session>, msg: SignalMsg) -> Result<(), Stri
             // (`{"type","sdp"}`, matching `rtc`'s serde form); unwrap it to the raw
             // SDP the browser's setRemoteDescription expects. Passing the JSON blob
             // straight in makes Chrome fail with "Expect line: v=".
+            // Ignore an offer ONLY once the pc is fully CONNECTED — then a new offer is the
+            // host replaying/renegotiating, and applying it resets ICE and drops the live
+            // session (connect→offer→disconnect loop). While still establishing
+            // (New/Connecting) or recovering (Disconnected), we MUST re-apply + re-answer:
+            // on a flaky link the host re-offers when it never got our answer, and that
+            // re-answer is how ICE completes — dropping it strands the handshake at Failed.
+            if matches!(
+                session.pc.connection_state(),
+                web_sys::RtcPeerConnectionState::Connected
+            ) {
+                web_sys::console::log_1(&"[rmd] offer ignored (already connected)".into());
+                return Ok(());
+            }
+            web_sys::console::log_1(&"[rmd] signal: offer received → creating answer".into());
             let sdp = sdp_from_wire(&wire);
             let desc = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
             desc.set_sdp(&sdp);
