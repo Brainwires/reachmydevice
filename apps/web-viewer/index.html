@@ -54,12 +54,29 @@
      the safe area below it and never bleeds under the notch / status bar. */
   /* Connection state as a colour dot (replaces the old status text): green =
      connected/ready, amber (pulsing) = connecting/reconnecting, red = error. */
-  #barStatus{flex:0 0 auto;width:10px;height:10px;border-radius:50%;background:var(--muted);
-    transition:background .2s;}
-  #barStatus.ok{background:var(--ok);}
-  #barStatus.warn{background:#e0a54a;animation:pulse 1.2s ease-in-out infinite;}
-  #barStatus.err{background:var(--err);}
-  @keyframes pulse{50%{opacity:.3;}}
+  /* Connection status: a state-tinted pill with a plain-language label + a dot.
+     The dot is sized with aspect-ratio (width only, height derived), so it stays a
+     perfect circle no matter how the surrounding flex row lays out — it can never be
+     squished into an oval, which the old fixed width+height span could be on iOS. */
+  #barStatus{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;
+    height:24px;padding:0 10px;border-radius:999px;white-space:nowrap;
+    font-size:12px;font-weight:600;line-height:1;letter-spacing:.01em;
+    color:var(--muted);border:1px solid var(--border);background:transparent;
+    transition:color .2s,border-color .2s,background .2s;}
+  #barStatus .status-dot{flex:none;width:7px;aspect-ratio:1;border-radius:50%;
+    background:currentColor;}
+  #barStatus .status-label{color:inherit;}
+  #barStatus.ok  {color:var(--ok);  border-color:rgba(57,217,138,.34); background:rgba(57,217,138,.12);}
+  #barStatus.warn{color:#e6b25e;    border-color:rgba(224,165,74,.36); background:rgba(224,165,74,.12);}
+  #barStatus.auth{color:#7aa7ff;    border-color:rgba(79,140,255,.40); background:rgba(79,140,255,.14);}
+  #barStatus.err {color:var(--err); border-color:rgba(255,92,92,.38);  background:rgba(255,92,92,.12);}
+  #barStatus.warn .status-dot,#barStatus.auth .status-dot{animation:pulse 1.2s ease-in-out infinite;}
+  @keyframes pulse{50%{opacity:.35;}}
+  /* Narrow phones: drop the word to save the row, keep the (still round) dot. */
+  @media (max-width:430px){
+    #barStatus{padding:0;border:0;background:transparent;height:auto;}
+    #barStatus .status-label{display:none;}
+    #barStatus .status-dot{width:10px;}}
   #bar .sp{flex:1;}
   /* The action bar is a fixed top toolbar in EVERY orientation — only the video +
      cursor + gestures + keyboard rotate, the app frame does not. (The .brot*/.at-bottom
@@ -269,7 +286,7 @@
 <body>
   <div id="bar" class="idle hidden">
     <div class="brand"><div class="logo">RMD</div><strong>ReachMyDevice</strong></div>
-    <span id="barStatus"></span><div class="sp"></div>
+    <span id="barStatus" role="status" aria-live="polite"><span class="status-dot"></span><span class="status-label">Idle</span></span><div class="sp"></div>
     <button id="kbd-toggle" class="iconbtn ghost rotc" title="Keyboard" style="display:none">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M10 13h4"/><path d="M8 16.5h8"/></svg>
     </button>
@@ -324,13 +341,19 @@
     // Map the WASM status text → a colour class for the header dot (and keep the full
     // text on the overlay + as the dot's tooltip). Order matters: "reconnecting"
     // before "disconnect", "connected" before the error bucket.
-    const statusCls=t=>{t=t.toLowerCase();
-      if(/reconnect|connecting|checking|wait/.test(t))return'warn';
-      if(/connected|ready/.test(t))return'ok';
-      if(/error|reject|disconnect|required|failed/.test(t))return'err';
-      return'';};
+    // WASM status text → [chip class, short label]. Order = priority; word
+    // boundaries keep "disconnected" out of the "connected" bucket. The full text
+    // stays on the overlay + as the chip's tooltip.
+    const statusOf=t=>{t=(t||'').toLowerCase();
+      if(/reconnect|connecting|checking|wait/.test(t)) return['warn','Linking…'];
+      if(/required/.test(t))                            return['auth','Password'];
+      if(/\b(connected|ready|live)\b/.test(t))          return['ok','Live'];
+      if(/\b(error|rejected?|disconnected?|failed)\b/.test(t)) return['err','Offline'];
+      return['','Idle'];};
     new MutationObserver(()=>{const t=status.textContent||''; $('ovMsg').textContent=t;
-      const d=$('barStatus'); d.className=statusCls(t); d.title=t;})
+      const d=$('barStatus'); const [cls,label]=statusOf(t);
+      d.className=cls; d.title=t||'Idle';
+      const L=d.querySelector('.status-label'); if(L)L.textContent=label;})
       .observe(status,{childList:true,characterData:true,subtree:true});
     const vid=$('screen');
     vid.addEventListener('playing',()=>$('overlay').classList.add('hidden'));
