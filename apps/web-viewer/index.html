@@ -913,7 +913,10 @@
   const emitRender=screen=>{ for(const cb of _extRender){ try{ cb(screen,el); }catch(e){ console.error('[ext]',e); } } };
   window.rmdExt={ el:$, api, go, frame, auth:()=>({auth,user}), viewerToken,
     route(hash,fn){ _extRoutes[hash]=fn; }, onRender(cb){ _extRender.push(cb); } };
-  (function(){ const s=document.createElement('script'); s.src='/app/ext.js'; s.async=true;
+  // Cache-bust ext.js per load: it has no content hash, and static assets are
+  // served with a long max-age, so a fixed URL goes stale for hours. index.html
+  // is always fresh (DYNAMIC), so a unique query here always fetches the latest.
+  (function(){ const s=document.createElement('script'); s.src='/app/ext.js?t='+Date.now(); s.async=true;
     s.onerror=()=>{}; document.head.appendChild(s); })();
 
   function go(hash){ if(location.hash===hash) route(); else location.hash=hash; }
