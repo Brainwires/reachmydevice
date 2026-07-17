@@ -684,12 +684,14 @@ fn show_password_modal() {
     }
     if let Some(inp) = pw_input() {
         inp.set_value("");
-        // Focus on the *next* tick: the field just went from `display:none` to
-        // visible, and a synchronous `focus()` on a not-yet-laid-out element is
-        // silently dropped by most browsers. A 0ms timeout lands the caret (and
-        // pops the mobile soft-keyboard) reliably once layout has happened.
+        // Focus synchronously. The modal is now hidden via opacity (not display:none),
+        // so #pwinput is always laid out and this focus() lands the caret + raises the
+        // mobile soft-keyboard right away. A single deferred retry covers the rare case
+        // where the first focus races the opacity transition.
+        let _ = inp.focus();
+        let inp_retry = inp.clone();
         let cb = Closure::once_into_js(move || {
-            let _ = inp.focus();
+            let _ = inp_retry.focus();
         });
         if let Some(win) = web_sys::window() {
             let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(

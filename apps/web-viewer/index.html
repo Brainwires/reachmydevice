@@ -174,7 +174,13 @@
   #overlay .msg{font-size:15px;} #overlay .hint2{color:var(--muted);font-size:12.5px;margin-top:8px;}
   /* Non-blocking password modal. High z-index so it sits above the video + keyboard. */
   #pwmodal{position:fixed;inset:0;z-index:90;display:grid;place-items:center;background:rgba(0,0,0,.55);
+    opacity:1;transition:opacity .12s;
     padding:calc(16px + env(safe-area-inset-top,0)) 16px calc(16px + env(safe-area-inset-bottom,0)) 16px;}
+  /* Hide it WITHOUT display:none so #pwinput stays laid out and focusable. An input
+     inside a display:none subtree can't take focus; flipping display:none→grid and
+     calling focus() the same frame drops the caret + soft-keyboard on iOS (the input
+     isn't laid out yet). opacity-hide keeps it always rendered, so focus() lands. */
+  #pwmodal.hidden{display:grid!important;opacity:0;pointer-events:none;}
   .pwbox{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;
     width:min(92vw,340px);box-shadow:0 12px 44px rgba(0,0,0,.55);}
   .pwtitle{font-weight:600;margin-bottom:12px;}
@@ -291,7 +297,7 @@
        the event loop and kill the live WebRTC connection mid-auth). Wired in WASM. -->
   <div id="pwmodal" class="hidden"><div class="pwbox">
     <div class="pwtitle">Connection password</div>
-    <input id="pwinput" type="password" inputmode="text" autocomplete="off"
+    <input id="pwinput" type="password" inputmode="text" autocomplete="off" autofocus
            autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Password">
     <div class="pwrow"><button id="pwcancel" class="ghost">Cancel</button><button id="pwok">Connect</button></div>
   </div></div>
