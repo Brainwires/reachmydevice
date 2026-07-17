@@ -203,7 +203,11 @@
   .pwbox{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;
     width:min(92vw,340px);box-shadow:0 12px 44px rgba(0,0,0,.55);}
   .pwtitle{font-weight:600;margin-bottom:12px;}
-  #pwinput{width:100%;margin-bottom:14px;}
+  /* Masked as a password visually, but it is a type=text field so the browser
+     password manager ignores it entirely — no Strong-Password suggestion, no
+     save prompt, no autofill. Critical here: the connection password must NOT be
+     cached, or the manager would overwrite the (separate) web-app login password. */
+  #pwinput{width:100%;margin-bottom:14px;-webkit-text-security:disc;text-security:disc;}
   .pwrow{display:flex;gap:10px;justify-content:flex-end;}
   /* Full custom on-screen keyboard. We render every key (each sends HID via the
      WASM layer), so — unlike the OS keyboard — it can rotate WITH the view. The
@@ -316,8 +320,9 @@
        the event loop and kill the live WebRTC connection mid-auth). Wired in WASM. -->
   <div id="pwmodal" class="hidden"><div class="pwbox">
     <div class="pwtitle">Connection password</div>
-    <input id="pwinput" type="password" inputmode="text" autocomplete="off" autofocus
-           autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Password">
+    <input id="pwinput" type="text" inputmode="text" autocomplete="off" autofocus
+           autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Password"
+           aria-label="Connection password" data-1p-ignore data-lpignore="true">
     <div class="pwrow"><button id="pwcancel" class="ghost">Cancel</button><button id="pwok">Connect</button></div>
   </div></div>
 
