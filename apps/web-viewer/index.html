@@ -20,6 +20,7 @@
 <link data-trunk rel="copy-file" href="assets/icon-192.png" />
 <link data-trunk rel="copy-file" href="assets/icon-512.png" />
 <link data-trunk rel="copy-file" href="assets/manifest.webmanifest" />
+<link data-trunk rel="copy-file" href="assets/ext.js" />
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -814,6 +815,7 @@
     $('refresh').onclick=()=>{panelHtml='';renderDevices();};
     $('signout').onclick=()=>{sessionStorage.clear(); localStorage.removeItem('rmd_vtok_'+user); auth=null; go('#/login');};
     wirePanel();
+    emitRender('devices');
   }
   // Setup commands, one per line — persisted in rmdd's encrypted settings store
   // (`rmdd set …`) rather than passed as env vars (which leak in process listings).
@@ -899,10 +901,26 @@
   }
 
   // ---- Router (hash → screen; back button works) ----
+  // ---- Deployment extension seam ------------------------------------------
+  // A deployment MAY serve /app/ext.js to add optional screens/actions to this
+  // console (e.g. a hosted operator's account tools). The open build ships none,
+  // so nothing here is feature-specific. An ext.js registers via window.rmdExt:
+  //   rmdExt.route('#/x', renderFn)   — add a screen at that hash
+  //   rmdExt.onRender((screen,el)=>…) — run after a built-in screen renders
+  //   rmdExt.el/api/go/frame/auth()   — reuse the console's helpers + credentials
+  // After registering, an ext.js re-dispatches the current hash with rmdExt.go().
+  const _extRoutes={}, _extRender=[];
+  const emitRender=screen=>{ for(const cb of _extRender){ try{ cb(screen,el); }catch(e){ console.error('[ext]',e); } } };
+  window.rmdExt={ el:$, api, go, frame, auth:()=>({auth,user}),
+    route(hash,fn){ _extRoutes[hash]=fn; }, onRender(cb){ _extRender.push(cb); } };
+  (function(){ const s=document.createElement('script'); s.src='/app/ext.js'; s.async=true;
+    s.onerror=()=>{}; document.head.appendChild(s); })();
+
   function go(hash){ if(location.hash===hash) route(); else location.hash=hash; }
   function route(){
     if(!auth){ if(location.hash!=='#/login'){location.hash='#/login';return;} return renderLogin(); }
     if(location.hash==='#/login'){ location.hash='#/devices'; return; }
+    if(_extRoutes[location.hash]) return _extRoutes[location.hash]();
     renderDevices();
   }
   window.addEventListener('hashchange',route);

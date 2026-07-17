@@ -30,6 +30,9 @@ pub enum RelayDecision {
     DenyNoSubscription,
     /// Subscribed but over the fair-use cap this cycle — STUN-only until reset.
     DenyFairUse,
+    /// Subscribed and within fair-use, but already at the plan's limit of
+    /// *concurrent* relay sessions — STUN-only until one frees up.
+    DenyConcurrencyLimit,
 }
 
 impl RelayDecision {
@@ -47,6 +50,7 @@ impl RelayDecision {
             RelayDecision::Allow => None,
             RelayDecision::DenyNoSubscription => Some("no_subscription"),
             RelayDecision::DenyFairUse => Some("fair_use_exceeded"),
+            RelayDecision::DenyConcurrencyLimit => Some("concurrency_limit"),
         }
     }
 }
@@ -93,6 +97,11 @@ mod tests {
         assert_eq!(
             RelayDecision::DenyFairUse.reason(),
             Some("fair_use_exceeded")
+        );
+        assert!(!RelayDecision::DenyConcurrencyLimit.allowed());
+        assert_eq!(
+            RelayDecision::DenyConcurrencyLimit.reason(),
+            Some("concurrency_limit")
         );
     }
 
