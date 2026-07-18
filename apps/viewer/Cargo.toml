@@ -1,4 +1,5 @@
 [package]
+publish = false  # internal workspace member; path-dep, never published to crates.io
 name = "rmd-viewer"
 version.workspace = true
 edition.workspace = true

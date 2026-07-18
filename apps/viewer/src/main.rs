@@ -811,8 +811,12 @@ impl App {
             }
         }
 
-        match RendezvousClient::connect(&account.ws_url(), &token, Some(host.device_id.clone()), None)
-        {
+        match RendezvousClient::connect(
+            &account.ws_url(),
+            &token,
+            Some(host.device_id.clone()),
+            None,
+        ) {
             Ok(client) => self.start_session(Box::new(client)),
             Err(e) => {
                 self.error = Some(format!("could not open signaling: {e}"));

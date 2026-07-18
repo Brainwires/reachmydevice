@@ -79,7 +79,9 @@ jobs:
 
   # Supply-chain gate: advisories, licenses, banned crates, and — critically —
   # that no external git/unknown sources sneak in (the webrtc fork must stay a
-  # vendored submodule path dep). Plus a redundant advisory scan via cargo-audit.
+  # vendored submodule path dep). cargo-deny's `check advisories` already scans the
+  # RustSec DB, so a separate cargo-audit pass is redundant (and the docker action
+  # tripped over the pinned rust-toolchain) — dropped it; the job name is unchanged.
   supply-chain:
     name: supply chain (deny + audit)
     runs-on: ubuntu-latest
@@ -92,10 +94,6 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses bans sources
-      - name: cargo-audit
-        uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
   # Fuzz the untrusted-input parsers (protobuf decode, file-transfer state
   # machine, signaling frame) for a short time each. Uses nightly + cargo-fuzz;
@@ -103,6 +101,11 @@ jobs:
   fuzz:
     name: fuzz (short)
     runs-on: ubuntu-latest
+    # cargo-fuzz needs nightly (-Z sanitizer flags). The repo's rust-toolchain.toml
+    # pins 1.92.0 and overrides the installed nightly per-directory, so force
+    # nightly explicitly for every cargo/rustc invocation in this job.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@v4
         with:

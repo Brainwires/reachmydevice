@@ -26,6 +26,9 @@ fn two_devices_pair_over_the_stateless_relay() {
                 database_url: db_url,
                 allow_open_registration: false, // pairing needs no account
                 admin_token: None,
+                bootstrap_token: None,
+                trusted_proxy_header: None,
+                token_ttl_secs: None,
                 turn: None,
             };
             let state = init_state(cfg).await.unwrap();
@@ -77,6 +80,9 @@ fn mismatched_code_fails_to_pair() {
                 database_url: db_url,
                 allow_open_registration: false,
                 admin_token: None,
+                bootstrap_token: None,
+                trusted_proxy_header: None,
+                token_ttl_secs: None,
                 turn: None,
             };
             let state = init_state(cfg).await.unwrap();

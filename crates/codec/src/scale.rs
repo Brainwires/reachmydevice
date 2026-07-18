@@ -74,6 +74,7 @@ impl Scaler {
     /// Returns a tightly-packed BGRA buffer (`stride == out_w*4`). Returns `None`
     /// if the rect is effectively full (caller should encode the frame as-is) or
     /// on any sizing error (caller falls back to the uncropped frame).
+    #[allow(clippy::too_many_arguments)]
     pub fn crop_scale(
         &mut self,
         src: &[u8],
@@ -112,7 +113,8 @@ impl Scaler {
 
         self.dst.resize((out_w * out_h * 4) as usize, 0);
         let src_img = ImageRef::new(cw, ch, &self.src_tight, PixelType::U8x4).ok()?;
-        let mut dst_img = Image::from_slice_u8(out_w, out_h, &mut self.dst, PixelType::U8x4).ok()?;
+        let mut dst_img =
+            Image::from_slice_u8(out_w, out_h, &mut self.dst, PixelType::U8x4).ok()?;
         let opts = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear));
         self.resizer.resize(&src_img, &mut dst_img, &opts).ok()?;
         Some(&self.dst)
@@ -126,14 +128,34 @@ mod tests {
     #[test]
     fn sanitize_collapses_full_and_degenerate_to_full() {
         assert!(CropRect::FULL.sanitized().is_full());
-        assert!(CropRect { x: 0.0, y: 0.0, w: 0.0, h: 0.5 }.sanitized().is_full());
-        assert!(CropRect { x: 0.2, y: 0.2, w: 1.0, h: 1.0 }.sanitized().is_full());
+        assert!(CropRect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.5
+        }
+        .sanitized()
+        .is_full());
+        assert!(CropRect {
+            x: 0.2,
+            y: 0.2,
+            w: 1.0,
+            h: 1.0
+        }
+        .sanitized()
+        .is_full());
     }
 
     #[test]
     fn sanitize_keeps_crop_on_screen() {
         // A rect that would spill past the right/bottom edge is nudged in-bounds.
-        let r = CropRect { x: 0.9, y: 0.9, w: 0.5, h: 0.5 }.sanitized();
+        let r = CropRect {
+            x: 0.9,
+            y: 0.9,
+            w: 0.5,
+            h: 0.5,
+        }
+        .sanitized();
         assert!((r.w - 0.5).abs() < 1e-9 && (r.h - 0.5).abs() < 1e-9);
         assert!(r.x + r.w <= 1.0 + 1e-9 && r.y + r.h <= 1.0 + 1e-9);
         assert!((r.x - 0.5).abs() < 1e-9 && (r.y - 0.5).abs() < 1e-9);
@@ -172,7 +194,12 @@ mod tests {
                 w,
                 h,
                 stride as u32,
-                CropRect { x: 0.0, y: 0.0, w: 0.5, h: 1.0 },
+                CropRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.5,
+                    h: 1.0,
+                },
                 w,
                 h,
             )

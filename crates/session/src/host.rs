@@ -624,14 +624,7 @@ fn spawn_encode_thread(
                         frame.bytes_per_row,
                     ),
                 };
-                match encoder.encode(
-                    data,
-                    width,
-                    height,
-                    stride,
-                    frame.capture_ts_micros,
-                    force,
-                ) {
+                match encoder.encode(data, width, height, stride, frame.capture_ts_micros, force) {
                     Ok(Some(ef)) => {
                         sender.send_video(ef.data, ef.is_keyframe, ef.capture_ts_micros)
                     }
@@ -897,8 +890,14 @@ mod tests {
         // A `Hello` is the ONLY message allowed pre-authorization (it's how a
         // viewer authorizes in the first place); it also passes post-auth.
         let hello = hello_payload();
-        assert!(authorization_permits(&hello, false), "Hello must pass pre-auth");
-        assert!(authorization_permits(&hello, true), "Hello must pass post-auth");
+        assert!(
+            authorization_permits(&hello, false),
+            "Hello must pass pre-auth"
+        );
+        assert!(
+            authorization_permits(&hello, true),
+            "Hello must pass post-auth"
+        );
     }
 
     /// Build a viewer `Hello` carrying an access proof bound to `binding`.
@@ -1005,9 +1004,8 @@ mod tests {
     fn encode_thread_streams_no_video_until_authorized() {
         use super::{spawn_encode_thread, HostConfig};
         use rmd_capture::{Frame, PixelFormat};
-        use rmd_transport::{
-            Transport, TransportConfig, TransportEvent, TransportRole,
-        };
+        use rmd_codec as codec;
+        use rmd_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc;
         use std::sync::Arc;
@@ -1021,7 +1019,13 @@ mod tests {
             out
         }
         // Bridge signaling both ways and tally any video the viewer receives.
-        fn pump(host: &Transport, viewer: &Transport, hc: &mut bool, vc: &mut bool, video: &mut usize) {
+        fn pump(
+            host: &Transport,
+            viewer: &Transport,
+            hc: &mut bool,
+            vc: &mut bool,
+            video: &mut usize,
+        ) {
             for ev in drain(host) {
                 match ev {
                     TransportEvent::LocalSignal(s) => viewer.feed_signal(s),
@@ -1062,7 +1066,12 @@ mod tests {
         assert!(hc && vc, "peers did not connect");
 
         // Spawn the REAL encode thread, initially unauthorized.
-        let cfg = HostConfig { width: w, height: h, fps: 30, ..Default::default() };
+        let cfg = HostConfig {
+            width: w,
+            height: h,
+            fps: 30,
+            ..Default::default()
+        };
         let authorized = Arc::new(AtomicBool::new(false));
         let force_keyframe = Arc::new(AtomicBool::new(true));
         let (frame_tx, frame_rx) = mpsc::channel::<Frame>();

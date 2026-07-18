@@ -68,10 +68,12 @@ use rtc::rtp_transceiver::{
 };
 use rtc::sansio::Protocol;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::turn::client::{Client as TurnClient, ClientConfig as TurnClientConfig, Event as TurnEvent};
 use rtc::stun::addr::MappedAddress;
 use rtc::stun::message::{Getter, Message, TransactionId, BINDING_REQUEST};
 use rtc::stun::xoraddr::XorMappedAddress;
+use rtc::turn::client::{
+    Client as TurnClient, ClientConfig as TurnClientConfig, Event as TurnEvent,
+};
 
 /// Video RTP clock rate (Hz) — timestamps advance at 90 kHz for H.264 and AV1.
 const VIDEO_CLOCK_RATE: u32 = 90_000;
@@ -1025,6 +1027,7 @@ fn emit_session(
 /// Each iteration: drain commands, flush pending writes to the socket, service
 /// timeouts, read one inbound datagram (bounded wait), then drain events and
 /// media/data reads into [`TransportEvent`]s. Publishes the GCC estimate.
+#[allow(clippy::too_many_arguments)]
 fn event_loop<I: Interceptor>(
     pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
     socket: &UdpSocket,

@@ -80,8 +80,7 @@ impl OpenH264Encoder {
     fn maybe_reconfigure(&mut self) -> anyhow::Result<()> {
         let cur = self.cfg.bitrate_bps.max(1) as f32;
         let delta = (self.pending_bitrate_bps as f32 - cur).abs() / cur;
-        if delta > BITRATE_REBUILD_THRESHOLD
-            && self.last_rebuild.elapsed() >= REBUILD_MIN_INTERVAL
+        if delta > BITRATE_REBUILD_THRESHOLD && self.last_rebuild.elapsed() >= REBUILD_MIN_INTERVAL
         {
             self.cfg.bitrate_bps = self.pending_bitrate_bps;
             self.encoder = build_encoder(&self.cfg)?;

@@ -248,7 +248,8 @@ fn build_signaling(
     session_active: Arc<AtomicBool>,
 ) -> anyhow::Result<Box<dyn Signaling>> {
     if let Some(url) = rendezvous_url {
-        let token = token.ok_or_else(|| anyhow::anyhow!("rendezvous mode requires a device token"))?;
+        let token =
+            token.ok_or_else(|| anyhow::anyhow!("rendezvous mode requires a device token"))?;
         tracing::info!(%url, "signaling via rendezvous");
         // Pass the session-active flag so the rendezvous client's watchdog can
         // safely restart the (host) process if its DNS resolver wedges, without
@@ -343,18 +344,19 @@ fn main() -> anyhow::Result<()> {
     // Load the device identity once, then open the encrypted settings store with
     // it (both the host-identity presentation and the settings share the identity).
     let identity = load_host_identity();
-    let settings = identity.as_ref().and_then(|id| {
-        match rmd_session::settings::SettingsStore::load(
-            id.as_ref(),
-            &rmd_session::settings::SettingsStore::default_path(),
-        ) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                tracing::warn!(error = %e, "could not open settings store; ignoring it");
-                None
+    let settings =
+        identity.as_ref().and_then(|id| {
+            match rmd_session::settings::SettingsStore::load(
+                id.as_ref(),
+                &rmd_session::settings::SettingsStore::default_path(),
+            ) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not open settings store; ignoring it");
+                    None
+                }
             }
-        }
-    });
+        });
 
     // Read the rendezvous URL + device token once; both the ICE-server fetch and
     // the signaling client use them. URL + token come from the settings store

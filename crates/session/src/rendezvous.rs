@@ -198,11 +198,8 @@ async fn run(
         // `connect_async` is wrapped in a timeout so a wedged resolver can't hang the
         // loop indefinitely (see CONNECT_TIMEOUT); a timeout is treated as a connect
         // failure so it counts toward the watchdog like any other unreachable state.
-        let attempt = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            tokio_tungstenite::connect_async(&url),
-        )
-        .await;
+        let attempt =
+            tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url)).await;
         let ws = match attempt {
             Ok(Ok((ws, _resp))) => ws,
             failed => {

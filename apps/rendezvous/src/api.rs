@@ -138,10 +138,10 @@ pub struct SetRegistration {
 }
 
 /// `GET /api/registration` — public: is new-account signup currently open?
-pub async fn get_registration(
-    State(state): State<AppState>,
-) -> AppResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({ "open": registration_open(&state).await? })))
+pub async fn get_registration(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(
+        serde_json::json!({ "open": registration_open(&state).await? }),
+    ))
 }
 
 /// `POST /api/admin/registration` — flip signup open/closed. Admin bearer token.
@@ -157,7 +157,10 @@ pub async fn set_registration(
         crate::db::bool_str(body.enabled),
     )
     .await?;
-    tracing::info!(open = body.enabled, "open_registration changed via admin API");
+    tracing::info!(
+        open = body.enabled,
+        "open_registration changed via admin API"
+    );
     Ok(Json(serde_json::json!({ "open": body.enabled })))
 }
 
@@ -332,8 +335,8 @@ fn request_token(headers: &HeaderMap, q: &TokenQuery) -> Option<String> {
 /// HMAC-SHA1 coturn credential for `username` (the `--use-auth-secret` scheme).
 fn mint_turn_credential(secret: &str, username: &str) -> String {
     // HMAC accepts a key of any length, so this never fails.
-    let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts keys of any length");
+    let mut mac =
+        Hmac::<Sha1>::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
     mac.update(username.as_bytes());
     base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
 }

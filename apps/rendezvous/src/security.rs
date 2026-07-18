@@ -34,7 +34,11 @@ use tower_governor::GovernorError;
 /// - `trusted_header = None` — trust **nothing** from headers; use the socket peer
 ///   only. A client-supplied `X-Forwarded-For` can no longer forge the IP used for
 ///   logging/fail2ban or dodge the rate limiter.
-pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>, trusted_header: Option<&str>) -> String {
+pub fn client_ip(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trusted_header: Option<&str>,
+) -> String {
     if let Some(name) = trusted_header {
         if let Some(ip) = headers
             .get(name)
@@ -46,7 +50,8 @@ pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>, trusted_header: 
             return ip.to_string();
         }
     }
-    peer.map(|p| p.ip().to_string()).unwrap_or_else(|| "-".into())
+    peer.map(|p| p.ip().to_string())
+        .unwrap_or_else(|| "-".into())
 }
 
 /// `tower_governor` key extractor that buckets by the trust-resolved client IP
