@@ -14,6 +14,12 @@ jobs:
   build-macos:
     name: build & test (macOS)
     runs-on: macos-14
+    # The runner ships CMake 4.x, which dropped compatibility with pre-3.5
+    # `cmake_minimum_required` — and libopus (bundled + built from source by
+    # audiopus_sys under the `audio` feature, pulled in by `--all-features`) still
+    # declares an old minimum. This restores the old behavior so the C build works.
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
         with:
