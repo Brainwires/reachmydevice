@@ -15,6 +15,19 @@ pub struct Config {
     /// Bearer token guarding the admin endpoints (e.g. flipping registration).
     /// `None` disables the admin API entirely (no token → no admin surface).
     pub admin_token: Option<String>,
+    /// Bearer token required to create the **first** account over HTTP. `None`
+    /// means the legacy behavior (first account bootstraps freely) — set this on
+    /// any internet-reachable deployment to prevent a first-account land-grab.
+    pub bootstrap_token: Option<String>,
+    /// Name of the forwarding header set by a *trusted* ingress (e.g.
+    /// `cf-connecting-ip` behind Cloudflare, `x-real-ip` behind nginx). When set,
+    /// the real client IP is taken **only** from this header; when `None`, only
+    /// the socket peer is trusted and client-supplied forwarding headers are
+    /// ignored (prevents IP-spoofed fail2ban bypass / rate-limit evasion).
+    pub trusted_proxy_header: Option<String>,
+    /// Lifetime for newly issued device bearer tokens, in seconds. `None` = no
+    /// expiry (legacy). Existing tokens are unaffected; this only stamps new ones.
+    pub token_ttl_secs: Option<u64>,
     /// TURN configuration (all-or-nothing). When set, `/api/ice` mints ephemeral
     /// coturn credentials so browser/host peers can relay through NAT.
     pub turn: Option<TurnConfig>,
@@ -59,6 +72,26 @@ impl Config {
         let admin_token = std::env::var("RMD_RZ_ADMIN_TOKEN")
             .ok()
             .filter(|s| !s.is_empty());
+        // Optional first-account bootstrap gate. Absent → legacy free bootstrap.
+        let bootstrap_token = std::env::var("RMD_RZ_BOOTSTRAP_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        // Trusted ingress forwarding header (lower-cased for case-insensitive
+        // lookup). Absent → don't trust any forwarding header (peer IP only).
+        let trusted_proxy_header = std::env::var("RMD_TRUSTED_PROXY_HEADER")
+            .ok()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty());
+        // Device-token lifetime. Default 90 days; `RMD_RZ_TOKEN_TTL=0` disables
+        // expiry (legacy no-expiry tokens).
+        let token_ttl_secs = match std::env::var("RMD_RZ_TOKEN_TTL")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            Some(0) => None,
+            Some(n) => Some(n),
+            None => Some(90 * 24 * 3600),
+        };
         // TURN relay is OFF by default. Enabling it is a deliberate operator
         // decision because relayed media flows through — and uses the bandwidth
         // of — this server. It requires `RMD_TURN_ENABLED=1` **and** a shared
@@ -79,10 +112,13 @@ impl Config {
                         .ok()
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(3478),
+                    // Short by default (10 min): a leaked/shared credential is
+                    // useful only briefly, and the broker mints fresh creds per
+                    // session. Raise via RMD_TURN_TTL if clients are long-lived.
                     ttl_secs: std::env::var("RMD_TURN_TTL")
                         .ok()
                         .and_then(|v| v.parse().ok())
-                        .unwrap_or(43_200),
+                        .unwrap_or(600),
                 }),
                 _ => {
                     tracing::warn!(
@@ -100,6 +136,9 @@ impl Config {
             database_url,
             allow_open_registration,
             admin_token,
+            bootstrap_token,
+            trusted_proxy_header,
+            token_ttl_secs,
             turn,
         }
     }

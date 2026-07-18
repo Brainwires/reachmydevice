@@ -23,6 +23,11 @@ use sqlx::SqlitePool;
 pub struct RegisterUser {
     username: String,
     password: String,
+    /// Bootstrap/provisioning token. Required to create the first account (and to
+    /// provision further accounts while signup is closed) when the server has
+    /// `RMD_RZ_BOOTSTRAP_TOKEN` set. Ignored when no bootstrap token is configured.
+    #[serde(default)]
+    bootstrap: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -76,8 +81,37 @@ pub async fn register_user(
         ));
     }
     let open = registration_open(&state).await?;
+    // Bootstrap/provisioning gate (H4 — first-account land-grab). When a bootstrap
+    // token is configured, the empty-table shortcut is disabled unless the caller
+    // presents the matching token; a valid token also authorizes operator
+    // provisioning while signup is closed. No token configured → legacy free
+    // bootstrap of the very first account.
+    let (effective_open, allow_bootstrap) = match state.config.bootstrap_token.as_deref() {
+        Some(expected) => {
+            let ok = body
+                .bootstrap
+                .as_deref()
+                .map(|t| ct_eq(t.as_bytes(), expected.as_bytes()))
+                .unwrap_or(false);
+            (open || ok, ok)
+        }
+        None => (open, true),
+    };
+    // Short-circuit before the expensive Argon2 hash when creation can't succeed
+    // (blocks register-spam from burning CPU on a closed instance).
+    if !effective_open && !allow_bootstrap {
+        return Err(AppError::RegistrationClosed);
+    }
     let hash = auth::hash_password(&body.password).map_err(AppError::Internal)?;
-    match crate::db::create_user_if_allowed(&state.pool, &body.username, &hash, open).await {
+    match crate::db::create_user_if_allowed(
+        &state.pool,
+        &body.username,
+        &hash,
+        effective_open,
+        allow_bootstrap,
+    )
+    .await
+    {
         // No row inserted → users exist and signup is closed.
         Ok(0) => Err(AppError::RegistrationClosed),
         Ok(_) => Ok(Json(serde_json::json!({ "status": "created" }))),
@@ -173,14 +207,28 @@ pub async fn register_device(
         }
     };
 
-    // Issue a fresh bearer token (store only its hash).
-    let token = auth::generate_token();
-    sqlx::query("INSERT INTO device_tokens (device_pk, token_hash, created_at) VALUES (?, ?, ?)")
+    // Rotate on re-registration: invalidate the device's prior tokens so they
+    // can't accumulate or linger after a leak (M2). Then issue a fresh token
+    // (store only its hash) with an optional expiry from config.
+    sqlx::query("DELETE FROM device_tokens WHERE device_pk = ?")
         .bind(device_pk)
-        .bind(auth::hash_token(&token))
-        .bind(now_unix())
         .execute(&state.pool)
         .await?;
+    let token = auth::generate_token();
+    let expires_at = state
+        .config
+        .token_ttl_secs
+        .map(|ttl| now_unix() + ttl as i64);
+    sqlx::query(
+        "INSERT INTO device_tokens (device_pk, token_hash, created_at, expires_at) \
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(device_pk)
+    .bind(auth::hash_token(&token))
+    .bind(now_unix())
+    .bind(expires_at)
+    .execute(&state.pool)
+    .await?;
 
     Ok(Json(DeviceToken {
         token,
@@ -258,55 +306,149 @@ pub async fn rename_device(
 // --- ICE / TURN ------------------------------------------------------------
 
 #[derive(Deserialize)]
-pub struct IceQuery {
-    token: String,
+pub struct TokenQuery {
+    /// Deprecated fallback: prefer `Authorization: Bearer <token>` (keeps tokens
+    /// out of URLs/logs — H3). Still accepted for existing clients.
+    #[serde(default)]
+    token: Option<String>,
 }
 
-/// `GET /api/ice?token=…` — the ICE servers a peer should use for this session.
+/// Extract a bearer token from `Authorization: Bearer <token>`.
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The device token for a request: `Authorization: Bearer` (preferred) or the
+/// deprecated `?token=` query fallback.
+fn request_token(headers: &HeaderMap, q: &TokenQuery) -> Option<String> {
+    bearer_token(headers).or_else(|| q.token.clone())
+}
+
+/// HMAC-SHA1 coturn credential for `username` (the `--use-auth-secret` scheme).
+fn mint_turn_credential(secret: &str, username: &str) -> String {
+    // HMAC accepts a key of any length, so this never fails.
+    let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes())
+        .expect("HMAC accepts keys of any length");
+    mac.update(username.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+}
+
+/// The current ephemeral TURN credential for `user_id`, minting a fresh one only
+/// when the cached credential is missing or near expiry. The username is
+/// **user-bound** (`<expiry>:<user_id>`, M1) and reuse caps credential churn (M3).
+fn turn_creds_for(
+    state: &AppState,
+    user_id: i64,
+    turn: &crate::config::TurnConfig,
+) -> (String, String) {
+    let now = now_unix();
+    {
+        let cache = state.ice_cache.lock().unwrap();
+        if let Some((u, c, exp)) = cache.get(&user_id) {
+            if *exp > now + 60 {
+                return (u.clone(), c.clone());
+            }
+        }
+    }
+    let expiry = now + turn.ttl_secs as i64;
+    let username = format!("{expiry}:{user_id}");
+    let credential = mint_turn_credential(&turn.secret, &username);
+    let mut cache = state.ice_cache.lock().unwrap();
+    cache.retain(|_, (_, _, e)| *e > now);
+    cache.insert(user_id, (username.clone(), credential.clone(), expiry));
+    (username, credential)
+}
+
+/// `GET /api/ice` — the ICE servers a peer should use for this session.
 ///
-/// When TURN is configured, returns a `stun:` entry plus a `turn:` entry with
-/// **ephemeral** coturn `--use-auth-secret` credentials: `username` is
-/// `<expiry-unix>:rmd` and `credential` is `base64(HMAC-SHA1(secret, username))`,
+/// Auth: `Authorization: Bearer <device-token>` (preferred) or `?token=`
+/// (deprecated). When TURN is configured, returns a `stun:` entry plus a `turn:`
+/// entry with **ephemeral** coturn `--use-auth-secret` credentials: `username` is
+/// `<expiry-unix>:<user_id>` and `credential` is `base64(HMAC-SHA1(secret, username))`,
 /// valid for `ttl_secs`. Otherwise falls back to a public STUN so peers can at
 /// least gather server-reflexive candidates. Requires a valid device token, so
 /// only registered devices can obtain relay credentials.
 pub async fn ice_servers(
     State(state): State<AppState>,
-    Query(q): Query<IceQuery>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
-    // Authenticate the device (this also refreshes its `last_seen`).
-    if device_id_for_token(&state.pool, &q.token).await?.is_none() {
-        return Err(AppError::Unauthorized);
-    }
+    let token = request_token(&headers, &q).ok_or(AppError::Unauthorized)?;
+    // Authenticate the device and resolve its owning user (also refreshes
+    // `last_seen`). Only registered devices can even reach the relay gate.
+    let user_id = match user_id_for_token(&state.pool, &token).await? {
+        Some(id) => id,
+        None => return Err(AppError::Unauthorized),
+    };
+
+    // Ask the relay-entitlement policy whether this user may use TURN. The
+    // open-source default (`AllowAll`) always allows; a paid build gates on an
+    // active subscription + fair-use. A denial is *not* an error — we still hand
+    // back STUN so the session can go peer-to-peer — but we annotate the reason
+    // so the console can prompt the user to subscribe.
+    let decision = state.entitlement.allow_relay(user_id).await;
 
     let mut servers: Vec<serde_json::Value> = Vec::new();
+    let mut relay_denied: Option<&'static str> = None;
     match &state.config.turn {
         Some(turn) => {
-            let expiry = now_unix() as u64 + turn.ttl_secs;
-            let username = format!("{expiry}:rmd");
-            // HMAC accepts a key of any length, so this never fails.
-            let mut mac = Hmac::<Sha1>::new_from_slice(turn.secret.as_bytes())
-                .expect("HMAC accepts keys of any length");
-            mac.update(username.as_bytes());
-            let credential = base64::engine::general_purpose::STANDARD
-                .encode(mac.finalize().into_bytes());
             let (host, port) = (&turn.host, turn.port);
+            // The coturn STUN endpoint is always safe to hand out (no bandwidth
+            // cost); only the relaying `turn:` creds are gated.
             servers.push(serde_json::json!({ "urls": [format!("stun:{host}:{port}")] }));
-            servers.push(serde_json::json!({
-                "urls": [
-                    format!("turn:{host}:{port}?transport=udp"),
-                    format!("turn:{host}:{port}?transport=tcp"),
-                ],
-                "username": username,
-                "credential": credential,
-            }));
+            if decision.allowed() {
+                let (username, credential) = turn_creds_for(&state, user_id, turn);
+                servers.push(serde_json::json!({
+                    "urls": [
+                        format!("turn:{host}:{port}?transport=udp"),
+                        format!("turn:{host}:{port}?transport=tcp"),
+                    ],
+                    "username": username,
+                    "credential": credential,
+                }));
+            } else {
+                relay_denied = decision.reason();
+            }
         }
         None => {
             servers.push(serde_json::json!({ "urls": ["stun:stun.l.google.com:19302"] }));
         }
     }
 
-    Ok(Json(serde_json::json!({ "ice_servers": servers })))
+    let mut resp = serde_json::json!({ "ice_servers": servers });
+    // 402-style hint (kept in the 200 body so STUN-only clients still work):
+    // present only when TURN is configured but withheld for this user.
+    if let Some(reason) = relay_denied {
+        resp["relay"] = serde_json::json!({ "allowed": false, "reason": reason });
+    }
+    Ok(Json(resp))
+}
+
+#[derive(Serialize)]
+pub struct WsTicketResp {
+    ticket: String,
+}
+
+/// `GET /api/ws-ticket` — exchange a device bearer token (`Authorization: Bearer`,
+/// or the deprecated `?token=`) for a short-lived, single-use ticket. The client
+/// then opens `GET /ws?ticket=<ticket>` so the long-lived token never appears in a
+/// URL / proxy log (H3).
+pub async fn ws_ticket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> AppResult<Json<WsTicketResp>> {
+    let token = request_token(&headers, &q).ok_or(AppError::Unauthorized)?;
+    let device_id = device_id_for_token(&state.pool, &token)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    let ticket = state.ws_tickets.issue(&device_id);
+    Ok(Json(WsTicketResp { ticket }))
 }
 
 // --- auth helpers ----------------------------------------------------------
@@ -322,15 +464,30 @@ async fn authenticate_user(state: &AppState, username: &str, password: &str) -> 
             .bind(username)
             .fetch_optional(&state.pool)
             .await?;
-    match row {
-        Some((id, hash)) if auth::verify_password(password, &hash) => {
-            state.throttle.record_success(username);
-            Ok(id)
-        }
-        _ => {
-            state.throttle.record_failure(username);
-            Err(AppError::Unauthorized)
-        }
+    let Some((id, hash)) = row else {
+        state.throttle.record_failure(username);
+        return Err(AppError::Unauthorized);
+    };
+    // Argon2 is CPU + memory heavy (64 MiB / 3 passes). Cap concurrency with a
+    // semaphore and run it on the blocking pool so a flood of auth'd requests
+    // can't OOM the box or stall the async runtime (H5).
+    let _permit = state
+        .argon2_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| AppError::Unauthorized)?;
+    let pw = password.to_string();
+    let ok = tokio::task::spawn_blocking(move || auth::verify_password(&pw, &hash))
+        .await
+        .unwrap_or(false);
+    drop(_permit);
+    if ok {
+        state.throttle.record_success(username);
+        Ok(id)
+    } else {
+        state.throttle.record_failure(username);
+        Err(AppError::Unauthorized)
     }
 }
 
@@ -389,6 +546,34 @@ pub async fn touch_last_seen(pool: &SqlitePool, device_id: &str) {
         .bind(device_id)
         .execute(pool)
         .await;
+}
+
+/// Resolve a device bearer token → the owning account's `user_id`, if the token
+/// is valid and unexpired. Also stamps the device's `last_seen`. Used by the ICE
+/// endpoint, where the relay-entitlement policy is keyed by user.
+pub async fn user_id_for_token(pool: &SqlitePool, token: &str) -> AppResult<Option<i64>> {
+    let token_hash = auth::hash_token(token);
+    let now = now_unix();
+    let row: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT d.user_id, d.id \
+         FROM device_tokens t JOIN devices d ON d.id = t.device_pk \
+         WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)",
+    )
+    .bind(&token_hash)
+    .bind(now)
+    .fetch_optional(pool)
+    .await?;
+    if let Some((user_id, device_pk)) = row {
+        sqlx::query("UPDATE devices SET last_seen = ? WHERE id = ?")
+            .bind(now)
+            .bind(device_pk)
+            .execute(pool)
+            .await
+            .ok();
+        Ok(Some(user_id))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Resolve a device bearer token → its `device_id`, if valid and unexpired.

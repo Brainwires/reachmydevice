@@ -1,4 +1,4 @@
-//! Security-event logging for external hardening (e.g. fail2ban).
+//! Security-event logging + trusted-proxy client-IP resolution.
 //!
 //! Emits a stable, greppable log line on every authentication failure so an
 //! operator can ban abusive source IPs at the firewall. This complements — it
@@ -15,38 +15,78 @@
 //! <ts>  WARN rmd_security: auth-fail ip=<client-ip> path=<path> method=<method>
 //! ```
 
-use axum::extract::{ConnectInfo, Request};
+use crate::config::Config;
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use tower_governor::key_extractor::KeyExtractor;
+use tower_governor::GovernorError;
 
-/// Best-effort real client IP. Behind Cloudflare/Caddy the socket peer is the
-/// proxy, so prefer the forwarded headers (set by the trusted reverse proxy);
-/// fall back to the connection's peer address.
-pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
-    let first_header = |name: &str| {
-        headers
+/// Real client IP, resolved under an explicit trust model (fixes the
+/// spoofable-`X-Forwarded-For` problem):
+///
+/// - `trusted_header = Some(name)` — the deployment sits behind a trusted ingress
+///   (Cloudflare tunnel / nginx) that overwrites `name` (e.g. `cf-connecting-ip`)
+///   with the authentic client IP. Use it; fall back to the socket peer if absent.
+/// - `trusted_header = None` — trust **nothing** from headers; use the socket peer
+///   only. A client-supplied `X-Forwarded-For` can no longer forge the IP used for
+///   logging/fail2ban or dodge the rate limiter.
+pub fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>, trusted_header: Option<&str>) -> String {
+    if let Some(name) = trusted_header {
+        if let Some(ip) = headers
             .get(name)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.split(',').next())
-            .map(|s| s.trim().to_string())
+            .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-    };
-    first_header("cf-connecting-ip")
-        .or_else(|| first_header("x-forwarded-for"))
-        .or_else(|| first_header("x-real-ip"))
-        .unwrap_or_else(|| peer.map(|p| p.ip().to_string()).unwrap_or_else(|| "-".into()))
+        {
+            return ip.to_string();
+        }
+    }
+    peer.map(|p| p.ip().to_string()).unwrap_or_else(|| "-".into())
+}
+
+/// `tower_governor` key extractor that buckets by the trust-resolved client IP
+/// (see [`client_ip`]). Without this, the default peer-IP extractor buckets every
+/// request behind the ingress under one key — a single global bucket that both
+/// DoSes legitimate users and gives an attacker no real per-client limit.
+#[derive(Clone)]
+pub struct TrustedIpKeyExtractor {
+    /// Lower-cased trusted forwarding header name, or `None` for peer-IP only.
+    pub trusted_header: Option<Arc<str>>,
+}
+
+impl KeyExtractor for TrustedIpKeyExtractor {
+    type Key = String;
+
+    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
+        let peer = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|c| c.0);
+        Ok(client_ip(
+            req.headers(),
+            peer,
+            self.trusted_header.as_deref(),
+        ))
+    }
 }
 
 /// Middleware: log a `rmd_security` warning for any `401 Unauthorized` response
 /// (bad device token on `/ws` or `/api/ice`, bad HTTP Basic on the account API).
-pub async fn log_auth_failures(req: Request, next: Next) -> Response {
+pub async fn log_auth_failures(
+    State(config): State<Arc<Config>>,
+    req: Request,
+    next: Next,
+) -> Response {
     let peer = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0);
-    let ip = client_ip(req.headers(), peer);
+    let ip = client_ip(req.headers(), peer, config.trusted_proxy_header.as_deref());
     let path = req.uri().path().to_string();
     let method = req.method().clone();
 

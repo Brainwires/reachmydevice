@@ -52,6 +52,49 @@ pub fn hash_token(token: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// How long a WebSocket ticket is valid — just long enough to open the socket.
+const TICKET_TTL: Duration = Duration::from_secs(30);
+
+/// Short-lived, single-use tickets that authorize a `/ws` upgrade without putting
+/// a long-lived bearer token in the URL (which leaks into proxy/access logs and
+/// `Referer`). A client first proves its bearer token to `GET /api/ws-ticket`,
+/// then opens `GET /ws?ticket=<one-time>`; the ticket is consumed on redeem.
+#[derive(Default)]
+pub struct TicketStore {
+    inner: Mutex<HashMap<String, (String, Instant)>>, // ticket → (device_id, expiry)
+}
+
+impl TicketStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Mint a one-time ticket for `device_id`, valid for [`TICKET_TTL`].
+    pub fn issue(&self, device_id: &str) -> String {
+        let ticket = generate_token();
+        let mut m = self.inner.lock().unwrap();
+        let now = Instant::now();
+        // Opportunistic cleanup so the map can't grow without bound.
+        m.retain(|_, (_, exp)| *exp > now);
+        m.insert(ticket.clone(), (device_id.to_string(), now + TICKET_TTL));
+        ticket
+    }
+
+    /// Redeem a ticket, returning its `device_id` if valid and unexpired. The
+    /// ticket is removed (single use) whether or not it had expired.
+    pub fn redeem(&self, ticket: &str) -> Option<String> {
+        let mut m = self.inner.lock().unwrap();
+        match m.remove(ticket) {
+            Some((device_id, exp)) if exp > Instant::now() => Some(device_id),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -344,6 +344,14 @@ where
             }
             transport.feed_signal(msg);
         }
+        // A different viewer device just took over. Tear down the current peer
+        // connection and rebuild with a fresh offer aimed at the newcomer, rather
+        // than letting it answer the previous viewer's stale offer (which stalls
+        // the first attempt until the old PC times out). See `RendezvousClient`.
+        if signal.take_peer_switched() {
+            tracing::info!("viewer switched device; rebuilding session with a fresh offer");
+            transport.request_ice_restart();
+        }
         while let Ok(ev) = file_ev_rx.try_recv() {
             log_file_event(ev);
         }

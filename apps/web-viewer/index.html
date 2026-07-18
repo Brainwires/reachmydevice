@@ -20,6 +20,7 @@
 <link data-trunk rel="copy-file" href="assets/icon-192.png" />
 <link data-trunk rel="copy-file" href="assets/icon-512.png" />
 <link data-trunk rel="copy-file" href="assets/manifest.webmanifest" />
+<link data-trunk rel="copy-file" href="assets/ext.js" />
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -49,21 +50,38 @@
     /* Keep the toolbar clear of the notch/status bar in fullscreen/PWA mode. */
     padding:calc(8px + env(safe-area-inset-top,0px)) calc(12px + env(safe-area-inset-right,0px))
       8px calc(12px + env(safe-area-inset-left,0px));
-    background:rgba(15,17,21,.72);backdrop-filter:blur(6px);font-size:13px;z-index:10;
-    transition:opacity .25s;} #bar.idle:not(:hover){opacity:.2;}
+    background:rgba(15,17,21,.72);backdrop-filter:blur(6px);font-size:13px;z-index:10;}
+  /* The header never fades: it stays solid so the zoomed video is cleanly cut off at
+     the safe area below it and never bleeds under the notch / status bar. */
   /* Connection state as a colour dot (replaces the old status text): green =
      connected/ready, amber (pulsing) = connecting/reconnecting, red = error. */
-  #barStatus{flex:0 0 auto;width:10px;height:10px;border-radius:50%;background:var(--muted);
-    transition:background .2s;}
-  #barStatus.ok{background:var(--ok);}
-  #barStatus.warn{background:#e0a54a;animation:pulse 1.2s ease-in-out infinite;}
-  #barStatus.err{background:var(--err);}
-  @keyframes pulse{50%{opacity:.3;}}
+  /* Connection status: a state-tinted pill with a plain-language label + a dot.
+     The dot is sized with aspect-ratio (width only, height derived), so it stays a
+     perfect circle no matter how the surrounding flex row lays out — it can never be
+     squished into an oval, which the old fixed width+height span could be on iOS. */
+  #barStatus{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;
+    height:24px;padding:0 10px;border-radius:999px;white-space:nowrap;
+    font-size:12px;font-weight:600;line-height:1;letter-spacing:.01em;
+    color:var(--muted);border:1px solid var(--border);background:transparent;
+    transition:color .2s,border-color .2s,background .2s;}
+  #barStatus .status-dot{flex:none;width:7px;aspect-ratio:1;border-radius:50%;
+    background:currentColor;}
+  #barStatus .status-label{color:inherit;}
+  #barStatus.ok  {color:var(--ok);  border-color:rgba(57,217,138,.34); background:rgba(57,217,138,.12);}
+  #barStatus.warn{color:#e6b25e;    border-color:rgba(224,165,74,.36); background:rgba(224,165,74,.12);}
+  #barStatus.auth{color:#7aa7ff;    border-color:rgba(79,140,255,.40); background:rgba(79,140,255,.14);}
+  #barStatus.err {color:var(--err); border-color:rgba(255,92,92,.38);  background:rgba(255,92,92,.12);}
+  #barStatus.warn .status-dot,#barStatus.auth .status-dot{animation:pulse 1.2s ease-in-out infinite;}
+  @keyframes pulse{50%{opacity:.35;}}
+  /* Narrow phones: drop the word to save the row, keep the (still round) dot. */
+  @media (max-width:430px){
+    #barStatus{padding:0;border:0;background:transparent;height:auto;}
+    #barStatus .status-label{display:none;}
+    #barStatus .status-dot{width:10px;}}
   #bar .sp{flex:1;}
-  /* Action bar: each control counter-rotates to stay upright as the view rotates,
-     and at 180° the whole bar hops to the opposite (bottom) edge so — from the
-     user's flipped perspective — the bar is still "on top" and the keyboard "below".
-     The brand hides when rotated to keep the bar tidy. */
+  /* The action bar is a fixed top toolbar in EVERY orientation — only the video +
+     cursor + gestures + keyboard rotate, the app frame does not. (The .brot*/.at-bottom
+     rules below are legacy — no longer applied by applyRot — kept inert for now.) */
   .rotc{transition:transform .2s;}
   #bar.brot1 .rotc{transform:rotate(90deg);}
   #bar.brot2 .rotc{transform:rotate(180deg);}
@@ -159,8 +177,9 @@
      header's bottom instead of under it. */
   #screen.rot1,#screen.rot2,#screen.rot3{position:fixed;top:calc(50% + var(--hdr) / 2);left:50%;}
   #screen.rot1,#screen.rot3{max-width:calc(100vh - var(--hdr));max-height:100vw;}
-  /* 180°: header is at the bottom now, so reserve the bottom (+top notch) instead. */
-  #screen.rot2{max-height:var(--band-h);top:var(--band-c);}
+  /* 180°: the header stays at the top, so the flipped-portrait video fills the same
+     area as portrait (below the header), just rotated 180° in place. */
+  #screen.rot2{max-width:100vw;max-height:calc(100vh - var(--hdr));}
   #screen.rot1{transform:translate(-50%,-50%) rotate(90deg);}
   #screen.rot2{transform:translate(-50%,-50%) rotate(180deg);}
   #screen.rot3{transform:translate(-50%,-50%) rotate(-90deg);}
@@ -171,6 +190,54 @@
     border-radius:50%;margin:0 auto 14px;animation:spin 1s linear infinite;}
   @keyframes spin{to{transform:rotate(360deg);}}
   #overlay .msg{font-size:15px;} #overlay .hint2{color:var(--muted);font-size:12.5px;margin-top:8px;}
+  /* Non-blocking password modal. High z-index so it sits above the video + keyboard. */
+  #pwmodal{position:fixed;inset:0;z-index:90;display:grid;place-items:center;background:rgba(0,0,0,.55);
+    padding:calc(16px + env(safe-area-inset-top,0)) 16px calc(16px + env(safe-area-inset-bottom,0)) 16px;}
+  /* Hide with visibility (NOT display:none, NOT opacity). display:none→grid + focus()
+     the same frame drops the caret/keyboard on iOS (input not laid out yet); opacity:0
+     keeps it a "rendered" password field, which makes iOS see TWO password fields on
+     the sign-in page and offer to SET a password instead of autofilling the saved one.
+     visibility:hidden keeps the box laid out (so focus() lands when shown) yet the
+     field is non-focusable, unpainted, click-through, and invisible to autofill while
+     hidden — so it can't hijack sign-in or auto-focus on load. */
+  #pwmodal.hidden{display:grid!important;visibility:hidden;}
+  .pwbox{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;
+    width:min(92vw,340px);box-shadow:0 12px 44px rgba(0,0,0,.55);}
+  .pwtitle{font-weight:600;margin-bottom:12px;}
+  /* Masked as a password visually, but it is a type=text field so the browser
+     password manager ignores it entirely — no Strong-Password suggestion, no
+     save prompt, no autofill. Critical here: the connection password must NOT be
+     cached, or the manager would overwrite the (separate) web-app login password. */
+  #pwinput{width:100%;margin-bottom:14px;-webkit-text-security:disc;text-security:disc;}
+  .pwrow{display:flex;gap:10px;justify-content:flex-end;}
+  /* Exit-confirm + Settings dialogs (no inputs → safe to hide with display:none). */
+  .dlg{position:fixed;inset:0;z-index:95;display:grid;place-items:center;background:rgba(0,0,0,.55);
+    padding:calc(16px + env(safe-area-inset-top,0)) 16px calc(16px + env(safe-area-inset-bottom,0)) 16px;}
+  .dlgbox{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:22px;
+    width:min(92vw,380px);box-shadow:0 12px 44px rgba(0,0,0,.55);}
+  .dlgtitle{font-weight:700;font-size:16px;margin:0 0 6px;}
+  .dlgsub{color:var(--muted);font-size:13.5px;line-height:1.45;margin:0;}
+  .dlgrow{display:flex;gap:10px;justify-content:flex-end;margin-top:20px;}
+  .chkrow{display:flex;align-items:center;gap:10px;margin-top:18px;font-size:13.5px;cursor:pointer;user-select:none;}
+  .chkrow input{width:18px;height:18px;flex:0 0 auto;accent-color:var(--accent);cursor:pointer;}
+  /* Settings rows: label/description on the left, control on the right. */
+  .setrow{display:flex;align-items:center;gap:16px;padding:15px 0;border-top:1px solid var(--border);}
+  .setrow:first-of-type{border-top:0;padding-top:6px;}
+  .setrow .setlabel{flex:1;min-width:0;}
+  .setrow .setname{font-weight:600;font-size:14px;}
+  .setrow .setdesc{color:var(--muted);font-size:12px;margin-top:3px;line-height:1.35;}
+  .seg{display:inline-flex;flex:0 0 auto;background:var(--panel2);border:1px solid var(--border);
+    border-radius:9px;padding:2px;}
+  .seg button{border:0;background:transparent;color:var(--muted);font-size:12.5px;font-weight:600;
+    padding:6px 11px;border-radius:7px;cursor:pointer;}
+  .seg button.on{background:var(--accent);color:#fff;}
+  .switch{position:relative;width:46px;height:27px;flex:0 0 auto;cursor:pointer;}
+  .switch input{position:absolute;inset:0;opacity:0;margin:0;cursor:pointer;}
+  .switch .track{position:absolute;inset:0;background:var(--border);border-radius:999px;transition:background .16s;}
+  .switch .thumb{position:absolute;top:3px;left:3px;width:21px;height:21px;border-radius:50%;background:#fff;
+    transition:transform .16s;box-shadow:0 1px 2px rgba(0,0,0,.4);}
+  .switch input:checked~.track{background:var(--accent);}
+  .switch input:checked~.thumb{transform:translateX(19px);}
   /* Full custom on-screen keyboard. We render every key (each sends HID via the
      WASM layer), so — unlike the OS keyboard — it can rotate WITH the view. The
      wrap covers the screen (dims swapped for 90/270, like the video) and rotates
@@ -189,7 +256,7 @@
     top:calc(50% + var(--hdr) / 2);}
   /* 180°: header moved to the bottom, keyboard lands at the portrait TOP (user's
      "bottom"). Confine it to the band below the notch and above the bottom header. */
-  #kb-wrap.rot2{height:var(--band-h);top:var(--band-c);}
+  #kb-wrap.rot2{height:calc(100vh - var(--hdr));top:calc(50% + var(--hdr) / 2);}
   /* A small symmetric long-axis margin so the 12-key row (which fills 100%) gets a
      little breathing room instead of butting against the ends. */
   #kb-wrap.rot1 #kb,#kb-wrap.rot3 #kb{padding-left:10px;padding-right:10px;}
@@ -254,16 +321,18 @@
 <body>
   <div id="bar" class="idle hidden">
     <div class="brand"><div class="logo">RMD</div><strong>ReachMyDevice</strong></div>
-    <span id="barStatus"></span><div class="sp"></div>
+    <span id="barStatus" role="status" aria-live="polite"><span class="status-dot"></span><span class="status-label">Idle</span></span><div class="sp"></div>
     <button id="kbd-toggle" class="iconbtn ghost rotc" title="Keyboard" style="display:none">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M10 13h4"/><path d="M8 16.5h8"/></svg>
     </button>
     <button id="rotate" class="iconbtn ghost rotc" title="Rotate view 90°" style="display:none">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
     </button>
-    <button id="drag-mode" class="iconbtn ghost rotc" title="Drag-select trigger" style="display:none;font-size:11px;font-weight:700;letter-spacing:.3px"></button>
-    <a href="#" id="disconnect" class="iconbtn ghost rotc" title="Back to devices" aria-label="Back to devices">
-      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+    <button id="settings" class="iconbtn ghost rotc" title="Settings" aria-label="Settings" style="display:none">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+    <a href="#" id="disconnect" class="iconbtn ghost rotc" title="Leave session" aria-label="Leave session">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
     </a>
   </div>
 
@@ -277,6 +346,40 @@
   --><div id="cursor" class="hidden" aria-hidden="true"><svg width="17" height="17" viewBox="0 0 22 22"><path d="M2 1 L2 17 L6.1 13.3 L8.9 20 L11.7 18.8 L8.9 12.3 L14 12.3 Z" fill="#fff" stroke="#000" stroke-width="1.3" stroke-linejoin="round"/></svg></div></div>
   <div id="overlay" class="hidden"><div class="box"><div class="spin"></div>
     <div class="msg" id="ovMsg">Connecting…</div><div class="hint2" id="ovHint"></div></div></div>
+
+  <!-- Non-blocking connection-password modal (a synchronous prompt() would freeze
+       the event loop and kill the live WebRTC connection mid-auth). Wired in WASM. -->
+  <div id="pwmodal" class="hidden"><div class="pwbox">
+    <div class="pwtitle">Connection password</div>
+    <input id="pwinput" type="text" inputmode="text" autocomplete="off" autofocus
+           autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Password"
+           aria-label="Connection password" data-1p-ignore data-lpignore="true">
+    <div class="pwrow"><button id="pwcancel" class="ghost">Cancel</button><button id="pwok">Connect</button></div>
+  </div></div>
+
+  <!-- Leave-session confirmation (skippable via "Don't ask again" / Settings). -->
+  <div id="exitdlg" class="dlg hidden"><div class="dlgbox">
+    <div class="dlgtitle">Leave this session?</div>
+    <p class="dlgsub">You'll disconnect and return to your devices.</p>
+    <label class="chkrow"><input type="checkbox" id="exitremember"> Don't ask again</label>
+    <div class="dlgrow"><button id="exitcancel" class="ghost">Stay</button><button id="exitconfirm">Leave</button></div>
+  </div></div>
+
+  <!-- Settings. -->
+  <div id="setdlg" class="dlg hidden"><div class="dlgbox">
+    <div class="dlgtitle" style="margin-bottom:14px">Settings</div>
+    <div class="setrow">
+      <div class="setlabel"><div class="setname">Drag-select trigger</div>
+        <div class="setdesc">How a text-selection drag is armed on touch.</div></div>
+      <div class="seg" id="setdrag"><button data-m="longpress">Long-press</button><button data-m="doubletap">Double-tap</button></div>
+    </div>
+    <div class="setrow">
+      <div class="setlabel"><div class="setname">Confirm before leaving</div>
+        <div class="setdesc">Ask for confirmation when you leave a session.</div></div>
+      <label class="switch"><input type="checkbox" id="setexitconfirm"><span class="track"></span><span class="thumb"></span></label>
+    </div>
+    <div class="dlgrow"><button id="setclose">Done</button></div>
+  </div></div>
 
   <!-- Full custom on-screen keyboard (built by JS below, wired to HID in WASM).
        Rendered by us so it rotates with the view. -->
@@ -300,13 +403,19 @@
     // Map the WASM status text → a colour class for the header dot (and keep the full
     // text on the overlay + as the dot's tooltip). Order matters: "reconnecting"
     // before "disconnect", "connected" before the error bucket.
-    const statusCls=t=>{t=t.toLowerCase();
-      if(/reconnect|connecting|checking|wait/.test(t))return'warn';
-      if(/connected|ready/.test(t))return'ok';
-      if(/error|reject|disconnect|required|failed/.test(t))return'err';
-      return'';};
+    // WASM status text → [chip class, short label]. Order = priority; word
+    // boundaries keep "disconnected" out of the "connected" bucket. The full text
+    // stays on the overlay + as the chip's tooltip.
+    const statusOf=t=>{t=(t||'').toLowerCase();
+      if(/reconnect|connecting|checking|wait/.test(t)) return['warn','Linking…'];
+      if(/required/.test(t))                            return['auth','Password'];
+      if(/\b(connected|ready|live)\b/.test(t))          return['ok','Live'];
+      if(/\b(error|rejected?|disconnected?|failed)\b/.test(t)) return['err','Offline'];
+      return['','Idle'];};
     new MutationObserver(()=>{const t=status.textContent||''; $('ovMsg').textContent=t;
-      const d=$('barStatus'); d.className=statusCls(t); d.title=t;})
+      const d=$('barStatus'); const [cls,label]=statusOf(t);
+      d.className=cls; d.title=t||'Idle';
+      const L=d.querySelector('.status-label'); if(L)L.textContent=label;})
       .observe(status,{childList:true,characterData:true,subtree:true});
     const vid=$('screen');
     vid.addEventListener('playing',()=>$('overlay').classList.add('hidden'));
@@ -338,30 +447,36 @@
     };
     const applyRot=()=>{
       for(const el of [vid,kbWrap]){ el.classList.remove('rot1','rot2','rot3'); if(rot) el.classList.add('rot'+rot); }
-      // Action bar: rotate the controls upright as the view rotates; at 180° also
-      // move the bar to the bottom edge so it stays "on top" for the flipped user
-      // (the video + keyboard reflow to reserve the bottom instead — see CSS).
-      const bar=$('bar');
-      bar.classList.remove('brot1','brot2','brot3','at-bottom');
-      if(rot) bar.classList.add('brot'+rot);
-      if(rot===2) bar.classList.add('at-bottom');
+      // The app frame (header) stays put — a normal top bar in every orientation.
+      // Only the video, cursor, gestures and keyboard rotate. (We clear any legacy
+      // rotate/move classes in case an older build left them on.)
+      $('bar').classList.remove('brot1','brot2','brot3','at-bottom');
       vid.dataset.rot=rot;
       syncKbToVideo();
     };
     rotBtn.onclick=()=>{ rot=(rot+1)%4; applyRot(); };
     applyRot();
 
-    // Drag-select trigger, user-selectable and persisted. The WASM input handler
-    // reads `data-dragmode` off the video (like data-rot) to decide how a text-
-    // selection drag is armed: a long-press, or a double-tap-and-hold. Default
-    // long-press. Entirely client-side — the host just receives button+move events.
-    const DRAG_MODES=['longpress','doubletap'], DRAG_LABEL={longpress:'LP',doubletap:'2T'},
-      DRAG_TITLE={longpress:'Drag-select: long-press then drag',doubletap:'Drag-select: double-tap-hold then drag'};
-    const dragBtn=$('drag-mode'); dragBtn.style.display='';
+    // Drag-select trigger, user-selectable and persisted (now lives in Settings).
+    // The WASM input handler reads `data-dragmode` off the video (like data-rot) to
+    // decide how a text-selection drag is armed: a long-press, or a double-tap-and-
+    // hold. Default long-press. Entirely client-side.
+    const DRAG_MODES=['longpress','doubletap'];
     let dragMode=localStorage.getItem('rmd_dragmode'); if(!DRAG_MODES.includes(dragMode)) dragMode='longpress';
-    const applyDragMode=()=>{ vid.dataset.dragmode=dragMode; dragBtn.textContent=DRAG_LABEL[dragMode]; dragBtn.title=DRAG_TITLE[dragMode]; };
-    dragBtn.onclick=()=>{ dragMode=DRAG_MODES[(DRAG_MODES.indexOf(dragMode)+1)%DRAG_MODES.length]; localStorage.setItem('rmd_dragmode',dragMode); applyDragMode(); };
+    const applyDragMode=()=>{ vid.dataset.dragmode=dragMode; };
     applyDragMode();
+    // ---- Settings modal (drag-select trigger + leave-confirmation preference) ----
+    const EXIT_KEY='rmd_exit_confirm';               // '0' = skip the confirm; else ask
+    const askOnExit=()=>localStorage.getItem(EXIT_KEY)!=='0';
+    const closeDlg=id=>$(id).classList.add('hidden');
+    const setBtn=$('settings'); setBtn.style.display='';
+    const setDrag=$('setdrag'), dragBtns=[...setDrag.querySelectorAll('button')];
+    const paintDrag=()=>dragBtns.forEach(b=>b.classList.toggle('on', b.dataset.m===dragMode));
+    dragBtns.forEach(b=>b.onclick=()=>{ dragMode=b.dataset.m; localStorage.setItem('rmd_dragmode',dragMode); applyDragMode(); paintDrag(); });
+    setBtn.onclick=()=>{ paintDrag(); $('setexitconfirm').checked=askOnExit(); $('setdlg').classList.remove('hidden'); };
+    $('setexitconfirm').onchange=e=>localStorage.setItem(EXIT_KEY, e.target.checked?'1':'0');
+    $('setclose').onclick=()=>closeDlg('setdlg');
+    $('setdlg').onclick=e=>{ if(e.target===$('setdlg')) closeDlg('setdlg'); };
     // Keep the keyboard matched as the video's rendered size changes (stream
     // resolution, viewport/orientation, address-bar show/hide).
     if(window.ResizeObserver) new ResizeObserver(syncKbToVideo).observe(vid);
@@ -413,8 +528,8 @@
     };
     const BOTTOM=[{l:'123',layer:1,w:4},
       {l:'⌃',mod:'ctrl',w:2},{l:'⌥',mod:'alt',w:2},{l:'⌘',mod:'super',w:2},
-      {l:'⎋',code:'Escape',w:2},{l:'space',code:'Space',w:8,wide:1},
-      {l:'⏎',code:'Enter',w:3},{l:'C-A-D',combo:'ctrl-alt-del',w:3}];
+      {l:'⎋',code:'Escape',w:2},{l:'space',code:'Space',w:6,wide:1},{l:'🎤',mic:1,w:2},
+      {l:'⏎',code:'Enter',w:3},{l:'C-A-D',combo:'ctrl-alt-del',w:3}];  // 26 cols
     const keyEl=s=>{
       if(s.sp){ const d=document.createElement('div'); d.style.gridColumn='span '+(s.w||2); return d; }
       const isChar=s.char!=null;
@@ -431,6 +546,7 @@
       if(s.page) b.dataset.page='1';
       if(s.layer!=null) b.dataset.layer='1';
       if(s.combo) b.dataset.combo=s.combo;
+      if(s.mic) b.dataset.mic='1';
       return b; };
     const rowEl=specs=>{ const r=document.createElement('div'); r.className='krow';
       specs.forEach(s=>r.appendChild(keyEl(s))); return r; };
@@ -450,8 +566,44 @@
         const b=kb.querySelector('[data-layer]'); if(b) b.textContent=on?'ABC':'123';
         return;
       }
-      if(e.target.closest('[data-page]')) kb.classList.toggle('sym2');
+      if(e.target.closest('[data-page]')){ kb.classList.toggle('sym2'); return; }
+      if(e.target.closest('[data-mic]')){ toggleDictation(); return; }
     });
+
+    // --- Dictation (speech → text) via the Web Speech API -----------------------
+    // Availability + whether it's truly on-device is browser-decided: Safari/iOS
+    // uses the OS dictation (often on-device); Chrome streams audio to Google. The
+    // recognised text is dispatched as an `rmd-dictate` CustomEvent; the WASM input
+    // layer types it to the host (so it flows over the same encrypted data channel).
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const micEl = () => kb.querySelector('[data-mic]');
+    let rec = null, listening = false;
+    const toggleDictation = () => {
+      if(!SR) return;
+      if(listening){ try{ rec && rec.stop(); }catch(_){} return; }
+      rec = new SR();
+      rec.lang = navigator.language || 'en-US';
+      rec.interimResults = false; rec.continuous = false; rec.maxAlternatives = 1;
+      const b = micEl();
+      let stopped = false;
+      // Stop tone fires once, whether recognition finishes (onend) or fails (onerror).
+      const onStop = () => { if(stopped) return; stopped = true; listening = false;
+        if(b) b.classList.remove('armed'); dictStopSound(); };
+      rec.onstart = () => { listening = true; stopped = false;
+        if(b) b.classList.add('armed'); dictStartSound(); };
+      rec.onend   = () => { onStop(); rec = null; };
+      rec.onerror = () => { onStop(); };
+      rec.onresult = (ev) => {
+        let text = '';
+        for(let i=ev.resultIndex; i<ev.results.length; i++)
+          if(ev.results[i].isFinal) text += ev.results[i][0].transcript;
+        text = text.trim();
+        if(text) document.dispatchEvent(new CustomEvent('rmd-dictate',{detail:text+' '}));
+      };
+      try{ rec.start(); }catch(_){ listening = false; }
+    };
+    // No speech support → hide the mic key so we don't offer a dead button.
+    if(!SR){ const b=micEl(); if(b) b.style.display='none'; }
     // Press feedback: a short click sound + haptic tick + a visual press flash on
     // every key (the WASM layer sends the key on the same pointerdown). The audio
     // context is created/resumed lazily on the first press (a user gesture).
@@ -466,8 +618,24 @@
       g.gain.exponentialRampToValueAtTime(0.0001,t+0.055);
       o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t+0.06);
     }catch(e){} };
+    // Distinct dictation tones (these replace the key click on the 🎤 key): a rising
+    // pair when listening starts, a falling pair when it stops (finished OR failed).
+    const dictTone=(f1,f2)=>{ try{
+      actx=actx||new (window.AudioContext||window.webkitAudioContext)();
+      if(actx.state==='suspended') actx.resume();
+      const play=(freq,at,dur)=>{ const t=actx.currentTime+at, o=actx.createOscillator(), g=actx.createGain();
+        o.type='sine'; o.frequency.value=freq;
+        g.gain.setValueAtTime(0.0001,t);
+        g.gain.exponentialRampToValueAtTime(0.09,t+0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+        o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t+dur+0.02); };
+      play(f1,0,0.12); play(f2,0.1,0.16);
+    }catch(e){} };
+    const dictStartSound=()=>dictTone(587,880);  // rising  D5 → A5 = "listening"
+    const dictStopSound =()=>dictTone(784,523);   // falling G5 → C5 = "stopped"
     kb.addEventListener('pointerdown',e=>{ const k=e.target.closest('.k'); if(!k) return;
-      clickSound();
+      // The 🎤 key's audio feedback is the dictation start/stop tone, not the click.
+      if(!k.dataset.mic) clickSound();
       if(navigator.vibrate) navigator.vibrate(8);
       k.classList.add('press'); setTimeout(()=>k.classList.remove('press'),110);
     });
@@ -507,8 +675,14 @@
     const goFS=()=>{ const el=document.documentElement, rf=el.requestFullscreen||el.webkitRequestFullscreen;
       if(rf){ try{ rf.call(el); }catch(_){} } };
     addEventListener('pointerdown',goFS,{once:true});
-    // "← Devices": go back if there's history, else load the devices screen.
-    $('disconnect').onclick=e=>{e.preventDefault(); if(history.length>1) history.back(); else location.href='/app/#/devices';};
+    // Leave the session: go back if there's history, else load the devices screen.
+    const doExit=()=>{ if(history.length>1) history.back(); else location.href='/app/#/devices'; };
+    $('disconnect').onclick=e=>{ e.preventDefault();
+      if(!askOnExit()){ doExit(); return; }
+      $('exitremember').checked=false; $('exitdlg').classList.remove('hidden'); };
+    $('exitcancel').onclick=()=>closeDlg('exitdlg');
+    $('exitdlg').onclick=e=>{ if(e.target===$('exitdlg')) closeDlg('exitdlg'); };
+    $('exitconfirm').onclick=()=>{ if($('exitremember').checked) localStorage.setItem(EXIT_KEY,'0'); closeDlg('exitdlg'); doExit(); };
     return;
   }
 
@@ -641,6 +815,7 @@
     $('refresh').onclick=()=>{panelHtml='';renderDevices();};
     $('signout').onclick=()=>{sessionStorage.clear(); localStorage.removeItem('rmd_vtok_'+user); auth=null; go('#/login');};
     wirePanel();
+    emitRender('devices');
   }
   // Setup commands, one per line — persisted in rmdd's encrypted settings store
   // (`rmdd set …`) rather than passed as env vars (which leak in process listings).
@@ -679,10 +854,29 @@
     };
     const x=$('closeCmd'); if(x) x.onclick=()=>{panelHtml='';renderDevices();};
   }
+  async function doConnect(hostId){
+    try{ const t=await viewerToken(); location.href=`/app/?token=${encodeURIComponent(t)}&host=${encodeURIComponent(hostId)}`; }
+    catch(e){ alert('Could not get a viewer token: '+(e.message||e)); }
+  }
+  // Hosts the viewer has learned need a connection password: prompt for it INSIDE
+  // this tap. iOS only raises the soft keyboard when focus() runs in a trusted user
+  // gesture, so focusing here (not on the reloaded viewer page, where the modal pops
+  // from a network callback) is what makes the keyboard appear with zero extra taps.
+  // The password rides to the viewer via sessionStorage (never the URL) and goes out
+  // in its first Hello, so the session authenticates without a second prompt.
+  function connectWithPassword(hostId){
+    const m=$('pwmodal'),inp=$('pwinput'),ok=$('pwok'),cancel=$('pwcancel');
+    inp.value=''; m.classList.remove('hidden'); inp.focus();
+    const done=()=>{ m.classList.add('hidden'); ok.onclick=cancel.onclick=inp.onkeydown=null; };
+    const submit=()=>{ const pw=inp.value; done(); if(pw) sessionStorage.setItem('rmd_pw_pending',pw); doConnect(hostId); };
+    ok.onclick=submit;
+    inp.onkeydown=e=>{ if(e.key==='Enter'){ e.preventDefault(); submit(); } };
+    cancel.onclick=done;
+  }
   async function deviceAction(ds){
     if(ds.act==='connect'){
-      try{ const t=await viewerToken(); location.href=`/app/?token=${encodeURIComponent(t)}&host=${encodeURIComponent(ds.id)}`; }
-      catch(e){ alert('Could not get a viewer token: '+(e.message||e)); }
+      if(localStorage.getItem('rmd_pwreq_'+ds.id)==='1') connectWithPassword(ds.id);
+      else doConnect(ds.id);
     } else if(ds.act==='cmd'){
       try{ const t=await issueToken(ds.id,ds.name,ds.role); commandPanel('Run “'+ds.name+'” — new token issued',t); renderDevices(); }
       catch(e){ alert('Failed to issue a token: '+(e.message||e)); }
@@ -707,10 +901,29 @@
   }
 
   // ---- Router (hash → screen; back button works) ----
+  // ---- Deployment extension seam ------------------------------------------
+  // A deployment MAY serve /app/ext.js to add optional screens/actions to this
+  // console (e.g. a hosted operator's account tools). The open build ships none,
+  // so nothing here is feature-specific. An ext.js registers via window.rmdExt:
+  //   rmdExt.route('#/x', renderFn)   — add a screen at that hash
+  //   rmdExt.onRender((screen,el)=>…) — run after a built-in screen renders
+  //   rmdExt.el/api/go/frame/auth()   — reuse the console's helpers + credentials
+  // After registering, an ext.js re-dispatches the current hash with rmdExt.go().
+  const _extRoutes={}, _extRender=[];
+  const emitRender=screen=>{ for(const cb of _extRender){ try{ cb(screen,el); }catch(e){ console.error('[ext]',e); } } };
+  window.rmdExt={ el:$, api, go, frame, auth:()=>({auth,user}), viewerToken,
+    route(hash,fn){ _extRoutes[hash]=fn; }, onRender(cb){ _extRender.push(cb); } };
+  // Cache-bust ext.js per load: it has no content hash, and static assets are
+  // served with a long max-age, so a fixed URL goes stale for hours. index.html
+  // is always fresh (DYNAMIC), so a unique query here always fetches the latest.
+  (function(){ const s=document.createElement('script'); s.src='/app/ext.js?t='+Date.now(); s.async=true;
+    s.onerror=()=>{}; document.head.appendChild(s); })();
+
   function go(hash){ if(location.hash===hash) route(); else location.hash=hash; }
   function route(){
     if(!auth){ if(location.hash!=='#/login'){location.hash='#/login';return;} return renderLogin(); }
     if(location.hash==='#/login'){ location.hash='#/devices'; return; }
+    if(_extRoutes[location.hash]) return _extRoutes[location.hash]();
     renderDevices();
   }
   window.addEventListener('hashchange',route);

@@ -26,33 +26,67 @@ pub mod throttle;
 
 pub use config::Config;
 pub use db::AppState;
+// The relay-entitlement seam. The default is open (`allow_all`); a private paid
+// build injects its own policy via `AppState::new` + `router_with`.
+pub use rmd_entitlement::{allow_all, RelayDecision, RelayEntitlement};
 
-/// Open + migrate the database and construct shared state.
-pub async fn init_state(cfg: Config) -> anyhow::Result<AppState> {
+/// Open the SQLite pool, run migrations, and seed runtime settings.
+///
+/// Split out from [`init_state`] so a paid build can open the pool, hand it to
+/// its own entitlement provider, and assemble state via [`AppState::new`].
+pub async fn open_pool(cfg: &Config) -> anyhow::Result<sqlx::SqlitePool> {
     let pool = db::connect_and_migrate(&cfg.database_url).await?;
     // Seed runtime settings (e.g. open_registration) from env defaults on first
     // boot, without clobbering operator changes.
-    db::seed_settings(&pool, &cfg).await?;
-    Ok(AppState {
-        pool,
-        config: Arc::new(cfg),
-        hub: Arc::new(signaling::Hub::new()),
-        throttle: Arc::new(throttle::LoginThrottle::new()),
-    })
+    db::seed_settings(&pool, cfg).await?;
+    Ok(pool)
+}
+
+/// Open + migrate the database and construct shared state with the **default,
+/// open** relay policy. Paid builds compose the pieces themselves instead (see
+/// [`open_pool`] + [`AppState::new`] + [`router_with`]).
+pub async fn init_state(cfg: Config) -> anyhow::Result<AppState> {
+    let pool = open_pool(&cfg).await?;
+    Ok(AppState::new(pool, cfg, allow_all()))
 }
 
 /// Build the router with all routes + middleware (rate limiting, tracing).
 pub fn router(state: AppState) -> Router {
-    // Per-IP rate limiting on all routes (protects auth + signaling connect).
+    router_with(state, Router::new())
+}
+
+/// Like [`router`], but merges an `extra` set of already-stateful routes a
+/// private plugin supplies (e.g. Stripe checkout/webhook/portal). The extra
+/// routes sit behind the same rate-limit / auth-logging / tracing layers.
+pub fn router_with(state: AppState, extra: Router) -> Router {
+    // Config needed by the shared layers before `state` is moved into the router.
+    let trusted_header: Option<Arc<str>> =
+        state.config.trusted_proxy_header.as_deref().map(Arc::from);
+    let cfg = state.config.clone();
+
+    // Per-IP rate limiting on all routes (protects auth + signaling connect),
+    // keyed by the *trust-resolved* client IP so it's a real per-client limit
+    // rather than one global bucket behind the ingress proxy.
     let governor = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(5)
-            .burst_size(20)
+            // Replenish 1 token/sec (was 1 per 5s) with a 60-token burst (was 20).
+            // This budget now guards ONLY the auth/signaling/API surface — the static
+            // web-viewer bundle is mounted OUTSIDE it (below), so a page load no longer
+            // spends a dozen tokens on WASM/JS/icon fetches. Login brute-force is
+            // separately bounded by the per-username `throttle`, so this can be generous.
+            .per_second(1)
+            .burst_size(60)
+            .key_extractor(security::TrustedIpKeyExtractor {
+                trusted_header: trusted_header.clone(),
+            })
             .finish()
             .expect("valid governor config"),
     );
 
-    let mut app = Router::new()
+    // Sensitive surface — auth, device management, ICE/TURN creds, signaling. The
+    // per-IP GovernorLayer wraps ONLY this router; the static web-viewer bundle is
+    // mounted afterwards so its many asset fetches never touch the rate budget.
+    let limited = Router::new()
         // `/` is host-aware: the apex (reachmy.dev) serves the marketing landing
         // page; `app.reachmy.dev` (and any other host) serves the web console.
         .route("/", get(root))
@@ -74,33 +108,51 @@ pub fn router(state: AppState) -> Router {
         )
         // ICE/TURN servers (STUN + ephemeral coturn creds) for an authed device.
         .route("/api/ice", get(api::ice_servers))
+        // One-time WebSocket ticket (keeps bearer tokens out of `/ws?…` URLs).
+        .route("/api/ws-ticket", get(api::ws_ticket))
         .route("/ws", get(signaling::ws_handler))
         // Stateless direct-pairing mailbox (no account) — QR/PAKE flow.
-        .route("/pair", get(signaling::ws_pair_handler));
+        .route("/pair", get(signaling::ws_pair_handler))
+        // Bind the core state (Router<AppState> → Router<()>), merge the plugin's
+        // already-stateful routes, then apply the auth log + per-IP rate limiter.
+        .with_state(state)
+        .merge(extra)
+        .layer(axum::middleware::from_fn_with_state(
+            cfg,
+            security::log_auth_failures,
+        ))
+        .layer(GovernorLayer { config: governor });
 
     // The WASM/WebGPU browser viewer, served from trunk's `dist/` at `/app` when a
-    // built bundle is present (see RMD_WEBVIEWER_DIR). If it isn't built into this
-    // deployment, `/app` returns a friendly notice instead of a 404.
+    // built bundle is present (see RMD_WEBVIEWER_DIR). A single page load pulls a
+    // dozen static files (WASM, JS, index.html, ext.js, icons, manifest, favicons);
+    // mounting it AFTER the GovernorLayer keeps those asset fetches OUT of the per-IP
+    // rate budget — otherwise a couple of refreshes exhaust the burst meant to guard
+    // the auth/signaling endpoints and the whole app starts returning 429s. If no
+    // bundle is built into this deployment, `/app` returns a friendly notice.
     let webviewer_dir =
         std::env::var("RMD_WEBVIEWER_DIR").unwrap_or_else(|_| "web-viewer-dist".to_string());
-    app = if std::path::Path::new(&webviewer_dir).is_dir() {
+    let app = if std::path::Path::new(&webviewer_dir).is_dir() {
         // One nest_service serves `/app` and everything under `/app/…`.
         let serve = ServeDir::new(&webviewer_dir).append_index_html_on_directories(true);
-        app.nest_service("/app", serve)
+        limited.nest_service("/app", serve)
     } else {
-        app.route("/app", get(webviewer_unavailable))
+        limited
+            .route("/app", get(webviewer_unavailable))
             .route("/app/", get(webviewer_unavailable))
     };
 
-    app.layer(axum::middleware::from_fn(security::log_auth_failures))
-        .layer(GovernorLayer { config: governor })
-        .layer(tower_http::trace::TraceLayer::new_for_http())
-        .with_state(state)
+    app.layer(tower_http::trace::TraceLayer::new_for_http())
 }
 
 /// Serve the app on an already-bound listener (keeps `axum` out of callers).
 pub async fn serve(state: AppState, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
-    let app = router(state);
+    serve_router(router(state), listener).await
+}
+
+/// Serve an already-built router (used by a paid build that composed its own
+/// routes via [`router_with`]).
+pub async fn serve_router(app: Router, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

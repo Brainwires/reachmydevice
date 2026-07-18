@@ -4,6 +4,94 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.18] - 2026-07-15
+
+### Added
+- **On-screen keyboard: 🎤 dictation (speech-to-text).** A mic key runs the browser's
+  Web Speech API and types the recognized text to the host over the encrypted data
+  channel. Whether recognition is on-device is browser-decided (Safari/iOS uses the OS
+  dictation; Chrome streams to Google). The key hides itself where the API is absent.
+- **On-screen keyboard: double-tap space → ". "** (delete the trailing space, type a
+  period + space), matching iOS/Android behavior.
+- **On-screen keyboard: hold-to-repeat.** Holding a non-modifier key (character keys
+  and named-code keys like **Backspace** / arrows / space) now auto-repeats after a
+  short delay, like a hardware keyboard. Modifiers, caps-lock, layer toggles and the
+  Ctrl-Alt-Del combo never repeat; releasing (pointerup/cancel) stops it.
+
+### Fixed
+- **Switching the connecting device no longer hangs the first attempt.** Moving from
+  one viewer (e.g. desktop) to another (e.g. phone) on the same host used to stall until
+  a manual retry: the host is a single-peer state machine, and the newcomer either got
+  nothing on its first announce or got replayed the *previous* viewer's stale offer,
+  forcing a fragile rebuild dance that only recovered after the old peer connection hit
+  its ICE timeout. The host now detects a genuine device switch and mints a **fresh**
+  offer for the newcomer (full rebuild), completing in one clean offer/answer. A second
+  device connecting while one is active is a clean **takeover** (newest wins).
+- **Password entry no longer kills the connection.** The web-viewer asked for the
+  connection password with a synchronous `window.prompt()`, which **freezes the JS
+  event loop** — stopping WebRTC's ICE consent-keepalives and dropping the (relay)
+  connection mid-authentication (endless "checking password…" / reconnect churn on
+  mobile). Replaced with a non-blocking in-page modal, so the connection stays alive
+  while you type. The password field now also auto-focuses (deferred a tick past the
+  show, so the caret — and the mobile soft-keyboard — land immediately).
+- **Three-finger scroll (and mouse wheel) now respect the view rotation.** The scroll
+  delta was sent in raw screen space, so in a rotated view (landscape) it scrolled the
+  wrong axis — portrait (no rotation) worked by luck. It's now rotated into host space
+  with the same transform `norm()` applies to cursor/tap positions.
+
+### Changed
+- **Web-viewer: the header stays a fixed top bar in every orientation.** Rotating the
+  view (esp. the 180° flip) no longer moves the toolbar to the opposite edge or rotates
+  its controls — only the video, cursor, gestures and on-screen keyboard rotate; the
+  app frame stays put. The flipped-portrait video now fills the area below the header,
+  rotated in place.
+- **Web-viewer header no longer fades** (it stayed at 20% opacity when idle). It's now
+  always solid, so the zoomed video is cleanly cut off at the safe area below it and
+  never appears to bleed under the notch / status bar.
+- **Web-viewer keeps the session alive when the page loses focus.** Backgrounding a
+  tab / switching apps no longer tears the connection down (it did before, which on
+  desktop killed a perfectly good session and on mobile — where `visibilitychange`
+  fires constantly — cycled reconnects and re-prompted the connection password). The
+  session now stays connected through a blur; auto-reconnect happens **only on
+  regaining focus** when the session isn't already healthy.
+
+## [0.2.17] - 2026-07-14
+
+### Security (rendezvous)
+Full hardening pass on the rendezvous TURN-credential broker (from a security audit),
+so it can safely front first-party apps as a shared STUN/TURN service:
+
+- **Trusted-proxy client IP.** The real client IP (for the rate limiter + auth-failure
+  logging) is now taken **only** from a configured `RMD_TRUSTED_PROXY_HEADER`
+  (e.g. `cf-connecting-ip`); a client-supplied `X-Forwarded-For` can no longer forge
+  the IP to dodge limits or poison fail2ban. Unset ⇒ socket-peer only.
+- **Real per-client rate limiting.** `tower_governor` now keys on the trust-resolved
+  client IP instead of the ingress-proxy IP (which had collapsed every request into one
+  global bucket).
+- **Tokens out of URLs.** `GET /api/ice` accepts `Authorization: Bearer` (the `?token=`
+  query is a deprecated fallback), and `/ws` accepts a short-lived single-use ticket
+  from `GET /api/ws-ticket`, so long-lived bearer tokens stop leaking into proxy/access
+  logs and `Referer`.
+- **First-account land-grab closed.** `RMD_RZ_BOOTSTRAP_TOKEN` gates first-account
+  creation (and provisioning while signup is closed); without it the empty-table
+  bootstrap no longer lets a stranger claim the instance.
+- **Argon2 DoS bounded.** Password verification runs under a small concurrency semaphore
+  on the blocking pool, so an auth-endpoint flood can't OOM/peg a small VPS.
+- **TURN credentials are user-bound + short-lived.** Minted username is now
+  `<expiry>:<user_id>` (was a shared constant) with a **600s** default TTL (`RMD_TURN_TTL`),
+  and `/api/ice` reuses a cached live credential per user rather than minting unbounded
+  shareable creds.
+- **Device tokens expire + rotate.** New tokens get a default **90-day** expiry
+  (`RMD_RZ_TOKEN_TTL`, `0` = none); re-registering a device invalidates its prior tokens.
+
+Backward compatible: existing clients keep working via the `?token=` fallbacks.
+
+### Security (coturn deployment)
+- Documented + shipped a coturn lockdown: **`--denied-peer-ip`** for RFC1918 / loopback /
+  link-local (incl. the `169.254.169.254` cloud-metadata address) / multicast / CGNAT +
+  IPv6 ULA/link-local (closes the open-relay / SSRF hole), and coturn-native
+  **`--unauthorized-ratelimit`** to throttle credential-guessing floods per source IP.
+
 ## [0.2.16] - 2026-07-14
 
 ### Fixed

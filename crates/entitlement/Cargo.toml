@@ -1,0 +1,16 @@
+[package]
+name = "rmd-entitlement"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Relay-entitlement extension point for the ReachMyDevice rendezvous. Default policy is open (self-host); a private plugin supplies a paid policy."
+repository.workspace = true
+
+# Deliberately dependency-free (std only): this is the seam the open-source core
+# and any private policy plugin both compile against, so it must stay tiny and
+# free of any billing/plan vocabulary.
+[dependencies]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

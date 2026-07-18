@@ -132,10 +132,19 @@ struct Session {
     /// of stalling at "connected" with no video (the host won't stream until
     /// authorized).
     password: Rc<RefCell<Option<String>>>,
+    /// Set when the host asks for a password: the async modal reads this to send the
+    /// password-bearing Hello on submit. Shared with [`App`] so the once-wired modal
+    /// handler can reach the current session's control channel.
+    pending_pw: Rc<RefCell<Option<PwTarget>>>,
     /// `setInterval` handle for the live-latency monitor (see
     /// [`start_latency_control`]); cleared on teardown so it doesn't outlive the pc.
     latency_timer: RefCell<Option<i32>>,
 }
+
+/// What the non-blocking password modal needs to authenticate on submit: the
+/// control data channel to send the Hello over, and the shared password cell to
+/// remember it for reconnects.
+type PwTarget = (RtcDataChannel, Rc<RefCell<Option<String>>>);
 
 impl Session {
     /// Stop this session's callbacks from firing and close its transports. Called
@@ -189,6 +198,8 @@ struct App {
     /// The host's connection password, remembered across reconnects (see
     /// [`Session::password`]).
     password: Rc<RefCell<Option<String>>>,
+    /// The current session's password-modal target (see [`Session::pending_pw`]).
+    pending_pw: Rc<RefCell<Option<PwTarget>>>,
 }
 
 #[wasm_bindgen(start)]
@@ -241,26 +252,41 @@ async fn run() -> Result<(), String> {
         current: RefCell::new(None),
         connecting: Cell::new(false),
         password: Rc::new(RefCell::new(None)),
+        pending_pw: Rc::new(RefCell::new(None)),
     });
+    wire_password_modal(&app);
 
-    // Reconnect ONLY on foreground. Backgrounding (lock/switch apps) is treated as
-    // an intentional disconnect: tear the session down so the host stops capturing,
-    // and never reconnect while hidden. Becoming visible again rebuilds it.
+    // A password entered on the device list's Connect prompt (inside a trusted tap,
+    // so iOS raised the keyboard) is handed here via sessionStorage. Seed it so the
+    // first Hello carries it and the host authenticates us straight away — no second,
+    // keyboard-less prompt on this freshly-reloaded page.
+    if let Some(pw) = take_pending_password() {
+        store_host_password(&app.cfg.host_id, &pw); // persist so a reload re-authenticates on the first Hello
+        *app.password.borrow_mut() = Some(pw);
+    } else if let Some(pw) = load_host_password(&app.cfg.host_id) {
+        // Reload / direct URL: reuse the password this tab already authenticated with,
+        // so the first Hello carries it — no fragile mid-session password prompt.
+        web_sys::console::log_1(
+            &"[rmd] seeded connection password from session — first Hello will carry it".into(),
+        );
+        *app.password.borrow_mut() = Some(pw);
+    }
+
+    // Losing focus / backgrounding must NOT tear the session down — keeping a live
+    // connection through a blur is the whole point on desktop (and stops mobile
+    // browsers, which fire visibilitychange constantly, from cycling reconnects +
+    // re-prompting the password). We act ONLY when the page (re)gains focus: if the
+    // session isn't healthy by then, reconnect. A drop while hidden is handled by the
+    // connection-state watcher, which defers its reconnect to the next foreground.
     {
         let app = app.clone();
         let document2 = document.clone();
         let cb = Closure::<dyn FnMut()>::new(move || {
+            // Hidden → do nothing; leave the existing session running.
             if document2.hidden() {
-                // Backgrounded → end the session (host capture stops); do NOT reconnect.
-                if let Some(s) = app.current.borrow_mut().take() {
-                    s.teardown();
-                }
-                app.connecting.set(false); // drop any pending reconnect guard
-                web_sys::console::log_1(&"[rmd] hidden; disconnecting until foreground".into());
-                set_status("disconnected (backgrounded)");
                 return;
             }
-            // Became visible → reconnect if there's no healthy session.
+            // Became visible → reconnect ONLY if there's no healthy session.
             let healthy = app.current.borrow().as_ref().is_some_and(|s| {
                 matches!(
                     s.pc.connection_state(),
@@ -336,6 +362,7 @@ async fn connect(app: Rc<App>) {
         video: app.video.clone(),
         hello_sent: RefCell::new(false),
         password: app.password.clone(),
+        pending_pw: app.pending_pw.clone(),
         latency_timer: RefCell::new(None),
     });
 
@@ -347,6 +374,13 @@ async fn connect(app: Rc<App>) {
 
     // Announce presence so the host learns our device id and sends its offer.
     relay.send_hello(&app.cfg.host_id);
+    web_sys::console::log_1(
+        &format!(
+            "[rmd] connect: announced to host (first Hello will carry password={})",
+            app.password.borrow().is_some()
+        )
+        .into(),
+    );
     set_status("connecting…");
 }
 
@@ -356,6 +390,7 @@ fn schedule_reconnect(app: Rc<App>) {
     if app.connecting.get() {
         return; // already scheduled or in progress
     }
+    web_sys::console::log_1(&"[rmd] scheduling reconnect (1s backoff)".into());
     app.connecting.set(true); // hold the guard across the backoff delay
     let cb = Closure::once_into_js(move || {
         app.connecting.set(false); // release so connect() can re-acquire
@@ -538,6 +573,15 @@ fn wire_pc_callbacks(session: &Rc<Session>, app: &Rc<App>) {
         let s = session.clone();
         let cb = Closure::<dyn FnMut(RtcDataChannelEvent)>::new(move |ev: RtcDataChannelEvent| {
             let dc = ev.channel();
+            // Each control channel the host opens is a fresh auth + input context. Re-arm
+            // `hello_sent` so wire_data_channel's onopen re-sends the (password-bearing)
+            // Hello AND re-attaches input to THIS channel. Without this, a channel the host
+            // recreates after an in-viewer password prompt / renegotiation gets no input
+            // listeners — they stayed bound to the first, now-dead channel — so video keeps
+            // flowing but keyboard/mouse control silently dies (only reproduces when the
+            // password is entered in the viewer, not on the connect screen).
+            *s.hello_sent.borrow_mut() = false;
+            web_sys::console::log_1(&"[rmd] control channel opened — rearming hello + input".into());
             wire_data_channel(&s, &dc);
             *s.control.borrow_mut() = Some(dc);
         });
@@ -552,11 +596,13 @@ fn wire_pc_callbacks(session: &Rc<Session>, app: &Rc<App>) {
         let cb = Closure::<dyn FnMut()>::new(move || {
             let st = pc2.connection_state();
             web_sys::console::log_1(&format!("[rmd] pc state: {st:?}").into());
-            if matches!(
-                st,
-                web_sys::RtcPeerConnectionState::Failed
-                    | web_sys::RtcPeerConnectionState::Disconnected
-            ) {
+            // Only a FAILED connection needs a full rebuild. `Disconnected` is usually a
+            // TRANSIENT ICE blip (or the tail of a renegotiation) that WebRTC recovers
+            // from on its own within a few seconds — tearing down + reconnecting on every
+            // `Disconnected` turned a recoverable hiccup into a connect→disconnect→
+            // reconnect loop (which also orphaned relay allocations). Let it self-heal;
+            // ICE escalates to `Failed` if it truly can't recover, and we rebuild then.
+            if matches!(st, web_sys::RtcPeerConnectionState::Failed) {
                 // Only auto-reconnect while the tab is FOREGROUND. A drop while hidden
                 // (backgrounded/locked) is an intentional disconnect — stay down and
                 // let the visibilitychange handler reconnect when it's foreground again.
@@ -569,6 +615,8 @@ fn wire_pc_callbacks(session: &Rc<Session>, app: &Rc<App>) {
                     set_status("disconnected — reconnecting…");
                     schedule_reconnect(app.clone());
                 }
+            } else if matches!(st, web_sys::RtcPeerConnectionState::Disconnected) {
+                set_status("connection unstable — recovering…");
             }
         });
         pc.set_onconnectionstatechange(Some(cb.as_ref().unchecked_ref()));
@@ -598,6 +646,13 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
                 };
                 let _ = dc_open.send_with_u8_array(&rmd_protocol::encode(&hello));
                 *s.hello_sent.borrow_mut() = true;
+                web_sys::console::log_1(
+                    &format!(
+                        "[rmd] dc open → sent Hello (password={}) + attaching input",
+                        s.password.borrow().is_some()
+                    )
+                    .into(),
+                );
                 attach_input(&s, &dc_open);
                 set_status("session ready");
             }
@@ -617,30 +672,34 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
                 let bytes = js_sys::Uint8Array::new(&buf).to_vec();
                 if let Ok(env) = rmd_protocol::decode(&bytes) {
                     if let Some(rmd_protocol::pb::envelope::Payload::HelloAck(ack)) = env.payload {
+                        web_sys::console::log_1(
+                            &format!(
+                                "[rmd] HelloAck: password_required={} accepted={}",
+                                ack.password_required, ack.accepted
+                            )
+                            .into(),
+                        );
                         if ack.password_required {
-                            // Host wants a connection password (or the remembered one
-                            // was wrong): prompt, remember it (for reconnects), and
-                            // re-send the Hello with it (not via the URL).
-                            match prompt_password() {
-                                Some(pw) => {
-                                    *s.password.borrow_mut() = Some(pw.clone());
-                                    let hello = rmd_protocol::with_password(
-                                        rmd_protocol::hello(
-                                            "web-viewer",
-                                            rmd_protocol::Role::Viewer,
-                                            rmd_protocol::FEATURE_CLIENT_CURSOR,
-                                        ),
-                                        pw,
-                                    );
-                                    let _ = dc_msg
-                                        .send_with_u8_array(&rmd_protocol::encode(&hello));
-                                    set_status("checking password…");
-                                }
-                                None => set_status("connection password required"),
-                            }
+                            // Remember this host needs a password so next time the
+                            // device list prompts inside the Connect tap (where iOS
+                            // will actually raise the keyboard). This on-page modal is
+                            // the fallback — it appears from a network callback with no
+                            // user gesture, so the soft keyboard won't auto-open here.
+                            remember_password_required(&s.host_id, true);
+                            *s.pending_pw.borrow_mut() =
+                                Some((dc_msg.clone(), s.password.clone()));
+                            show_password_modal();
+                            set_status("connection password required");
                         } else if !ack.accepted {
                             set_status(&format!("rejected: {}", ack.reason));
                         } else {
+                            // Accepted. Keep the per-host hint accurate: if we got in
+                            // WITHOUT a password this host doesn't need one (forget it);
+                            // if a password got us in, remember it for next time.
+                            remember_password_required(
+                                &s.host_id,
+                                s.password.borrow().is_some(),
+                            );
                             set_status("connected");
                         }
                     }
@@ -653,13 +712,174 @@ fn wire_data_channel(session: &Rc<Session>, dc: &RtcDataChannel) {
     }
 }
 
-/// Prompt the user for the host's connection password (browser dialog). Returns
-/// `None` if they cancel or leave it blank. Kept out of the URL/history.
-fn prompt_password() -> Option<String> {
-    let win = web_sys::window()?;
-    match win.prompt_with_message("This host requires a connection password:") {
-        Ok(Some(s)) if !s.is_empty() => Some(s),
-        _ => None,
+/// Whether the password modal is currently shown (its `#pwmodal` lacks `.hidden`).
+/// The document key handler checks this so it doesn't steal keystrokes from the field.
+fn password_modal_open() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("pwmodal"))
+        .map(|m| !m.class_list().contains("hidden"))
+        .unwrap_or(false)
+}
+
+/// Find the `#pwinput` password field.
+fn pw_input() -> Option<web_sys::HtmlInputElement> {
+    web_sys::window()?
+        .document()?
+        .get_element_by_id("pwinput")?
+        .dyn_into::<web_sys::HtmlInputElement>()
+        .ok()
+}
+
+/// Show the non-blocking password modal (clears + focuses the field).
+fn show_password_modal() {
+    if let Some(m) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("pwmodal"))
+    {
+        let _ = m.class_list().remove_1("hidden");
+    }
+    if let Some(inp) = pw_input() {
+        inp.set_value("");
+        // Focus synchronously. The modal is now hidden via opacity (not display:none),
+        // so #pwinput is always laid out and this focus() lands the caret + raises the
+        // mobile soft-keyboard right away. A single deferred retry covers the rare case
+        // where the first focus races the opacity transition.
+        let _ = inp.focus();
+        let inp_retry = inp.clone();
+        let cb = Closure::once_into_js(move || {
+            let _ = inp_retry.focus();
+        });
+        if let Some(win) = web_sys::window() {
+            let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(
+                cb.unchecked_ref(),
+                0,
+            );
+        }
+    }
+}
+
+/// Remember (in `localStorage`) whether a given host needs a connection password,
+/// so the device list can prompt for it *inside the Connect tap* next time — the
+/// only place iOS will raise the soft keyboard. Keyed per host id.
+fn remember_password_required(host: &str, required: bool) {
+    if let Some(ls) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let key = format!("rmd_pwreq_{host}");
+        if required {
+            let _ = ls.set_item(&key, "1");
+        } else {
+            let _ = ls.remove_item(&key);
+        }
+    }
+}
+
+/// Take a password handed off from the device list's Connect prompt (via
+/// `sessionStorage`, never the URL). Consumed once so it doesn't linger. When
+/// present it's sent in the very first Hello, so a password host authenticates
+/// without the viewer ever having to pop its own (keyboard-less) modal.
+fn take_pending_password() -> Option<String> {
+    let ss = web_sys::window()?.session_storage().ok().flatten()?;
+    let pw = ss.get_item("rmd_pw_pending").ok().flatten()?;
+    let _ = ss.remove_item("rmd_pw_pending");
+    (!pw.is_empty()).then_some(pw)
+}
+
+/// Remember a host's connection password for THIS tab (sessionStorage — per-tab,
+/// cleared on close; never the browser password MANAGER, which must not cache it or
+/// it clobbers the web-app login). This lets a page reload / direct URL re-send the
+/// password in the FIRST Hello so the host authenticates immediately — the same
+/// reliable path the device-screen Connect prompt uses. The alternative (the
+/// mid-session `password_required` modal) needs a second round-trip that a flaky
+/// mobile relay can drop mid-prompt, hanging the session on "checking password".
+fn store_host_password(host: &str, pw: &str) {
+    if let Some(ss) = web_sys::window().and_then(|w| w.session_storage().ok().flatten()) {
+        let _ = ss.set_item(&format!("rmd_pwsess_{host}"), pw);
+    }
+}
+
+/// Read a host's remembered per-tab connection password (see [`store_host_password`]).
+fn load_host_password(host: &str) -> Option<String> {
+    let ss = web_sys::window()?.session_storage().ok().flatten()?;
+    let pw = ss.get_item(&format!("rmd_pwsess_{host}")).ok().flatten()?;
+    (!pw.is_empty()).then_some(pw)
+}
+
+/// Hide the password modal + clear the field.
+fn hide_password_modal() {
+    if let Some(m) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("pwmodal"))
+    {
+        let _ = m.class_list().add_1("hidden");
+    }
+    if let Some(inp) = pw_input() {
+        inp.set_value("");
+    }
+}
+
+/// Wire the password modal's OK / Enter / Cancel handlers ONCE. On submit it reads
+/// the current [`App::pending_pw`] target and sends the password-bearing Hello over
+/// the control channel — without ever blocking the event loop (unlike a `prompt()`).
+fn wire_password_modal(app: &Rc<App>) {
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let submit: Rc<dyn Fn()> = {
+        let app = app.clone();
+        Rc::new(move || {
+            let Some(inp) = pw_input() else { return };
+            let pw = inp.value();
+            if pw.is_empty() {
+                return;
+            }
+            if let Some((dc, pwcell)) = app.pending_pw.borrow_mut().take() {
+                *pwcell.borrow_mut() = Some(pw.clone());
+                // Remember it for this tab so a reload/reconnect authenticates on the
+                // first Hello (reliable) instead of re-opening this fragile modal.
+                store_host_password(&app.cfg.host_id, &pw);
+                let hello = rmd_protocol::with_password(
+                    rmd_protocol::hello(
+                        "web-viewer",
+                        rmd_protocol::Role::Viewer,
+                        rmd_protocol::FEATURE_CLIENT_CURSOR,
+                    ),
+                    pw,
+                );
+                let _ = dc.send_with_u8_array(&rmd_protocol::encode(&hello));
+                set_status("checking password…");
+            }
+            hide_password_modal();
+        })
+    };
+    // OK button.
+    if let Some(ok) = document.get_element_by_id("pwok") {
+        let submit = submit.clone();
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| submit());
+        let _ = ok.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
+    // Enter in the field.
+    if let Some(inp) = document.get_element_by_id("pwinput") {
+        let submit = submit.clone();
+        let cb = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+            move |e: web_sys::KeyboardEvent| {
+                if e.key() == "Enter" {
+                    e.prevent_default();
+                    submit();
+                }
+            },
+        );
+        let _ = inp.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
+    // Cancel button.
+    if let Some(c) = document.get_element_by_id("pwcancel") {
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
+            hide_password_modal();
+            set_status("connection password required");
+        });
+        let _ = c.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+        cb.forget();
     }
 }
 
@@ -729,6 +949,22 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
     let rect_norm = {
         let norm = norm.clone();
         move |ev: &MouseEvent| norm(ev.client_x() as f64, ev.client_y() as f64)
+    };
+    // Rotate a screen-space delta (px) into host space for the current `data-rot`.
+    // Scroll/wheel deltas need the same rotation `norm` applies to positions — it's
+    // `norm`'s linear part (the inverse of CSS `rotate(rot*90deg)` clockwise) —
+    // otherwise a swipe/scroll in a rotated (e.g. landscape) view moves the wrong
+    // axis. Portrait (`rot` 0) is the identity, which is why it already felt right.
+    let rot_delta = {
+        let video = video.clone();
+        move |dx: f64, dy: f64| -> (f64, f64) {
+            match video.get_attribute("data-rot").as_deref() {
+                Some("1") => (dy, -dx),
+                Some("2") => (-dx, -dy),
+                Some("3") => (-dy, dx),
+                _ => (dx, dy),
+            }
+        }
     };
 
     // mousemove
@@ -1022,6 +1258,7 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
         {
             let dc = dc.clone();
             let norm = norm.clone();
+            let rot_delta = rot_delta.clone();
             let moved = moved.clone();
             let start = start.clone();
             let prev = prev.clone();
@@ -1105,9 +1342,11 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                     clear_lp(&lp_handle); // a moving finger isn't a long-press
                 }
                 if n >= 3 {
-                    // Three-finger swipe → wheel scroll. Content follows the
-                    // fingers (drag down → content down), in raw client px.
-                    let (dx, dy) = ((cx - px) * SCROLL_SENS, (cy - py) * SCROLL_SENS);
+                    // Three-finger swipe → wheel scroll. Content follows the fingers
+                    // (drag down → content down), rotated into host space so it's
+                    // correct in a landscape/rotated view (not just portrait).
+                    let (dx, dy) =
+                        rot_delta((cx - px) * SCROLL_SENS, (cy - py) * SCROLL_SENS);
                     if dx != 0.0 || dy != 0.0 {
                         let _ = dc.send_with_u8_array(&input::mouse_scroll(dx, dy));
                     }
@@ -1230,9 +1469,11 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
     // wheel
     {
         let dc = dc.clone();
+        let rot_delta = rot_delta.clone();
         let cb = Closure::<dyn FnMut(WheelEvent)>::new(move |ev: WheelEvent| {
             ev.prevent_default();
-            let _ = dc.send_with_u8_array(&input::mouse_scroll(-ev.delta_x(), -ev.delta_y()));
+            let (dx, dy) = rot_delta(-ev.delta_x(), -ev.delta_y());
+            let _ = dc.send_with_u8_array(&input::mouse_scroll(dx, dy));
         });
         video
             .add_event_listener_with_callback("wheel", cb.as_ref().unchecked_ref())
@@ -1245,6 +1486,13 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
             let dc = dc.clone();
             let cb = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
                 move |ev: web_sys::KeyboardEvent| {
+                    // While the password modal is open, its input field owns the
+                    // keyboard — don't intercept/forward keystrokes to the host, or the
+                    // field can never receive text (that was the "can't type the
+                    // password" bug).
+                    if password_modal_open() {
+                        return;
+                    }
                     // Physical/Bluetooth keyboard path (the on-screen keyboard sends
                     // HID directly via `attach_keyboard`).
                     if let Some(hid) = input::code_to_hid(&ev.code()) {
@@ -1325,6 +1573,10 @@ fn attach_keyboard(dc: &RtcDataChannel) {
     // Caps-lock: a separate, latched client-side toggle (not in `mods`, so it
     // survives `clear_mods`). While on, every letter is sent with Shift.
     let caps = Rc::new(Cell::new(false));
+    // Double-tap the space bar → ". " (delete the just-typed space, type a period +
+    // space), like iOS. `last_space` is the ms timestamp of the previous space tap.
+    const DOUBLE_SPACE_MS: f64 = 350.0;
+    let last_space = Rc::new(Cell::new(0.0f64));
 
     // Clear the armed one-shot modifiers and un-highlight their buttons. Caps-lock
     // is NOT in `mods`, so it survives; the letter-case visual then reflects caps.
@@ -1348,6 +1600,65 @@ fn attach_keyboard(dc: &RtcDataChannel) {
         })
     };
 
+    // Hold-to-repeat for non-modifier keys (character keys + named-code keys like
+    // Backspace / arrows): after a short initial delay, holding the key resends it on
+    // a fixed cadence, like a hardware keyboard's auto-repeat. Modifiers, caps-lock,
+    // layer toggles and the Ctrl-Alt-Del combo never repeat. Only one key repeats at
+    // a time; the interval and its closure are dropped on release, so nothing leaks.
+    const REPEAT_TICK_MS: i32 = 55; // cadence once armed (~18 keys/s)
+    const REPEAT_DELAY_TICKS: u32 = 7; // ticks before the first repeat (~385 ms)
+    let rpt_handle: Rc<Cell<Option<i32>>> = Rc::new(Cell::new(None));
+    let rpt_closure: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let stop_repeat: Rc<dyn Fn()> = {
+        let rpt_handle = rpt_handle.clone();
+        let rpt_closure = rpt_closure.clone();
+        Rc::new(move || {
+            if let (Some(id), Some(w)) = (rpt_handle.take(), web_sys::window()) {
+                w.clear_interval_with_handle(id);
+            }
+            rpt_closure.borrow_mut().take();
+        })
+    };
+    let start_repeat: Rc<dyn Fn(u32, u32)> = {
+        let dc = dc.clone();
+        let rpt_handle = rpt_handle.clone();
+        let rpt_closure = rpt_closure.clone();
+        let stop_repeat = stop_repeat.clone();
+        Rc::new(move |hid: u32, m: u32| {
+            stop_repeat(); // only one key repeats at a time
+            let Some(w) = web_sys::window() else {
+                return;
+            };
+            let dc = dc.clone();
+            let ticks = Cell::new(0u32);
+            let cb = Closure::<dyn FnMut()>::new(move || {
+                let n = ticks.get() + 1;
+                ticks.set(n);
+                if n >= REPEAT_DELAY_TICKS {
+                    kb_send(&dc, hid, m);
+                }
+            });
+            if let Ok(id) = w.set_interval_with_callback_and_timeout_and_arguments_0(
+                cb.as_ref().unchecked_ref(),
+                REPEAT_TICK_MS,
+            ) {
+                rpt_handle.set(Some(id));
+            }
+            *rpt_closure.borrow_mut() = Some(cb);
+        })
+    };
+    // Any pointer release / cancel anywhere ends the current repeat.
+    {
+        let stop_repeat = stop_repeat.clone();
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| stop_repeat());
+        if let Some(w) = web_sys::window() {
+            for ev in ["pointerup", "pointercancel"] {
+                let _ = w.add_event_listener_with_callback(ev, cb.as_ref().unchecked_ref());
+            }
+        }
+        cb.forget();
+    }
+
     let Ok(btns) = document.query_selector_all("#kb .k") else {
         return;
     };
@@ -1358,9 +1669,12 @@ fn attach_keyboard(dc: &RtcDataChannel) {
         else {
             continue;
         };
-        // Layer/page toggles (123↔ABC, ⇧ on a symbol page) are presentation only —
-        // JS swaps the visible layer; the WASM layer ignores them.
-        if el.get_attribute("data-layer").is_some() || el.get_attribute("data-page").is_some() {
+        // Layer/page toggles (123↔ABC, ⇧ on a symbol page) and the 🎤 dictation key
+        // are handled in JS (index.html) — the WASM layer ignores them here.
+        if el.get_attribute("data-layer").is_some()
+            || el.get_attribute("data-page").is_some()
+            || el.get_attribute("data-mic").is_some()
+        {
             continue;
         }
         // QWERTY letter keys are owned by the swipe/tap handler below (so a swipe
@@ -1376,8 +1690,12 @@ fn attach_keyboard(dc: &RtcDataChannel) {
         let clear = clear_mods.clone();
         let doc = document.clone();
         let el_cb = el.clone();
+        let start_repeat = start_repeat.clone();
+        let stop_repeat = stop_repeat.clone();
+        let last_space = last_space.clone();
         let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
             ev.prevent_default(); // no text selection / double-tap-zoom / synthetic mouse
+            stop_repeat(); // a new press cancels any key still auto-repeating
             let send_key = |hid: u32, m: u32| {
                 let _ = dc.send_with_u8_array(&input::key(hid, true, m));
                 let _ = dc.send_with_u8_array(&input::key(hid, false, m));
@@ -1417,6 +1735,7 @@ fn attach_keyboard(dc: &RtcDataChannel) {
                         mods.get()
                     };
                     send_key(hid, m);
+                    start_repeat(hid, m); // hold to repeat
                 }
                 clear();
                 clear_suggestions(&doc);
@@ -1428,7 +1747,26 @@ fn attach_keyboard(dc: &RtcDataChannel) {
                 clear_suggestions(&doc);
             } else if let Some(code) = el_cb.get_attribute("data-code") {
                 if let Some(hid) = input::code_to_hid(&code) {
-                    send_key(hid, mods.get());
+                    let m = mods.get();
+                    let now = now_ms();
+                    if code == "Space"
+                        && last_space.get() > 0.0
+                        && now - last_space.get() < DOUBLE_SPACE_MS
+                    {
+                        // Double-tap space → replace the trailing space with ". ".
+                        send_key(0x2A, 0); // Backspace: delete the just-typed space
+                        if let Some((ph, psh)) = input::char_to_hid('.') {
+                            send_key(ph, if psh { input::mod_bit("shift") } else { 0 });
+                        }
+                        send_key(0x2C, 0); // Space after the period
+                        last_space.set(0.0); // consumed — a 3rd quick tap won't chain
+                    } else {
+                        send_key(hid, m);
+                        start_repeat(hid, m); // hold to repeat (e.g. Backspace, arrows)
+                        if code == "Space" {
+                            last_space.set(now);
+                        }
+                    }
                 }
                 clear();
                 clear_suggestions(&doc);
@@ -1440,6 +1778,32 @@ fn attach_keyboard(dc: &RtcDataChannel) {
     }
 
     attach_swipe(dc, &document, &mods, &clear_mods, &caps);
+    attach_dictation(dc);
+}
+
+/// Wire the on-screen 🎤 dictation key. The JS mic handler (index.html) runs the
+/// Web Speech API and dispatches the recognized text as an `rmd-dictate`
+/// CustomEvent; here we type that text to the host char-by-char, so it travels
+/// over the same encrypted data channel as any other key.
+fn attach_dictation(dc: &RtcDataChannel) {
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let dc = dc.clone();
+    let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+        let text = ev
+            .dyn_ref::<web_sys::CustomEvent>()
+            .and_then(|ce| ce.detail().as_string())
+            .unwrap_or_default();
+        for c in text.chars() {
+            if let Some((hid, shift)) = input::char_to_hid(c) {
+                kb_send(&dc, hid, if shift { input::mod_bit("shift") } else { 0 });
+            }
+        }
+    });
+    let _ =
+        document.add_event_listener_with_callback("rmd-dictate", cb.as_ref().unchecked_ref());
+    cb.forget();
 }
 
 /// Toggle the `#kb.up` class so the letter labels render uppercase (via CSS
@@ -1722,6 +2086,20 @@ async fn handle_signal(session: &Rc<Session>, msg: SignalMsg) -> Result<(), Stri
             // (`{"type","sdp"}`, matching `rtc`'s serde form); unwrap it to the raw
             // SDP the browser's setRemoteDescription expects. Passing the JSON blob
             // straight in makes Chrome fail with "Expect line: v=".
+            // Ignore an offer ONLY once the pc is fully CONNECTED — then a new offer is the
+            // host replaying/renegotiating, and applying it resets ICE and drops the live
+            // session (connect→offer→disconnect loop). While still establishing
+            // (New/Connecting) or recovering (Disconnected), we MUST re-apply + re-answer:
+            // on a flaky link the host re-offers when it never got our answer, and that
+            // re-answer is how ICE completes — dropping it strands the handshake at Failed.
+            if matches!(
+                session.pc.connection_state(),
+                web_sys::RtcPeerConnectionState::Connected
+            ) {
+                web_sys::console::log_1(&"[rmd] offer ignored (already connected)".into());
+                return Ok(());
+            }
+            web_sys::console::log_1(&"[rmd] signal: offer received → creating answer".into());
             let sdp = sdp_from_wire(&wire);
             let desc = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
             desc.set_sdp(&sdp);
