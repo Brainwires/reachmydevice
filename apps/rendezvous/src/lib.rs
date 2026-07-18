@@ -69,8 +69,13 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
     // rather than one global bucket behind the ingress proxy.
     let governor = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(5)
-            .burst_size(20)
+            // Replenish 1 token/sec (was 1 per 5s) with a 60-token burst (was 20).
+            // This budget now guards ONLY the auth/signaling/API surface — the static
+            // web-viewer bundle is mounted OUTSIDE it (below), so a page load no longer
+            // spends a dozen tokens on WASM/JS/icon fetches. Login brute-force is
+            // separately bounded by the per-username `throttle`, so this can be generous.
+            .per_second(1)
+            .burst_size(60)
             .key_extractor(security::TrustedIpKeyExtractor {
                 trusted_header: trusted_header.clone(),
             })
@@ -78,7 +83,10 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
             .expect("valid governor config"),
     );
 
-    let mut app = Router::new()
+    // Sensitive surface — auth, device management, ICE/TURN creds, signaling. The
+    // per-IP GovernorLayer wraps ONLY this router; the static web-viewer bundle is
+    // mounted afterwards so its many asset fetches never touch the rate budget.
+    let limited = Router::new()
         // `/` is host-aware: the apex (reachmy.dev) serves the marketing landing
         // page; `app.reachmy.dev` (and any other host) serves the web console.
         .route("/", get(root))
@@ -104,33 +112,37 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         .route("/api/ws-ticket", get(api::ws_ticket))
         .route("/ws", get(signaling::ws_handler))
         // Stateless direct-pairing mailbox (no account) — QR/PAKE flow.
-        .route("/pair", get(signaling::ws_pair_handler));
-
-    // The WASM/WebGPU browser viewer, served from trunk's `dist/` at `/app` when a
-    // built bundle is present (see RMD_WEBVIEWER_DIR). If it isn't built into this
-    // deployment, `/app` returns a friendly notice instead of a 404.
-    let webviewer_dir =
-        std::env::var("RMD_WEBVIEWER_DIR").unwrap_or_else(|_| "web-viewer-dist".to_string());
-    app = if std::path::Path::new(&webviewer_dir).is_dir() {
-        // One nest_service serves `/app` and everything under `/app/…`.
-        let serve = ServeDir::new(&webviewer_dir).append_index_html_on_directories(true);
-        app.nest_service("/app", serve)
-    } else {
-        app.route("/app", get(webviewer_unavailable))
-            .route("/app/", get(webviewer_unavailable))
-    };
-
-    // Bind the core state first (Router<AppState> → Router<()>), then merge the
-    // plugin's already-stateful `extra` routes, then apply the shared layers so
-    // they cover both. Merging happens on matched `Router<()>` state types.
-    app.with_state(state)
+        .route("/pair", get(signaling::ws_pair_handler))
+        // Bind the core state (Router<AppState> → Router<()>), merge the plugin's
+        // already-stateful routes, then apply the auth log + per-IP rate limiter.
+        .with_state(state)
         .merge(extra)
         .layer(axum::middleware::from_fn_with_state(
             cfg,
             security::log_auth_failures,
         ))
-        .layer(GovernorLayer { config: governor })
-        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(GovernorLayer { config: governor });
+
+    // The WASM/WebGPU browser viewer, served from trunk's `dist/` at `/app` when a
+    // built bundle is present (see RMD_WEBVIEWER_DIR). A single page load pulls a
+    // dozen static files (WASM, JS, index.html, ext.js, icons, manifest, favicons);
+    // mounting it AFTER the GovernorLayer keeps those asset fetches OUT of the per-IP
+    // rate budget — otherwise a couple of refreshes exhaust the burst meant to guard
+    // the auth/signaling endpoints and the whole app starts returning 429s. If no
+    // bundle is built into this deployment, `/app` returns a friendly notice.
+    let webviewer_dir =
+        std::env::var("RMD_WEBVIEWER_DIR").unwrap_or_else(|_| "web-viewer-dist".to_string());
+    let app = if std::path::Path::new(&webviewer_dir).is_dir() {
+        // One nest_service serves `/app` and everything under `/app/…`.
+        let serve = ServeDir::new(&webviewer_dir).append_index_html_on_directories(true);
+        limited.nest_service("/app", serve)
+    } else {
+        limited
+            .route("/app", get(webviewer_unavailable))
+            .route("/app/", get(webviewer_unavailable))
+    };
+
+    app.layer(tower_http::trace::TraceLayer::new_for_http())
 }
 
 /// Serve the app on an already-bound listener (keeps `axum` out of callers).
