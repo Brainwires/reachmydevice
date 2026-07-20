@@ -32,8 +32,12 @@ pub struct RegisterUser {
 
 #[derive(Deserialize)]
 pub struct RegisterDevice {
-    username: String,
-    password: String,
+    /// Legacy in-body credentials (native CLI clients). Optional: a console with a
+    /// passkey/password session instead sends an `Authorization` header.
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
     device_id: String,
     name: String,
     /// Device identity public key (base64), stored for TOFU display.
@@ -167,9 +171,20 @@ pub async fn set_registration(
 /// `POST /api/devices` — register/refresh a device and issue a bearer token.
 pub async fn register_device(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<RegisterDevice>,
 ) -> AppResult<Json<DeviceToken>> {
-    let user_id = authenticate_user(&state, &body.username, &body.password).await?;
+    // Auth: an `Authorization` header (a passkey/password console session or Basic)
+    // takes precedence; otherwise fall back to in-body username+password (the
+    // native CLI clients).
+    let user_id = if headers.get(axum::http::header::AUTHORIZATION).is_some() {
+        authed_user(&state, &headers).await?
+    } else {
+        match (body.username.as_deref(), body.password.as_deref()) {
+            (Some(u), Some(p)) => authenticate_user(&state, u, p).await?,
+            _ => return Err(AppError::Unauthorized),
+        }
+    };
 
     // Find or create the device, enforcing single ownership.
     let existing: Option<(i64, i64)> =
@@ -244,8 +259,7 @@ pub async fn list_devices(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<Json<Vec<DeviceRow>>> {
-    let (username, password) = basic_auth(&headers)?;
-    let user_id = authenticate_user(&state, &username, &password).await?;
+    let user_id = authed_user(&state, &headers).await?;
     let rows = sqlx::query_as::<_, DeviceRow>(
         "SELECT device_id, name, public_key, role, created_at, last_seen \
          FROM devices WHERE user_id = ? ORDER BY created_at",
@@ -262,8 +276,7 @@ pub async fn delete_device(
     headers: HeaderMap,
     Path(device_id): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let (username, password) = basic_auth(&headers)?;
-    let user_id = authenticate_user(&state, &username, &password).await?;
+    let user_id = authed_user(&state, &headers).await?;
     let res = sqlx::query("DELETE FROM devices WHERE user_id = ? AND device_id = ?")
         .bind(user_id)
         .bind(&device_id)
@@ -288,8 +301,7 @@ pub async fn rename_device(
     Path(device_id): Path<String>,
     Json(body): Json<RenameDevice>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let (username, password) = basic_auth(&headers)?;
-    let user_id = authenticate_user(&state, &username, &password).await?;
+    let user_id = authed_user(&state, &headers).await?;
     let name = body.name.trim();
     if name.is_empty() {
         return Err(AppError::BadRequest("name required".into()));
@@ -544,6 +556,66 @@ fn basic_auth(headers: &HeaderMap) -> AppResult<(String, String)> {
     let text = String::from_utf8(decoded).map_err(|_| AppError::Unauthorized)?;
     let (user, pass) = text.split_once(':').ok_or(AppError::Unauthorized)?;
     Ok((user.to_string(), pass.to_string()))
+}
+
+// --- console session tokens ------------------------------------------------
+// A user can sign in to the web console with a passkey, which has no password to
+// re-send on each request. Passkey login mints an opaque session token (stored
+// hash-only) that the console then presents as `Authorization: Bearer`.
+
+/// How long a console session token stays valid.
+const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
+
+/// Mint a console session token for `user_id` (stored hash-only). Returns the
+/// plaintext, shown once to the client. Used by passkey login.
+pub async fn mint_user_session(pool: &SqlitePool, user_id: i64) -> AppResult<String> {
+    let token = auth::generate_token();
+    let now = now_unix();
+    sqlx::query(
+        "INSERT INTO user_sessions (user_id, token_hash, created_at, expires_at) \
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(user_id)
+    .bind(auth::hash_token(&token))
+    .bind(now)
+    .bind(now + SESSION_TTL_SECS)
+    .execute(pool)
+    .await?;
+    Ok(token)
+}
+
+/// Resolve a console session token → `user_id`, if valid and unexpired.
+async fn user_id_for_session(pool: &SqlitePool, token: &str) -> AppResult<Option<i64>> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT user_id FROM user_sessions WHERE token_hash = ? AND expires_at > ?")
+            .bind(auth::hash_token(token))
+            .bind(now_unix())
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(u,)| u))
+}
+
+/// Delete a console session token (sign-out).
+pub async fn revoke_user_session(pool: &SqlitePool, token: &str) -> AppResult<()> {
+    sqlx::query("DELETE FROM user_sessions WHERE token_hash = ?")
+        .bind(auth::hash_token(token))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Authenticate a user-scoped request from its `Authorization` header: a
+/// `Bearer <session>` token (from passkey login) or HTTP Basic
+/// (`username:password`). This is the single entry point for the device-management
+/// endpoints, so they work with either sign-in method.
+pub(crate) async fn authed_user(state: &AppState, headers: &HeaderMap) -> AppResult<i64> {
+    if let Some(tok) = bearer_token(headers) {
+        return user_id_for_session(&state.pool, &tok)
+            .await?
+            .ok_or(AppError::Unauthorized);
+    }
+    let (username, password) = basic_auth(headers)?;
+    authenticate_user(state, &username, &password).await
 }
 
 /// Refresh a device's `last_seen` (a heartbeat while it's connected to `/ws`), so

@@ -38,6 +38,13 @@ pub struct AppState {
     /// Optional observer of the signaling session lifecycle (connect/disconnect),
     /// so a plugin can persist per-account activity. Default `None`.
     pub session_observer: Option<Arc<dyn crate::resolver::SessionObserver>>,
+    /// WebAuthn relying party, when passkeys are configured (`RMD_RZ_WEBAUTHN_*`).
+    /// `None` disables the passkey routes at runtime.
+    #[cfg(feature = "passkeys")]
+    pub webauthn: Option<Arc<webauthn_rs::Webauthn>>,
+    /// In-memory store of in-progress passkey ceremonies.
+    #[cfg(feature = "passkeys")]
+    pub webauthn_reg: Arc<crate::webauthn::ChallengeStore>,
 }
 
 impl AppState {
@@ -65,6 +72,10 @@ impl AppState {
             // `new` signature stays stable for every caller.
             credential_resolver: Arc::new(crate::resolver::DeviceTokenResolver),
             session_observer: None,
+            #[cfg(feature = "passkeys")]
+            webauthn: crate::webauthn::from_env(),
+            #[cfg(feature = "passkeys")]
+            webauthn_reg: Arc::new(crate::webauthn::ChallengeStore::default()),
         }
     }
 }
