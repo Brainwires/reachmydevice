@@ -30,7 +30,7 @@ pub fn prevent_sleep(reason: &str) -> KeepAwake {
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use std::ffi::{c_void, CString};
+    use std::ffi::{CString, c_void};
 
     type IoReturn = i32;
     type IoPmAssertionId = u32;
@@ -45,7 +45,7 @@ mod imp {
     #[allow(clippy::duplicated_attributes)]
     #[link(name = "IOKit", kind = "framework")]
     #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn IOPMAssertionCreateWithName(
             assertion_type: CfStringRef,
             assertion_level: u32,
@@ -71,9 +71,11 @@ mod imp {
 
     /// SAFETY: builds a CoreFoundation string from `s`; caller CFReleases it.
     unsafe fn cfstr(s: &str) -> CfStringRef {
-        match CString::new(s) {
-            Ok(c) => CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), CF_ENCODING_UTF8),
-            Err(_) => std::ptr::null(),
+        unsafe {
+            match CString::new(s) {
+                Ok(c) => CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), CF_ENCODING_UTF8),
+                Err(_) => std::ptr::null(),
+            }
         }
     }
 

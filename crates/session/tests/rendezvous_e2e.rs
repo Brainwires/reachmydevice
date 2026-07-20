@@ -7,9 +7,9 @@
 //! Asserts both peers connect and a data-channel message is delivered — proving
 //! the whole Phase-2 signaling path, not just an in-process bridge.
 
-use rmd_rendezvous::{init_state, serve, Config};
-use rmd_session::rendezvous::RendezvousClient;
+use rmd_rendezvous::{Config, init_state, serve};
 use rmd_session::Signaling;
+use rmd_session::rendezvous::RendezvousClient;
 use rmd_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -89,6 +89,9 @@ fn connect_two_peers_through_real_rendezvous() {
                 database_url: db_url,
                 allow_open_registration: true,
                 admin_token: None,
+                bootstrap_token: None,
+                trusted_proxy_header: None,
+                token_ttl_secs: None,
                 turn: None,
             };
             let state = init_state(cfg).await.unwrap();
@@ -115,9 +118,13 @@ fn connect_two_peers_through_real_rendezvous() {
 
     // --- rendezvous signaling clients (host learns the viewer; viewer targets host) ---
     let host_rzv = RendezvousClient::connect(&ws_url, &host_token, None, None).unwrap();
-    let viewer_rzv =
-        RendezvousClient::connect(&ws_url, &viewer_token, Some("host-device".to_string()), None)
-            .unwrap();
+    let viewer_rzv = RendezvousClient::connect(
+        &ws_url,
+        &viewer_token,
+        Some("host-device".to_string()),
+        None,
+    )
+    .unwrap();
 
     // --- two transports; all signaling flows through the rendezvous clients ---
     let host = Transport::spawn(TransportConfig {

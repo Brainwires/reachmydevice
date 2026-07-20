@@ -9,7 +9,7 @@
 //! Headless/server hosts simply don't build this feature and run
 //! [`rmd_session::run_host`] directly.
 
-use rmd_session::{run_host_reporting, HostConfig, HostStatus, Signaling};
+use rmd_session::{HostConfig, HostStatus, Signaling, run_host_reporting};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};

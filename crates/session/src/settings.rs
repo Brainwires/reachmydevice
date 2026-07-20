@@ -8,7 +8,7 @@
 //!
 //! On-disk format: `MAGIC ‖ nonce(24) ‖ XChaCha20-Poly1305(serde_json(map))`.
 
-use crate::identity::{restrict_perms, DeviceIdentity};
+use crate::identity::{DeviceIdentity, restrict_perms};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use std::collections::BTreeMap;
@@ -128,11 +128,9 @@ fn decrypt(identity: &DeviceIdentity, blob: &[u8]) -> anyhow::Result<BTreeMap<St
     let ct = &blob[header..];
     let key = identity.derive_subkey(SETTINGS_INFO);
     let cipher = XChaCha20Poly1305::new(key.as_ref().into());
-    let pt = Zeroizing::new(
-        cipher
-            .decrypt(XNonce::from_slice(nonce), ct)
-            .map_err(|_| anyhow::anyhow!("cannot decrypt settings (wrong identity or corrupt file)"))?,
-    );
+    let pt = Zeroizing::new(cipher.decrypt(XNonce::from_slice(nonce), ct).map_err(|_| {
+        anyhow::anyhow!("cannot decrypt settings (wrong identity or corrupt file)")
+    })?);
     Ok(serde_json::from_slice(&pt)?)
 }
 

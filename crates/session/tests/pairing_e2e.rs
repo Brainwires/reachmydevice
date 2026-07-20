@@ -4,10 +4,10 @@
 //! (which only forwards opaque frames). Proves pairing.rs + the mailbox + the
 //! pairing client work together with no accounts.
 
-use rmd_rendezvous::{init_state, serve, Config};
+use rmd_rendezvous::{Config, init_state, serve};
+use rmd_session::DeviceIdentity;
 use rmd_session::pairing::generate_pairing_code;
 use rmd_session::pairing_client::pair_pake;
-use rmd_session::DeviceIdentity;
 use std::time::Duration;
 
 #[test]
@@ -26,6 +26,9 @@ fn two_devices_pair_over_the_stateless_relay() {
                 database_url: db_url,
                 allow_open_registration: false, // pairing needs no account
                 admin_token: None,
+                bootstrap_token: None,
+                trusted_proxy_header: None,
+                token_ttl_secs: None,
                 turn: None,
             };
             let state = init_state(cfg).await.unwrap();
@@ -77,6 +80,9 @@ fn mismatched_code_fails_to_pair() {
                 database_url: db_url,
                 allow_open_registration: false,
                 admin_token: None,
+                bootstrap_token: None,
+                trusted_proxy_header: None,
+                token_ttl_secs: None,
                 turn: None,
             };
             let state = init_state(cfg).await.unwrap();

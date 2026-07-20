@@ -6,11 +6,11 @@
 //!   long-lived device **bearer token** used for the signaling WebSocket.
 
 use crate::auth;
-use crate::db::{now_unix, AppState};
+use crate::db::{AppState, now_unix};
 use crate::error::{AppError, AppResult};
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
-use axum::Json;
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -138,10 +138,10 @@ pub struct SetRegistration {
 }
 
 /// `GET /api/registration` — public: is new-account signup currently open?
-pub async fn get_registration(
-    State(state): State<AppState>,
-) -> AppResult<Json<serde_json::Value>> {
-    Ok(Json(serde_json::json!({ "open": registration_open(&state).await? })))
+pub async fn get_registration(State(state): State<AppState>) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(
+        serde_json::json!({ "open": registration_open(&state).await? }),
+    ))
 }
 
 /// `POST /api/admin/registration` — flip signup open/closed. Admin bearer token.
@@ -157,7 +157,10 @@ pub async fn set_registration(
         crate::db::bool_str(body.enabled),
     )
     .await?;
-    tracing::info!(open = body.enabled, "open_registration changed via admin API");
+    tracing::info!(
+        open = body.enabled,
+        "open_registration changed via admin API"
+    );
     Ok(Json(serde_json::json!({ "open": body.enabled })))
 }
 
@@ -178,7 +181,7 @@ pub async fn register_device(
         Some((_, owner)) if owner != user_id => {
             return Err(AppError::Conflict(
                 "device already registered to another account".into(),
-            ))
+            ));
         }
         Some((id, _)) => {
             sqlx::query("UPDATE devices SET name = ?, public_key = ?, role = ? WHERE id = ?")
@@ -332,8 +335,8 @@ fn request_token(headers: &HeaderMap, q: &TokenQuery) -> Option<String> {
 /// HMAC-SHA1 coturn credential for `username` (the `--use-auth-secret` scheme).
 fn mint_turn_credential(secret: &str, username: &str) -> String {
     // HMAC accepts a key of any length, so this never fails.
-    let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts keys of any length");
+    let mut mac =
+        Hmac::<Sha1>::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
     mac.update(username.as_bytes());
     base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
 }
@@ -379,10 +382,13 @@ pub async fn ice_servers(
     Query(q): Query<TokenQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
     let token = request_token(&headers, &q).ok_or(AppError::Unauthorized)?;
-    // Authenticate the device and resolve its owning user (also refreshes
-    // `last_seen`). Only registered devices can even reach the relay gate.
-    let user_id = match user_id_for_token(&state.pool, &token).await? {
-        Some(id) => id,
+    // Resolve the presented credential to an identity via the pluggable resolver.
+    // The default accepts device tokens only (resolving the owning user + stamping
+    // `last_seen`); a paid build also accepts tenant member JWTs, which resolve to
+    // the platform account's admin user_id (so relay rolls up per-account). Only a
+    // resolvable credential reaches the relay gate.
+    let user_id = match state.credential_resolver.resolve(&state.pool, &token).await {
+        Some(cred) => cred.user_id,
         None => return Err(AppError::Unauthorized),
     };
 
@@ -444,10 +450,12 @@ pub async fn ws_ticket(
     Query(q): Query<TokenQuery>,
 ) -> AppResult<Json<WsTicketResp>> {
     let token = request_token(&headers, &q).ok_or(AppError::Unauthorized)?;
-    let device_id = device_id_for_token(&state.pool, &token)
-        .await?
+    let cred = state
+        .credential_resolver
+        .resolve(&state.pool, &token)
+        .await
         .ok_or(AppError::Unauthorized)?;
-    let ticket = state.ws_tickets.issue(&device_id);
+    let ticket = state.ws_tickets.issue(&cred);
     Ok(Json(WsTicketResp { ticket }))
 }
 
@@ -548,14 +556,18 @@ pub async fn touch_last_seen(pool: &SqlitePool, device_id: &str) {
         .await;
 }
 
-/// Resolve a device bearer token → the owning account's `user_id`, if the token
-/// is valid and unexpired. Also stamps the device's `last_seen`. Used by the ICE
-/// endpoint, where the relay-entitlement policy is keyed by user.
-pub async fn user_id_for_token(pool: &SqlitePool, token: &str) -> AppResult<Option<i64>> {
+/// Resolve a device bearer token → `(user_id, device_id)` if the token is valid
+/// and unexpired, stamping the device's `last_seen`. This is the single source of
+/// truth for device-token auth: [`user_id_for_token`], [`device_id_for_token`],
+/// and the default [`crate::resolver::DeviceTokenResolver`] are thin views over it.
+pub async fn resolve_device_token(
+    pool: &SqlitePool,
+    token: &str,
+) -> AppResult<Option<(i64, String)>> {
     let token_hash = auth::hash_token(token);
     let now = now_unix();
-    let row: Option<(i64, i64)> = sqlx::query_as(
-        "SELECT d.user_id, d.id \
+    let row: Option<(i64, String, i64)> = sqlx::query_as(
+        "SELECT d.user_id, d.device_id, d.id \
          FROM device_tokens t JOIN devices d ON d.id = t.device_pk \
          WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)",
     )
@@ -563,42 +575,33 @@ pub async fn user_id_for_token(pool: &SqlitePool, token: &str) -> AppResult<Opti
     .bind(now)
     .fetch_optional(pool)
     .await?;
-    if let Some((user_id, device_pk)) = row {
+    if let Some((user_id, device_id, device_pk)) = row {
         sqlx::query("UPDATE devices SET last_seen = ? WHERE id = ?")
             .bind(now)
             .bind(device_pk)
             .execute(pool)
             .await
             .ok();
-        Ok(Some(user_id))
+        Ok(Some((user_id, device_id)))
     } else {
         Ok(None)
     }
 }
 
-/// Resolve a device bearer token → its `device_id`, if valid and unexpired.
-/// Also stamps `last_seen`. Used by the signaling WebSocket auth.
+/// Resolve a device bearer token → the owning account's `user_id`, if valid and
+/// unexpired (also stamps `last_seen`). Thin wrapper over [`resolve_device_token`];
+/// kept as-is for the ICE endpoint and for plugin callers (e.g. billing routes).
+pub async fn user_id_for_token(pool: &SqlitePool, token: &str) -> AppResult<Option<i64>> {
+    Ok(resolve_device_token(pool, token)
+        .await?
+        .map(|(user_id, _)| user_id))
+}
+
+/// Resolve a device bearer token → its `device_id`, if valid and unexpired (also
+/// stamps `last_seen`). Thin wrapper over [`resolve_device_token`]; kept for the
+/// signaling WebSocket auth.
 pub async fn device_id_for_token(pool: &SqlitePool, token: &str) -> AppResult<Option<String>> {
-    let token_hash = auth::hash_token(token);
-    let now = now_unix();
-    let row: Option<(String, i64)> = sqlx::query_as(
-        "SELECT d.device_id, d.id \
-         FROM device_tokens t JOIN devices d ON d.id = t.device_pk \
-         WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)",
-    )
-    .bind(&token_hash)
-    .bind(now)
-    .fetch_optional(pool)
-    .await?;
-    if let Some((device_id, device_pk)) = row {
-        sqlx::query("UPDATE devices SET last_seen = ? WHERE id = ?")
-            .bind(now)
-            .bind(device_pk)
-            .execute(pool)
-            .await
-            .ok();
-        Ok(Some(device_id))
-    } else {
-        Ok(None)
-    }
+    Ok(resolve_device_token(pool, token)
+        .await?
+        .map(|(_, device_id)| device_id))
 }

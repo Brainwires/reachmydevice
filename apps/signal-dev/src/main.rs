@@ -13,8 +13,8 @@
 //! Then point both host and viewer at `ws://<this-host>:9000` equivalent (raw
 //! TCP here). Replaced by the axum WebSocket rendezvous in Phase 2.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -49,10 +49,13 @@ async fn main() -> anyhow::Result<()> {
         let rx = tx.subscribe();
         tracing::info!(client = id, %peer, "client connected");
         tokio::spawn(async move {
-            if let Err(e) = handle_client(socket, id, tx, rx).await {
-                tracing::info!(client = id, error = %e, "client disconnected");
-            } else {
-                tracing::info!(client = id, "client disconnected");
+            match handle_client(socket, id, tx, rx).await {
+                Err(e) => {
+                    tracing::info!(client = id, error = %e, "client disconnected");
+                }
+                _ => {
+                    tracing::info!(client = id, "client disconnected");
+                }
             }
         });
     }

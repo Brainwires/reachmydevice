@@ -25,10 +25,19 @@ pub struct AppState {
     /// a still-valid cred instead of minting a fresh one every call, which caps
     /// credential churn (an authed device can't spew unbounded shareable creds).
     /// user_id → (username, credential, expiry_unix).
+    #[allow(clippy::type_complexity)]
     pub ice_cache: Arc<std::sync::Mutex<std::collections::HashMap<i64, (String, String, i64)>>>,
     /// Relay-access policy. The open-source default is `AllowAll`; a private
     /// plugin can inject a paid policy (see `AppState::new`).
     pub entitlement: Arc<dyn RelayEntitlement>,
+    /// How a presented bearer credential on the device-facing endpoints
+    /// (`/api/ice`, `/api/ws-ticket`, `/ws`) is resolved to an identity. The
+    /// default [`crate::resolver::DeviceTokenResolver`] accepts device tokens
+    /// only; a plugin overrides this field to also accept, e.g., member JWTs.
+    pub credential_resolver: Arc<dyn crate::resolver::CredentialResolver>,
+    /// Optional observer of the signaling session lifecycle (connect/disconnect),
+    /// so a plugin can persist per-account activity. Default `None`.
+    pub session_observer: Option<Arc<dyn crate::resolver::SessionObserver>>,
 }
 
 impl AppState {
@@ -36,11 +45,7 @@ impl AppState {
     ///
     /// The default binary passes `rmd_entitlement::allow_all()`; a paid build
     /// injects its own [`RelayEntitlement`] here without touching this crate.
-    pub fn new(
-        pool: SqlitePool,
-        config: Config,
-        entitlement: Arc<dyn RelayEntitlement>,
-    ) -> Self {
+    pub fn new(pool: SqlitePool, config: Config, entitlement: Arc<dyn RelayEntitlement>) -> Self {
         // Cap concurrent Argon2 to a few permits — enough for real login
         // concurrency on a small box, far below what would exhaust its RAM.
         let argon2_permits = std::thread::available_parallelism()
@@ -55,6 +60,11 @@ impl AppState {
             ws_tickets: Arc::new(crate::auth::TicketStore::new()),
             ice_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             entitlement,
+            // Open-source defaults: device-token auth, no activity observer. A
+            // paid build overrides these `pub` fields after construction, so the
+            // `new` signature stays stable for every caller.
+            credential_resolver: Arc::new(crate::resolver::DeviceTokenResolver),
+            session_observer: None,
         }
     }
 }
@@ -109,11 +119,7 @@ pub async fn seed_settings(pool: &SqlitePool, cfg: &Config) -> sqlx::Result<()> 
 
 /// Canonical string form for a boolean setting.
 pub fn bool_str(b: bool) -> &'static str {
-    if b {
-        "true"
-    } else {
-        "false"
-    }
+    if b { "true" } else { "false" }
 }
 
 /// Parse a stored setting string as a boolean (`"true"`/`"1"` → true).
@@ -129,6 +135,7 @@ pub fn parse_bool(s: &str) -> bool {
 ///   - `open` is true (runtime open-registration).
 /// Returns rows inserted (0 = refused). A `UNIQUE` violation (username taken)
 /// surfaces as `Err`.
+#[allow(clippy::doc_lazy_continuation)]
 pub async fn create_user_if_allowed(
     pool: &SqlitePool,
     username: &str,
@@ -187,25 +194,55 @@ mod tests {
 
         // Seeded from the (closed) env default.
         assert_eq!(
-            get_setting(&pool, SETTING_OPEN_REGISTRATION).await.unwrap().as_deref(),
+            get_setting(&pool, SETTING_OPEN_REGISTRATION)
+                .await
+                .unwrap()
+                .as_deref(),
             Some("false")
         );
 
         // Empty table but bootstrap gated off (a bootstrap token is required and
         // wasn't presented) → refused even though the table is empty.
-        assert_eq!(create_user_if_allowed(&pool, "x", "h0", false, false).await.unwrap(), 0);
+        assert_eq!(
+            create_user_if_allowed(&pool, "x", "h0", false, false)
+                .await
+                .unwrap(),
+            0
+        );
         // Empty table + bootstrap allowed → first account bootstraps though closed.
-        assert_eq!(create_user_if_allowed(&pool, "alice", "h1", false, true).await.unwrap(), 1);
+        assert_eq!(
+            create_user_if_allowed(&pool, "alice", "h1", false, true)
+                .await
+                .unwrap(),
+            1
+        );
         // Now a user exists and signup is closed → refused (bootstrap no longer applies).
-        assert_eq!(create_user_if_allowed(&pool, "bob", "h2", false, true).await.unwrap(), 0);
+        assert_eq!(
+            create_user_if_allowed(&pool, "bob", "h2", false, true)
+                .await
+                .unwrap(),
+            0
+        );
         // Flip the runtime toggle on → allowed again.
-        set_setting(&pool, SETTING_OPEN_REGISTRATION, bool_str(true)).await.unwrap();
+        set_setting(&pool, SETTING_OPEN_REGISTRATION, bool_str(true))
+            .await
+            .unwrap();
         assert!(parse_bool(
-            &get_setting(&pool, SETTING_OPEN_REGISTRATION).await.unwrap().unwrap()
+            &get_setting(&pool, SETTING_OPEN_REGISTRATION)
+                .await
+                .unwrap()
+                .unwrap()
         ));
-        assert_eq!(create_user_if_allowed(&pool, "bob", "h2", true, false).await.unwrap(), 1);
+        assert_eq!(
+            create_user_if_allowed(&pool, "bob", "h2", true, false)
+                .await
+                .unwrap(),
+            1
+        );
         // Duplicate username → UNIQUE violation (not a silent 0-rows).
-        let err = create_user_if_allowed(&pool, "alice", "h3", true, false).await.unwrap_err();
+        let err = create_user_if_allowed(&pool, "alice", "h3", true, false)
+            .await
+            .unwrap_err();
         assert!(matches!(err, sqlx::Error::Database(d) if d.is_unique_violation()));
     }
 }

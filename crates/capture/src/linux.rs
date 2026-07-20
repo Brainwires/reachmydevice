@@ -15,11 +15,11 @@ use crate::{
 };
 use bytes::Bytes;
 use rmd_protocol::monotonic_micros;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ConnectionExt, ImageFormat};
 
@@ -73,8 +73,12 @@ fn discover_x_env() {
             if !c.exists() {
                 continue;
             }
-            std::env::set_var("DISPLAY", d);
-            std::env::set_var("XAUTHORITY", c);
+            // SAFETY (edition 2024): env mutation is only unsound with concurrent
+            // readers; this is single-threaded X-session probing at capture init.
+            unsafe {
+                std::env::set_var("DISPLAY", d);
+                std::env::set_var("XAUTHORITY", c);
+            }
             if x11rb::connect(None).is_ok() {
                 tracing::info!(display = %d, xauthority = %c.display(),
                     "auto-discovered X session for capture (set DISPLAY/XAUTHORITY yourself to override)");
@@ -85,9 +89,10 @@ fn discover_x_env() {
 
     // Nothing authenticated — restore the caller's DISPLAY so the eventual error
     // message is about their setup, not our probing.
+    // SAFETY (edition 2024): single-threaded capture-init probe (see above).
     match display_set {
-        Some(d) => std::env::set_var("DISPLAY", d),
-        None => std::env::remove_var("DISPLAY"),
+        Some(d) => unsafe { std::env::set_var("DISPLAY", d) },
+        None => unsafe { std::env::remove_var("DISPLAY") },
     }
 }
 

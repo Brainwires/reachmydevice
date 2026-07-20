@@ -8,8 +8,8 @@
 //! points, matching CGEvent's global coordinate space). Held-button moves are
 //! sent as drag events so drag operations work.
 
-use crate::keymap;
 use crate::Injector;
+use crate::keymap;
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, ScrollEventUnit,

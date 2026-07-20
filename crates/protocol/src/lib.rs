@@ -18,10 +18,10 @@ pub mod pb {
 }
 
 pub use pb::{
-    envelope, input_event, AudioFrame, Bye, ClipboardKind, ClipboardUpdate, DisplayDescriptor,
-    DisplayList, Envelope, FileAck, FileCancel, FileChunk, FileComplete, FileOffer, Hello,
-    HelloAck, InputEvent, KeyEvent, MouseButton, MouseMove, MouseScroll, Ping, Pong,
-    RequestKeyframe, Role, SelectDisplay, SetZoom, VideoCodec, ViewOnly,
+    AudioFrame, Bye, ClipboardKind, ClipboardUpdate, DisplayDescriptor, DisplayList, Envelope,
+    FileAck, FileCancel, FileChunk, FileComplete, FileOffer, Hello, HelloAck, InputEvent, KeyEvent,
+    MouseButton, MouseMove, MouseScroll, Ping, Pong, RequestKeyframe, Role, SelectDisplay, SetZoom,
+    VideoCodec, ViewOnly, envelope, input_event,
 };
 
 /// Protocol major version. **Incompatible across mismatches** — bump only on a

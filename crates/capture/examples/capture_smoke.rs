@@ -11,7 +11,7 @@
 //! Zero frames almost always means the permission has not been granted (or the
 //! binary needs to be restarted after granting).
 
-use rmd_capture::{list_displays, start_capture, CaptureConfig};
+use rmd_capture::{CaptureConfig, list_displays, start_capture};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 

@@ -1111,9 +1111,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-deque"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
 dependencies = [
  "crossbeam-epoch",
  "crossbeam-utils",
@@ -3406,9 +3406,9 @@ dependencies = [
 
 [[package]]
 name = "num-bigint"
-version = "0.4.7"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c863e9ab5e7bf9c99ba75e1050f1e4d624ae87ed3532d6238ffbdc7b585dbbe6"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -4908,7 +4908,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-capture"
-version = "0.2.18"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -4928,7 +4928,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-codec"
-version = "0.2.18"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "audiopus",
@@ -4943,14 +4943,14 @@ dependencies = [
 
 [[package]]
 name = "rmd-entitlement"
-version = "0.2.18"
+version = "0.3.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "rmd-host"
-version = "0.2.18"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "rmd-capture",
@@ -4969,7 +4969,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-input"
-version = "0.2.18"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.1",
@@ -4982,7 +4982,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-protocol"
-version = "0.2.18"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "prost",
@@ -4993,7 +4993,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-rendezvous"
-version = "0.2.18"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5020,7 +5020,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-session"
-version = "0.2.18"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5055,7 +5055,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-signal-dev"
-version = "0.2.18"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -5067,7 +5067,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-transport"
-version = "0.2.18"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5085,7 +5085,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-viewer"
-version = "0.2.18"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -5859,9 +5859,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 dependencies = [
  "lock_api",
 ]

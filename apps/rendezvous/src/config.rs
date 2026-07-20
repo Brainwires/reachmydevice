@@ -102,8 +102,12 @@ impl Config {
             .unwrap_or(false);
         let turn = if turn_enabled {
             match (
-                std::env::var("RMD_TURN_SECRET").ok().filter(|s| !s.is_empty()),
-                std::env::var("RMD_TURN_HOST").ok().filter(|s| !s.is_empty()),
+                std::env::var("RMD_TURN_SECRET")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
+                std::env::var("RMD_TURN_HOST")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
             ) {
                 (Some(secret), Some(host)) => Some(TurnConfig {
                     secret,

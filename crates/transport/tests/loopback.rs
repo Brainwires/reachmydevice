@@ -58,6 +58,7 @@ impl Bridge {
                 TransportEvent::Disconnected => self.host_connected = false,
                 TransportEvent::Data(d) => self.host_data.push(d),
                 TransportEvent::Video { .. } => {} // host never receives video
+                TransportEvent::KeyframeRequested => {} // no encoder in this test
             }
         }
         while let Some(ev) = viewer.try_event() {
@@ -71,6 +72,7 @@ impl Bridge {
                     }
                 }
                 TransportEvent::Data(d) => self.viewer_data.push(d),
+                TransportEvent::KeyframeRequested => {} // no encoder in this test
             }
         }
     }

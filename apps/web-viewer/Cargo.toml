@@ -1,7 +1,8 @@
 [package]
+publish = false  # internal workspace member; path-dep, never published to crates.io
 name = "rmd-web-viewer"
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.92"
 license = "Elastic-2.0"
 description = "ReachMyDevice browser viewer — WASM, connects over WebRTC and decodes H.264 in the browser."

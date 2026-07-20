@@ -10,16 +10,16 @@
 
 use crate::{DecodedFrame, Decoder, EncodedFrame, Encoder, EncoderConfig};
 use bytes::Bytes;
+use openh264::OpenH264API;
 use openh264::encoder::{
     BitRate, Complexity, Encoder as OhEncoder, EncoderConfig as OhEncoderConfig, FrameRate,
     IntraFramePeriod, RateControlMode, UsageType,
 };
 use openh264::formats::{YUVSlices, YUVSource};
-use openh264::OpenH264API;
 use std::time::{Duration, Instant};
 use yuvutils_rs::{
-    bgra_to_yuv420, YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange,
-    YuvStandardMatrix,
+    YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
+    bgra_to_yuv420,
 };
 
 /// Rebuild the encoder only when the bitrate target moves more than this
@@ -80,8 +80,7 @@ impl OpenH264Encoder {
     fn maybe_reconfigure(&mut self) -> anyhow::Result<()> {
         let cur = self.cfg.bitrate_bps.max(1) as f32;
         let delta = (self.pending_bitrate_bps as f32 - cur).abs() / cur;
-        if delta > BITRATE_REBUILD_THRESHOLD
-            && self.last_rebuild.elapsed() >= REBUILD_MIN_INTERVAL
+        if delta > BITRATE_REBUILD_THRESHOLD && self.last_rebuild.elapsed() >= REBUILD_MIN_INTERVAL
         {
             self.cfg.bitrate_bps = self.pending_bitrate_bps;
             self.encoder = build_encoder(&self.cfg)?;

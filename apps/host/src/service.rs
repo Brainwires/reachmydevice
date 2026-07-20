@@ -16,7 +16,7 @@
 //!   `rmdd restart`       restart it
 //!   `rmdd log [-f]`      show the service log (`-f` to follow)
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 
 /// systemd unit base name (the unit file is `rmd-host.service`).
 #[cfg(target_os = "linux")]
@@ -58,7 +58,9 @@ mod imp {
     use std::process::Command;
 
     fn unit_path() -> std::path::PathBuf {
-        home().join(".config/systemd/user").join(format!("{NAME}.service"))
+        home()
+            .join(".config/systemd/user")
+            .join(format!("{NAME}.service"))
     }
 
     /// Run `systemctl --user <args>` and return the completed output.
@@ -127,12 +129,17 @@ mod imp {
             // enable-linger so the service starts at boot and survives logout
             // (essential on a headless server).
             if let Ok(user) = std::env::var("USER") {
-                let _ = Command::new("loginctl").arg("enable-linger").arg(user).status();
+                let _ = Command::new("loginctl")
+                    .arg("enable-linger")
+                    .arg(user)
+                    .status();
             }
             let _ = systemctl(&["daemon-reload"]);
             run_ok(&["enable", "--now", NAME])?;
             println!("Enabled: {NAME} auto-starts at boot and is running now (systemd --user).");
-            println!("Note: until you `rmdd set rendezvous_url/token`, it starts but idles unconfigured.");
+            println!(
+                "Note: until you `rmdd set rendezvous_url/token`, it starts but idles unconfigured."
+            );
         } else {
             let _ = systemctl(&["disable", NAME]);
             println!("Disabled {NAME} autostart (unit kept — `rmdd enable` to re-enable).");
@@ -163,7 +170,11 @@ mod imp {
                 .unwrap_or_else(|| dflt.to_string())
         };
         let installed = unit_path().exists();
-        let enabled = if installed { read(&["is-enabled", NAME], "disabled") } else { "not installed".into() };
+        let enabled = if installed {
+            read(&["is-enabled", NAME], "disabled")
+        } else {
+            "not installed".into()
+        };
         let active = read(&["is-active", NAME], "inactive");
         println!("{NAME} (systemd --user):  autostart={enabled}  state={active}");
         Ok(())
@@ -179,7 +190,8 @@ mod imp {
         } else {
             c.arg("--no-pager").arg("-n").arg("200");
         }
-        c.status().context("run journalctl (is systemd available?)")?;
+        c.status()
+            .context("run journalctl (is systemd available?)")?;
         Ok(())
     }
 }
@@ -193,7 +205,9 @@ mod imp {
     use std::process::Command;
 
     fn plist_path() -> std::path::PathBuf {
-        home().join("Library/LaunchAgents").join(format!("{LABEL}.plist"))
+        home()
+            .join("Library/LaunchAgents")
+            .join(format!("{LABEL}.plist"))
     }
 
     /// launchd domain target for the current user's GUI session: `gui/<uid>`.
@@ -265,12 +279,19 @@ mod imp {
             let _ = launchctl(&["enable", &target()]);
             let o = launchctl(&["bootstrap", &domain(), &path.to_string_lossy()])?;
             if !o.status.success() {
-                bail!("launchctl bootstrap failed: {}", String::from_utf8_lossy(&o.stderr).trim());
+                bail!(
+                    "launchctl bootstrap failed: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
             }
             let _ = launchctl(&["kickstart", &target()]);
             println!("Enabled: {LABEL} auto-starts at login and is running now (launchd).");
-            println!("Note: until you `rmdd set rendezvous_url/token`, it starts but idles unconfigured.");
-            println!("Grant Screen Recording + Accessibility to rmdd in System Settings › Privacy & Security.");
+            println!(
+                "Note: until you `rmdd set rendezvous_url/token`, it starts but idles unconfigured."
+            );
+            println!(
+                "Grant Screen Recording + Accessibility to rmdd in System Settings › Privacy & Security."
+            );
         } else {
             let _ = launchctl(&["bootout", &target()]);
             let _ = launchctl(&["disable", &target()]);
@@ -281,13 +302,23 @@ mod imp {
 
     pub fn start() -> anyhow::Result<()> {
         ensure_plist()?;
+        // `stop` boots the service out of launchd (so KeepAlive can't respawn it),
+        // which unloads it even though the plist file still exists — so `start`
+        // must (re)bootstrap it, not just kickstart it. Bootstrap is a harmless
+        // error when it's already loaded (ignored here), so this lets `start`
+        // recover from a prior `stop` instead of failing "Could not find service".
+        let path = plist_path();
+        let _ = launchctl(&["bootstrap", &domain(), &path.to_string_lossy()]);
         // kickstart is a no-op if already running; -k would force a restart.
         let o = launchctl(&["kickstart", &target()])?;
         if o.status.success() {
             println!("✓ started {LABEL}");
             Ok(())
         } else {
-            bail!("launchctl kickstart failed: {}", String::from_utf8_lossy(&o.stderr).trim());
+            bail!(
+                "launchctl kickstart failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
         }
     }
 
@@ -305,14 +336,23 @@ mod imp {
             println!("✓ restarted {LABEL}");
             Ok(())
         } else {
-            bail!("launchctl kickstart -k failed: {}", String::from_utf8_lossy(&o.stderr).trim());
+            bail!(
+                "launchctl kickstart -k failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
         }
     }
 
     pub fn status() -> anyhow::Result<()> {
         let installed = plist_path().exists();
-        let loaded = launchctl(&["list", LABEL]).map(|o| o.status.success()).unwrap_or(false);
-        let autostart = if installed { "on (RunAtLoad)" } else { "not installed" };
+        let loaded = launchctl(&["list", LABEL])
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let autostart = if installed {
+            "on (RunAtLoad)"
+        } else {
+            "not installed"
+        };
         let state = if loaded { "running" } else { "stopped" };
         println!("{LABEL} (launchd):  autostart={autostart}  state={state}");
         Ok(())
@@ -322,7 +362,10 @@ mod imp {
         // launchd writes the agent's stdout/stderr to this file (see the plist).
         let log = home().join(".local/state/rmd/rmd-host.log");
         if !log.exists() {
-            bail!("no log yet at {} — has the service run? (`rmdd enable`)", log.display());
+            bail!(
+                "no log yet at {} — has the service run? (`rmdd enable`)",
+                log.display()
+            );
         }
         let mut c = Command::new("tail");
         if follow {
@@ -342,7 +385,9 @@ mod imp {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod imp {
     pub fn enable(_on: bool) -> anyhow::Result<()> {
-        anyhow::bail!("rmdd service management is only supported on Linux (systemd) and macOS (launchd)")
+        anyhow::bail!(
+            "rmdd service management is only supported on Linux (systemd) and macOS (launchd)"
+        )
     }
     pub fn start() -> anyhow::Result<()> {
         enable(true)

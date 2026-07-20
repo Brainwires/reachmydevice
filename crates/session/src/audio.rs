@@ -19,7 +19,7 @@
 //! choice (a host shouldn't broadcast its audio unless asked), which also keeps
 //! the proven video path unaffected.
 
-use codec::{AudioDecoder, AudioEncoder, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE};
+use codec::{AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE, AudioDecoder, AudioEncoder};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rmd_codec as codec;
 use std::collections::VecDeque;

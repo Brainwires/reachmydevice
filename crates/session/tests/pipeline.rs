@@ -6,7 +6,7 @@
 //! screen, window, or OS permissions. (Screen capture, input injection, and
 //! on-glass rendering are validated separately on-device; see the Phase 1 report.)
 
-use rmd_codec::{new_decoder, new_encoder, EncoderConfig, VideoCodec};
+use rmd_codec::{EncoderConfig, VideoCodec, new_decoder, new_encoder};
 use rmd_transport::{SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole};
 use std::time::{Duration, Instant};
 

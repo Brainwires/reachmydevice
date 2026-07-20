@@ -7,8 +7,8 @@
 //! Env: `RMD_RZV_URL` (e.g. `wss://app.reachmy.dev/ws`),
 //! `RMD_TOK_A`, `RMD_TOK_B`, `RMD_DEV_B` (device id of B).
 
-use rmd_session::rendezvous::RendezvousClient;
 use rmd_session::Signaling;
+use rmd_session::rendezvous::RendezvousClient;
 use rmd_transport::SignalMsg;
 use std::time::{Duration, Instant};
 

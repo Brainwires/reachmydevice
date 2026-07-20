@@ -72,8 +72,8 @@ impl AudioDecoder {
     /// Decode one Opus packet into mono PCM samples. Pass `None` to invoke
     /// packet-loss concealment for a missing frame.
     pub fn decode(&mut self, packet: Option<&[u8]>, fec: bool) -> anyhow::Result<Vec<i16>> {
-        use audiopus::packet::Packet;
         use audiopus::MutSignals;
+        use audiopus::packet::Packet;
         let mut out = vec![0i16; AUDIO_FRAME_SAMPLES];
         let input = match packet {
             Some(bytes) => Some(Packet::try_from(bytes).context("wrap opus packet")?),

@@ -21,8 +21,8 @@ use rav1e::prelude::{
 };
 use std::collections::HashMap;
 use yuvutils_rs::{
-    bgra_to_yuv420, YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange,
-    YuvStandardMatrix,
+    YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
+    bgra_to_yuv420,
 };
 
 /// Rebuild the encoder only when the bitrate target moves more than this

@@ -25,7 +25,7 @@ pub mod viewer;
 
 pub use account::{AccountClient, DeviceInfo};
 pub use filexfer::{FileEvent, FileTransferConfig};
-pub use host::{run_host, run_host_reporting, HostConfig, HostStatus};
+pub use host::{HostConfig, HostStatus, run_host, run_host_reporting};
 pub use identity::DeviceIdentity;
 pub use signal::{SignalClient, Signaling};
 pub use viewer::{ViewerConfig, ViewerSession, ViewerUpdate};

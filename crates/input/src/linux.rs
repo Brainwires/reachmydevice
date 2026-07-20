@@ -7,8 +7,8 @@
 //!
 //! Wayland injection (libei / wlroots virtual pointer) is a separate backend.
 
-use crate::keymap;
 use crate::Injector;
+use crate::keymap;
 use rmd_protocol::input_event::Event as InputEvent;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::Window;

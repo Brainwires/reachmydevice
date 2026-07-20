@@ -15,7 +15,32 @@ version = 2
 # Fail the build on any crate with a known security advisory or a yanked release.
 yanked = "deny"
 # Add specific RUSTSEC IDs here ONLY with a written justification + expiry.
-ignore = []
+# Everything below is a TRANSITIVE dependency with no reachable exploit path in
+# what we ship, and no upstream fix currently available. Revisit ~2026-Q4.
+ignore = [
+    # --- Unmaintained (informational — not vulnerabilities) ---
+    # gtk-rs GTK3 bindings — pulled ONLY by the optional `tray` feature's Linux
+    # backend (macOS/Windows trays are native); headless/server hosts never build it.
+    "RUSTSEC-2024-0412",
+    "RUSTSEC-2024-0413",
+    "RUSTSEC-2024-0415",
+    "RUSTSEC-2024-0416",
+    "RUSTSEC-2024-0418",
+    "RUSTSEC-2024-0419",
+    "RUSTSEC-2024-0420",
+    "RUSTSEC-2024-0370", # proc-macro-error — transitive proc-macro helper
+    "RUSTSEC-2024-0436", # paste — transitive proc-macro helper
+    "RUSTSEC-2026-0150", # audiopus_sys — only under the optional `audio` feature
+    "RUSTSEC-2026-0192", # ttf-parser — via egui/epaint's default font stack (viewer)
+    # --- Vulnerabilities (transitive, feature/platform-gated, no upstream fix yet) ---
+    # crossbeam Debug-format invalid-pointer deref — via rav1e (optional `av1`
+    # feature) → rayon; not exercised by our Debug output. No patched release yet.
+    "RUSTSEC-2026-0204",
+    # quick-xml DoS on hostile XML (dup-attr / namespace flooding) — transitive; we
+    # never feed it attacker-controlled XML. Awaiting an upstream fix.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
 
 [licenses]
 version = 2
@@ -36,6 +61,14 @@ allow = [
     "Unicode-DFS-2016",
     "CC0-1.0",
     "OpenSSL",
+    # Boost Software License — permissive, transitive dep.
+    "BSL-1.0",
+    # Community Data License Agreement — Permissive (transitive data-table dep).
+    "CDLA-Permissive-2.0",
+    # Embedded default fonts in the native viewer's GUI stack (egui/epaint bundles
+    # Ubuntu + emoji faces). Permissive font licenses, fine to redistribute.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
 ]
 confidence-threshold = 0.9
 # `ring` ships a bespoke license file; clear it explicitly rather than allow-all.
