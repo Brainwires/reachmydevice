@@ -4,6 +4,8 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-20
+
 ### Added
 - **Pluggable credential resolution + session-observer seams** (for paid/plugin builds;
   the open build is unchanged). The device-facing endpoints (`/api/ice`,
