@@ -128,22 +128,26 @@ mod tests {
     #[test]
     fn sanitize_collapses_full_and_degenerate_to_full() {
         assert!(CropRect::FULL.sanitized().is_full());
-        assert!(CropRect {
-            x: 0.0,
-            y: 0.0,
-            w: 0.0,
-            h: 0.5
-        }
-        .sanitized()
-        .is_full());
-        assert!(CropRect {
-            x: 0.2,
-            y: 0.2,
-            w: 1.0,
-            h: 1.0
-        }
-        .sanitized()
-        .is_full());
+        assert!(
+            CropRect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.5
+            }
+            .sanitized()
+            .is_full()
+        );
+        assert!(
+            CropRect {
+                x: 0.2,
+                y: 0.2,
+                w: 1.0,
+                h: 1.0
+            }
+            .sanitized()
+            .is_full()
+        );
     }
 
     #[test]
@@ -165,9 +169,10 @@ mod tests {
     fn full_rect_skips_scaling() {
         let mut s = Scaler::new();
         let src = vec![0u8; 8 * 8 * 4];
-        assert!(s
-            .crop_scale(&src, 8, 8, 8 * 4, CropRect::FULL, 8, 8)
-            .is_none());
+        assert!(
+            s.crop_scale(&src, 8, 8, 8 * 4, CropRect::FULL, 8, 8)
+                .is_none()
+        );
     }
 
     #[test]

@@ -27,16 +27,16 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{define_class, msg_send, AnyThread, DefinedClass};
+use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_core_audio_types::AudioBufferList;
 use objc2_core_media::{
-    kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment, CMBlockBuffer, CMSampleBuffer,
-    CMTime,
+    CMBlockBuffer, CMSampleBuffer, CMTime,
+    kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
 };
 use objc2_core_video::{
-    kCVPixelFormatType_32BGRA, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
-    CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
-    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+    CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
+    CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+    CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_32BGRA,
 };
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
@@ -254,13 +254,14 @@ fn fetch_shareable_content() -> anyhow::Result<Retained<SCShareableContent>> {
         move |content: *mut SCShareableContent, error: *mut NSError| {
             // SAFETY: ScreenCaptureKit passes either a valid content pointer or a
             // valid error pointer (never both null in practice).
-            let result = if let Some(content) = unsafe { Retained::retain(content) } {
-                Ok(SendContent(content))
-            } else {
-                let msg = unsafe { error.as_ref() }
-                    .map(|e| e.localizedDescription().to_string())
-                    .unwrap_or_else(|| "unknown SCShareableContent error".to_owned());
-                Err(msg)
+            let result = match unsafe { Retained::retain(content) } {
+                Some(content) => Ok(SendContent(content)),
+                _ => {
+                    let msg = unsafe { error.as_ref() }
+                        .map(|e| e.localizedDescription().to_string())
+                        .unwrap_or_else(|| "unknown SCShareableContent error".to_owned());
+                    Err(msg)
+                }
             };
             // Receiver may have timed out and gone away; ignore send errors.
             let _ = tx.send(result);

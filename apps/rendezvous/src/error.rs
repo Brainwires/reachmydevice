@@ -1,8 +1,8 @@
 //! Error type mapped to HTTP responses.
 
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 
 /// Application error; converts to a JSON HTTP error response.
 #[derive(Debug, thiserror::Error)]

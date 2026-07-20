@@ -22,8 +22,8 @@ use axum::middleware::Next;
 use axum::response::Response;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_governor::key_extractor::KeyExtractor;
 use tower_governor::GovernorError;
+use tower_governor::key_extractor::KeyExtractor;
 
 /// Real client IP, resolved under an explicit trust model (fixes the
 /// spoofable-`X-Forwarded-For` problem):

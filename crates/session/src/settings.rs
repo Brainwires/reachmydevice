@@ -8,7 +8,7 @@
 //!
 //! On-disk format: `MAGIC ‖ nonce(24) ‖ XChaCha20-Poly1305(serde_json(map))`.
 
-use crate::identity::{restrict_perms, DeviceIdentity};
+use crate::identity::{DeviceIdentity, restrict_perms};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use std::collections::BTreeMap;

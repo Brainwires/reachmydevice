@@ -4,10 +4,10 @@
 //! (which only forwards opaque frames). Proves pairing.rs + the mailbox + the
 //! pairing client work together with no accounts.
 
-use rmd_rendezvous::{init_state, serve, Config};
+use rmd_rendezvous::{Config, init_state, serve};
+use rmd_session::DeviceIdentity;
 use rmd_session::pairing::generate_pairing_code;
 use rmd_session::pairing_client::pair_pake;
-use rmd_session::DeviceIdentity;
 use std::time::Duration;
 
 #[test]

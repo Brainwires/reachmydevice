@@ -23,8 +23,8 @@ exclude = ["third_party", "apps/web-viewer"]
 
 [workspace.package]
 version = "0.3.0"
-edition = "2021"
-rust-version = "1.82"
+edition = "2024"
+rust-version = "1.85"
 # Relicensed from "MIT OR Apache-2.0" at 0.2.16: internal/commercial self-hosting
 # stays free, but offering the software as a hosted/managed service is not
 # permitted (see LICENSE + NOTICE). Prior releases remain MIT/Apache.

@@ -1436,14 +1436,14 @@ fn attach_input(session: &Rc<Session>, dc: &RtcDataChannel) {
                 };
                 let (x, y) = if has_pos.get() {
                     cursor.get()
-                } else if let Some(t) = ev.changed_touches().get(0) {
+                } else { match ev.changed_touches().get(0) { Some(t) => {
                     let p = norm(t.client_x() as f64, t.client_y() as f64);
                     cursor.set(p);
                     has_pos.set(true);
                     p
-                } else {
+                } _ => {
                     return;
-                };
+                }}};
                 place_cursor(); // show the cursor at the tap point (cold start) / current pos
                 // A clean 1-finger tap arms double-tap-hold.
                 if fingers == 1 {

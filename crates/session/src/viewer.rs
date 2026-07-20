@@ -17,8 +17,8 @@ use rmd_transport::{
     TransportSender,
 };
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 /// Viewer configuration.

@@ -16,7 +16,7 @@
 //!   `rmdd restart`       restart it
 //!   `rmdd log [-f]`      show the service log (`-f` to follow)
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 
 /// systemd unit base name (the unit file is `rmd-host.service`).
 #[cfg(target_os = "linux")]
@@ -137,7 +137,9 @@ mod imp {
             let _ = systemctl(&["daemon-reload"]);
             run_ok(&["enable", "--now", NAME])?;
             println!("Enabled: {NAME} auto-starts at boot and is running now (systemd --user).");
-            println!("Note: until you `rmdd set rendezvous_url/token`, it starts but idles unconfigured.");
+            println!(
+                "Note: until you `rmdd set rendezvous_url/token`, it starts but idles unconfigured."
+            );
         } else {
             let _ = systemctl(&["disable", NAME]);
             println!("Disabled {NAME} autostart (unit kept — `rmdd enable` to re-enable).");
@@ -284,8 +286,12 @@ mod imp {
             }
             let _ = launchctl(&["kickstart", &target()]);
             println!("Enabled: {LABEL} auto-starts at login and is running now (launchd).");
-            println!("Note: until you `rmdd set rendezvous_url/token`, it starts but idles unconfigured.");
-            println!("Grant Screen Recording + Accessibility to rmdd in System Settings › Privacy & Security.");
+            println!(
+                "Note: until you `rmdd set rendezvous_url/token`, it starts but idles unconfigured."
+            );
+            println!(
+                "Grant Screen Recording + Accessibility to rmdd in System Settings › Privacy & Security."
+            );
         } else {
             let _ = launchctl(&["bootout", &target()]);
             let _ = launchctl(&["disable", &target()]);

@@ -119,11 +119,7 @@ pub async fn seed_settings(pool: &SqlitePool, cfg: &Config) -> sqlx::Result<()> 
 
 /// Canonical string form for a boolean setting.
 pub fn bool_str(b: bool) -> &'static str {
-    if b {
-        "true"
-    } else {
-        "false"
-    }
+    if b { "true" } else { "false" }
 }
 
 /// Parse a stored setting string as a boolean (`"true"`/`"1"` → true).

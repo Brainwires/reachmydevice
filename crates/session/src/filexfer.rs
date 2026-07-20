@@ -26,9 +26,9 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// Bytes per chunk. Kept well under the SCTP message ceiling.
@@ -487,11 +487,7 @@ fn with_ext(path: &Path, ext: &str) -> PathBuf {
 fn dirs_download_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let dl = home.join("Downloads");
-    if dl.is_dir() {
-        Some(dl)
-    } else {
-        Some(home)
-    }
+    if dl.is_dir() { Some(dl) } else { Some(home) }
 }
 
 #[cfg(test)]

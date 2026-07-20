@@ -29,9 +29,9 @@ use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
@@ -40,14 +40,15 @@ use rtc::interceptor::{
 };
 use rtc::media::io::sample_builder::SampleBuilder;
 use rtc::media_stream::MediaStreamTrack;
+use rtc::peer_connection::RTCPeerConnectionBuilder;
+use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
     configure_nack, configure_rtcp_reports, register_default_interceptors,
 };
 use rtc::peer_connection::configuration::media_engine::{
-    MediaEngine, MIME_TYPE_AV1, MIME_TYPE_H264,
+    MIME_TYPE_AV1, MIME_TYPE_H264, MediaEngine,
 };
 use rtc::peer_connection::configuration::setting_engine::SettingEngine;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
@@ -56,9 +57,8 @@ use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, CandidateRelayConfig, CandidateServerReflexiveConfig,
     RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit, RTCIceServer,
 };
-use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::rtp::codec::h264::H264Packet;
-use rtc::rtp::packetizer::{new_packetizer, Packetizer};
+use rtc::rtp::packetizer::{Packetizer, new_packetizer};
 use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
@@ -69,7 +69,7 @@ use rtc::rtp_transceiver::{
 use rtc::sansio::Protocol;
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use rtc::stun::addr::MappedAddress;
-use rtc::stun::message::{Getter, Message, TransactionId, BINDING_REQUEST};
+use rtc::stun::message::{BINDING_REQUEST, Getter, Message, TransactionId};
 use rtc::stun::xoraddr::XorMappedAddress;
 use rtc::turn::client::{
     Client as TurnClient, ClientConfig as TurnClientConfig, Event as TurnEvent,

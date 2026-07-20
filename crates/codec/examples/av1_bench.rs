@@ -6,7 +6,7 @@
 //!
 //! Run: `cargo run -p rmd-codec --example av1_bench --features av1 --release`
 
-use rmd_codec::{new_encoder, EncoderConfig, VideoCodec};
+use rmd_codec::{EncoderConfig, VideoCodec, new_encoder};
 use std::time::Instant;
 
 fn bench(width: u32, height: u32, fps: u32, bitrate_bps: u32, frames: u32) {

@@ -6,6 +6,11 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [0.3.0] - 2026-07-20
 
+### Changed
+- **Adopt Rust edition 2024** across the workspace (`rust-version` → 1.85). Mechanical
+  migration (`cargo fix --edition` + the 2024 rustfmt style edition — mostly import
+  reordering); no behavior change.
+
 ### Added
 - **Pluggable credential resolution + session-observer seams** (for paid/plugin builds;
   the open build is unchanged). The device-facing endpoints (`/api/ice`,

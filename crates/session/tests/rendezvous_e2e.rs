@@ -7,9 +7,9 @@
 //! Asserts both peers connect and a data-channel message is delivered — proving
 //! the whole Phase-2 signaling path, not just an in-process bridge.
 
-use rmd_rendezvous::{init_state, serve, Config};
-use rmd_session::rendezvous::RendezvousClient;
+use rmd_rendezvous::{Config, init_state, serve};
 use rmd_session::Signaling;
+use rmd_session::rendezvous::RendezvousClient;
 use rmd_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

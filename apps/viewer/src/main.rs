@@ -22,19 +22,19 @@
 //! `RMD_SIGNAL_ADDR` for the LAN relay).
 
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rmd_protocol as proto;
-use rmd_protocol::input_event::Event as InputEvent;
 use rmd_protocol::DisplayDescriptor;
+use rmd_protocol::input_event::Event as InputEvent;
 use rmd_protocol::{KeyEvent, MouseButton, MouseMove, MouseScroll};
 use rmd_session::rendezvous::RendezvousClient;
 use rmd_session::{
-    identity::known_peers, pairing::generate_pairing_code, pairing_client::pair_pake,
     AccountClient, DeviceIdentity, DeviceInfo, FileEvent, SignalClient, Signaling, ViewerConfig,
-    ViewerSession, ViewerUpdate,
+    ViewerSession, ViewerUpdate, identity::known_peers, pairing::generate_pairing_code,
+    pairing_client::pair_pake,
 };
 use rmd_transport::IceServer;
 
@@ -862,10 +862,9 @@ impl App {
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .map(|v| v.repaint_delay)
+            && delay.is_zero()
         {
-            if delay.is_zero() {
-                window.request_redraw();
-            }
+            window.request_redraw();
         }
     }
 
@@ -1314,14 +1313,13 @@ impl App {
                 if ui
                     .button(if is_fs { "Windowed" } else { "Fullscreen" })
                     .clicked()
+                    && let Some(win) = &self.window
                 {
-                    if let Some(win) = &self.window {
-                        win.set_fullscreen(if is_fs {
-                            None
-                        } else {
-                            Some(Fullscreen::Borderless(None))
-                        });
-                    }
+                    win.set_fullscreen(if is_fs {
+                        None
+                    } else {
+                        Some(Fullscreen::Borderless(None))
+                    });
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1445,23 +1443,23 @@ impl ApplicationHandler for App {
                 let mut last = self.last_cursor;
                 let (x, y) = self.normalize_cursor(position, &mut last);
                 self.last_cursor = last;
-                if self.forwarding_input(egui_consumed) {
-                    if let Some(s) = &self.session {
-                        s.send_input(InputEvent::MouseMove(MouseMove { x, y }));
-                    }
+                if self.forwarding_input(egui_consumed)
+                    && let Some(s) = &self.session
+                {
+                    s.send_input(InputEvent::MouseMove(MouseMove { x, y }));
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if self.forwarding_input(egui_consumed) {
-                    if let (Some(btn), Some(s)) = (map_mouse_button(button), &self.session) {
-                        let (x, y) = self.last_cursor;
-                        s.send_input(InputEvent::MouseButton(MouseButton {
-                            button: btn,
-                            pressed: state == ElementState::Pressed,
-                            x,
-                            y,
-                        }));
-                    }
+                if self.forwarding_input(egui_consumed)
+                    && let (Some(btn), Some(s)) = (map_mouse_button(button), &self.session)
+                {
+                    let (x, y) = self.last_cursor;
+                    s.send_input(InputEvent::MouseButton(MouseButton {
+                        button: btn,
+                        pressed: state == ElementState::Pressed,
+                        x,
+                        y,
+                    }));
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1490,18 +1488,15 @@ impl ApplicationHandler for App {
                     window.request_redraw();
                     return;
                 }
-                if self.forwarding_input(egui_consumed) {
-                    if let PhysicalKey::Code(code) = event.physical_key {
-                        if let (Some(hid_usage), Some(s)) =
-                            (winit_keycode_to_hid(code), &self.session)
-                        {
-                            s.send_input(InputEvent::Key(KeyEvent {
-                                hid_usage,
-                                pressed: event.state == ElementState::Pressed,
-                                modifiers: self.modifiers,
-                            }));
-                        }
-                    }
+                if self.forwarding_input(egui_consumed)
+                    && let PhysicalKey::Code(code) = event.physical_key
+                    && let (Some(hid_usage), Some(s)) = (winit_keycode_to_hid(code), &self.session)
+                {
+                    s.send_input(InputEvent::Key(KeyEvent {
+                        hid_usage,
+                        pressed: event.state == ElementState::Pressed,
+                        modifiers: self.modifiers,
+                    }));
                 }
             }
             _ => {}
@@ -1534,10 +1529,8 @@ impl ApplicationHandler for App {
                 (self.screen, &self.conn),
                 (Screen::Connecting, ConnState::Establishing)
             );
-        if animating {
-            if let Some(win) = &self.window {
-                win.request_redraw();
-            }
+        if animating && let Some(win) = &self.window {
+            win.request_redraw();
         }
 
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + POLL_INTERVAL));

@@ -15,7 +15,7 @@
 #![cfg(feature = "audio")]
 
 use bytes::Bytes;
-use rmd_codec::{AudioDecoder, AudioEncoder, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE};
+use rmd_codec::{AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE, AudioDecoder, AudioEncoder};
 use rmd_protocol as proto;
 use rmd_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
 use std::time::{Duration, Instant};

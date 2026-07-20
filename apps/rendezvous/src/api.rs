@@ -6,11 +6,11 @@
 //!   long-lived device **bearer token** used for the signaling WebSocket.
 
 use crate::auth;
-use crate::db::{now_unix, AppState};
+use crate::db::{AppState, now_unix};
 use crate::error::{AppError, AppResult};
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
-use axum::Json;
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -181,7 +181,7 @@ pub async fn register_device(
         Some((_, owner)) if owner != user_id => {
             return Err(AppError::Conflict(
                 "device already registered to another account".into(),
-            ))
+            ));
         }
         Some((id, _)) => {
             sqlx::query("UPDATE devices SET name = ?, public_key = ?, role = ? WHERE id = ?")

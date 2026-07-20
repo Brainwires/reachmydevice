@@ -17,10 +17,10 @@
 //! permissions on macOS — see `docs/macos-permissions.md`.
 
 use rmd_session::rendezvous::RendezvousClient;
-use rmd_session::{run_host_reporting, HostConfig, HostStatus, SignalClient, Signaling};
+use rmd_session::{HostConfig, HostStatus, SignalClient, Signaling, run_host_reporting};
 use rmd_transport::IceServer;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod service;
 

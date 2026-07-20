@@ -6,13 +6,13 @@
 //!
 //! See the crate docs / `docs/vps-deployment.md` for the deployment model.
 
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use std::sync::Arc;
-use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::GovernorLayer;
+use tower_governor::governor::GovernorConfigBuilder;
 use tower_http::services::ServeDir;
 
 pub mod api;
@@ -29,7 +29,7 @@ pub use config::Config;
 pub use db::AppState;
 // The relay-entitlement seam. The default is open (`allow_all`); a private paid
 // build injects its own policy via `AppState::new` + `router_with`.
-pub use rmd_entitlement::{allow_all, BoxFuture, RelayDecision, RelayEntitlement};
+pub use rmd_entitlement::{BoxFuture, RelayDecision, RelayEntitlement, allow_all};
 // The credential-resolution + session-observation seams. The defaults accept
 // device tokens only and observe nothing; a paid build overrides the `AppState`
 // fields to also accept member JWTs and persist activity.

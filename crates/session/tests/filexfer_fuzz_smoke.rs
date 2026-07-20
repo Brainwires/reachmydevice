@@ -4,9 +4,9 @@
 //! never panics. Writes only under a temp dir; path-traversal is sanitized.
 
 use rmd_protocol as proto;
-use rmd_session::filexfer::FileTransfers;
 use rmd_session::FileTransferConfig;
-use std::sync::{mpsc, Arc};
+use rmd_session::filexfer::FileTransfers;
+use std::sync::{Arc, mpsc};
 
 fn xorshift(state: &mut u64) -> u64 {
     let mut x = *state;

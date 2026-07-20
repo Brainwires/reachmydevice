@@ -23,8 +23,8 @@ use axum::response::{IntoResponse, Response};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 /// A member of a pairing room: `(member_id, outbound sender)`.
 type RoomMember = (u64, mpsc::UnboundedSender<String>);

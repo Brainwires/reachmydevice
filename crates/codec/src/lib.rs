@@ -27,7 +27,7 @@ pub use scale::{CropRect, Scaler};
 
 #[cfg(feature = "audio")]
 pub use audio::{
-    AudioDecoder, AudioEncoder, AUDIO_CHANNELS, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE,
+    AUDIO_CHANNELS, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE, AudioDecoder, AudioEncoder,
 };
 
 /// Video codecs ReachMyDevice can negotiate.

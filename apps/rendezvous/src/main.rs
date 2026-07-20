@@ -3,7 +3,7 @@
 //! Thin wrapper over the [`rmd_rendezvous`] library. Config is via
 //! environment (see [`rmd_rendezvous::Config`]).
 
-use rmd_rendezvous::{init_state, serve, Config};
+use rmd_rendezvous::{Config, init_state, serve};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

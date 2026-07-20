@@ -20,12 +20,12 @@ use rmd_transport::{
     IceServer, SignalMsg, Transport, TransportConfig, TransportEvent, TransportRole,
     TransportSender,
 };
+use std::sync::Arc;
+use std::sync::Mutex;
 #[cfg(feature = "audio")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 /// Map the codec crate's `VideoCodec` to the transport's local mirror (the
@@ -844,7 +844,7 @@ fn log_file_event(ev: FileEvent) {
 #[cfg(test)]
 mod tests {
     use super::{
-        authorization_permits, check_codec_compatible, verify_connect_password, AccessControl,
+        AccessControl, authorization_permits, check_codec_compatible, verify_connect_password,
     };
     use crate::identity::DeviceIdentity;
     use rmd_protocol as proto;
@@ -1002,13 +1002,13 @@ mod tests {
     /// loopback WebRTC transport (no screen/OS permissions needed).
     #[test]
     fn encode_thread_streams_no_video_until_authorized() {
-        use super::{spawn_encode_thread, HostConfig};
+        use super::{HostConfig, spawn_encode_thread};
         use rmd_capture::{Frame, PixelFormat};
         use rmd_codec as codec;
         use rmd_transport::{Transport, TransportConfig, TransportEvent, TransportRole};
+        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::mpsc;
-        use std::sync::Arc;
         use std::time::{Duration, Instant};
 
         fn drain(t: &Transport) -> Vec<TransportEvent> {
