@@ -30,6 +30,14 @@ pub struct AppState {
     /// Relay-access policy. The open-source default is `AllowAll`; a private
     /// plugin can inject a paid policy (see `AppState::new`).
     pub entitlement: Arc<dyn RelayEntitlement>,
+    /// How a presented bearer credential on the device-facing endpoints
+    /// (`/api/ice`, `/api/ws-ticket`, `/ws`) is resolved to an identity. The
+    /// default [`crate::resolver::DeviceTokenResolver`] accepts device tokens
+    /// only; a plugin overrides this field to also accept, e.g., member JWTs.
+    pub credential_resolver: Arc<dyn crate::resolver::CredentialResolver>,
+    /// Optional observer of the signaling session lifecycle (connect/disconnect),
+    /// so a plugin can persist per-account activity. Default `None`.
+    pub session_observer: Option<Arc<dyn crate::resolver::SessionObserver>>,
 }
 
 impl AppState {
@@ -52,6 +60,11 @@ impl AppState {
             ws_tickets: Arc::new(crate::auth::TicketStore::new()),
             ice_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             entitlement,
+            // Open-source defaults: device-token auth, no activity observer. A
+            // paid build overrides these `pub` fields after construction, so the
+            // `new` signature stays stable for every caller.
+            credential_resolver: Arc::new(crate::resolver::DeviceTokenResolver),
+            session_observer: None,
         }
     }
 }

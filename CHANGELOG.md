@@ -4,6 +4,19 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+### Added
+- **Pluggable credential resolution + session-observer seams** (for paid/plugin builds;
+  the open build is unchanged). The device-facing endpoints (`/api/ice`,
+  `/api/ws-ticket`, `/ws`) now resolve a presented bearer via an injectable
+  `CredentialResolver` on `AppState` (default `DeviceTokenResolver` = today's
+  device-token lookup, byte-for-byte), so a plugin can additionally accept other
+  credentials (e.g. tenant-signed member JWTs) without forking the core. A
+  `ResolvedCredential { user_id, signaling_id }` carries both the entitlement key and
+  the signaling address, and the `/ws` ticket now stores it. Added an optional
+  `SessionObserver` (connect/disconnect) and `Hub::is_online` / `Hub::online_peers`
+  so a plugin can surface live-session activity. Existing device-token clients are
+  unaffected.
+
 ## [0.2.18] - 2026-07-15
 
 ### Added

@@ -63,9 +63,13 @@ const TICKET_TTL: Duration = Duration::from_secs(30);
 /// a long-lived bearer token in the URL (which leaks into proxy/access logs and
 /// `Referer`). A client first proves its bearer token to `GET /api/ws-ticket`,
 /// then opens `GET /ws?ticket=<one-time>`; the ticket is consumed on redeem.
+///
+/// The ticket carries the full [`ResolvedCredential`] (not just a `device_id`), so
+/// the `/ws` handler has both the signaling address (Hub peer key) and the
+/// attribution `user_id` a session observer needs — without re-resolving.
 #[derive(Default)]
 pub struct TicketStore {
-    inner: Mutex<HashMap<String, (String, Instant)>>, // ticket → (device_id, expiry)
+    inner: Mutex<HashMap<String, (crate::resolver::ResolvedCredential, Instant)>>,
 }
 
 impl TicketStore {
@@ -73,23 +77,23 @@ impl TicketStore {
         Self::default()
     }
 
-    /// Mint a one-time ticket for `device_id`, valid for [`TICKET_TTL`].
-    pub fn issue(&self, device_id: &str) -> String {
+    /// Mint a one-time ticket for `cred`, valid for [`TICKET_TTL`].
+    pub fn issue(&self, cred: &crate::resolver::ResolvedCredential) -> String {
         let ticket = generate_token();
         let mut m = self.inner.lock().unwrap();
         let now = Instant::now();
         // Opportunistic cleanup so the map can't grow without bound.
         m.retain(|_, (_, exp)| *exp > now);
-        m.insert(ticket.clone(), (device_id.to_string(), now + TICKET_TTL));
+        m.insert(ticket.clone(), (cred.clone(), now + TICKET_TTL));
         ticket
     }
 
-    /// Redeem a ticket, returning its `device_id` if valid and unexpired. The
-    /// ticket is removed (single use) whether or not it had expired.
-    pub fn redeem(&self, ticket: &str) -> Option<String> {
+    /// Redeem a ticket, returning its [`ResolvedCredential`] if valid and
+    /// unexpired. The ticket is removed (single use) whether or not it had expired.
+    pub fn redeem(&self, ticket: &str) -> Option<crate::resolver::ResolvedCredential> {
         let mut m = self.inner.lock().unwrap();
         match m.remove(ticket) {
-            Some((device_id, exp)) if exp > Instant::now() => Some(device_id),
+            Some((cred, exp)) if exp > Instant::now() => Some(cred),
             _ => None,
         }
     }
@@ -113,5 +117,20 @@ mod tests {
         assert_ne!(t1, t2, "tokens must be unique");
         assert_eq!(hash_token(&t1), hash_token(&t1));
         assert_ne!(hash_token(&t1), hash_token(&t2));
+    }
+
+    #[test]
+    fn ticket_roundtrips_resolved_credential_and_is_single_use() {
+        let store = TicketStore::new();
+        let cred = crate::resolver::ResolvedCredential {
+            user_id: 7,
+            signaling_id: "dev-abc".into(),
+        };
+        let ticket = store.issue(&cred);
+        let got = store.redeem(&ticket).expect("valid ticket redeems");
+        assert_eq!(got.user_id, 7);
+        assert_eq!(got.signaling_id, "dev-abc");
+        // Single use: a second redeem of the same ticket fails.
+        assert!(store.redeem(&ticket).is_none());
     }
 }

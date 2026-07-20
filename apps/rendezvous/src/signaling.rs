@@ -11,8 +11,10 @@
 //! Server → client: `{"from":"<device_id>","payload":<opaque>}` — an incoming
 //! relayed payload; or `{"error":"..."}`.
 //!
-//! Auth: the device presents its bearer token as `?token=<token>` on the upgrade
-//! request; it is validated against `device_tokens` before the socket is accepted.
+//! Auth: the client presents a one-time `?ticket=` (preferred) or a bearer
+//! `?token=` on the upgrade request; the credential is resolved to an identity via
+//! the pluggable [`crate::resolver::CredentialResolver`] (device tokens by default)
+//! before the socket is accepted.
 
 use crate::db::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -120,10 +122,20 @@ impl Hub {
         }
     }
 
-    /// Number of connected devices (used by the Phase 2 integration test / metrics).
-    #[allow(dead_code)]
+    /// Number of connected peers (metrics / tests).
     pub async fn online_count(&self) -> usize {
         self.peers.lock().await.len()
+    }
+
+    /// Whether a specific signaling id is currently connected.
+    pub async fn is_online(&self, id: &str) -> bool {
+        self.peers.lock().await.contains_key(id)
+    }
+
+    /// Snapshot of every currently-connected signaling id. A plugin filters this
+    /// (e.g. by a `t:<account_id>:` prefix) to compute an account's live sessions.
+    pub async fn online_peers(&self) -> Vec<String> {
+        self.peers.lock().await.keys().cloned().collect()
     }
 }
 
@@ -151,30 +163,42 @@ pub async fn ws_handler(
     State(state): State<AppState>,
     Query(auth): Query<WsAuth>,
 ) -> Response {
-    // Authenticate before accepting the socket: a one-time ticket (preferred) or
-    // the device bearer token (deprecated fallback).
-    let device_id = if let Some(ticket) = auth.ticket.as_deref() {
+    // Authenticate before accepting the socket: a one-time ticket (preferred,
+    // carries the full resolved credential) or a bearer credential resolved via
+    // the pluggable resolver (device token by default; member JWT in a paid build).
+    let cred = if let Some(ticket) = auth.ticket.as_deref() {
         match state.ws_tickets.redeem(ticket) {
-            Some(id) => id,
+            Some(cred) => cred,
             None => return crate::error::AppError::Unauthorized.into_response(),
         }
     } else if let Some(token) = auth.token.as_deref() {
-        match crate::api::device_id_for_token(&state.pool, token).await {
-            Ok(Some(id)) => id,
-            _ => return crate::error::AppError::Unauthorized.into_response(),
+        match state.credential_resolver.resolve(&state.pool, token).await {
+            Some(cred) => cred,
+            None => return crate::error::AppError::Unauthorized.into_response(),
         }
     } else {
         return crate::error::AppError::Unauthorized.into_response();
     };
-    ws.on_upgrade(move |socket| handle_socket(socket, state, device_id))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, cred))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, device_id: String) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: AppState,
+    cred: crate::resolver::ResolvedCredential,
+) {
+    let signaling_id = cred.signaling_id;
+    let user_id = cred.user_id;
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    state.hub.register(device_id.clone(), tx.clone()).await;
-    tracing::info!(device = %device_id, "signaling connected");
+    state.hub.register(signaling_id.clone(), tx.clone()).await;
+    // Notify the activity observer (plugin-supplied) that a session came online.
+    // The callback must not block — a plugin offloads any I/O.
+    if let Some(obs) = &state.session_observer {
+        obs.on_connect(user_id, &signaling_id);
+    }
+    tracing::info!(device = %signaling_id, "signaling connected");
 
     // Pump relayed messages out to this device, and send a keepalive Ping every
     // 30s so an idle connection (a host waiting for a viewer) isn't dropped by an
@@ -204,7 +228,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, device_id: String) {
 
     // Read this device's frames and relay them to the addressed peer.
     let hub = state.hub.clone();
-    let me = device_id.clone();
+    let me = signaling_id.clone();
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = stream.next().await {
             let Message::Text(text) = msg else {
@@ -230,7 +254,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, device_id: String) {
     // Heartbeat: refresh last_seen every 30s so the "online" dot stays green while
     // the device is actually connected (last_seen is otherwise only set on connect).
     let hb_pool = state.pool.clone();
-    let hb_dev = device_id.clone();
+    let hb_dev = signaling_id.clone();
     let heartbeat = tokio::spawn(async move {
         let mut iv = tokio::time::interval(std::time::Duration::from_secs(30));
         iv.tick().await;
@@ -245,8 +269,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, device_id: String) {
         _ = &mut send_task => { recv_task.abort(); heartbeat.abort(); }
         _ = &mut recv_task => { send_task.abort(); heartbeat.abort(); }
     }
-    state.hub.unregister(&device_id, &tx).await;
-    tracing::info!(device = %device_id, "signaling disconnected");
+    state.hub.unregister(&signaling_id, &tx).await;
+    if let Some(obs) = &state.session_observer {
+        obs.on_disconnect(user_id, &signaling_id);
+    }
+    tracing::info!(device = %signaling_id, "signaling disconnected");
 }
 
 /// Query string on the pairing WS upgrade: `?code=<ephemeral rendezvous code>`.
@@ -358,5 +385,20 @@ mod tests {
         // Leaving notifies the remaining peer.
         hub.leave_room("code1", a).await;
         assert_eq!(rxb.recv().await.unwrap(), r#"{"peer":"left"}"#);
+    }
+
+    #[tokio::test]
+    async fn hub_presence_reflects_register_and_unregister() {
+        let hub = Hub::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let id = "t:1:alice";
+        assert!(!hub.is_online(id).await);
+        hub.register(id.to_string(), tx.clone()).await;
+        assert!(hub.is_online(id).await);
+        assert_eq!(hub.online_count().await, 1);
+        assert_eq!(hub.online_peers().await, vec![id.to_string()]);
+        hub.unregister(id, &tx).await;
+        assert!(!hub.is_online(id).await);
+        assert_eq!(hub.online_count().await, 0);
     }
 }
