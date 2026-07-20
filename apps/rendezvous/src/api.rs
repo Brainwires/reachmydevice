@@ -387,11 +387,7 @@ pub async fn ice_servers(
     // `last_seen`); a paid build also accepts tenant member JWTs, which resolve to
     // the platform account's admin user_id (so relay rolls up per-account). Only a
     // resolvable credential reaches the relay gate.
-    let user_id = match state
-        .credential_resolver
-        .resolve(&state.pool, &token)
-        .await
-    {
+    let user_id = match state.credential_resolver.resolve(&state.pool, &token).await {
         Some(cred) => cred.user_id,
         None => return Err(AppError::Unauthorized),
     };
