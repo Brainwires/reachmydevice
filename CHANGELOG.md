@@ -4,6 +4,8 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-21
+
 ### Added
 - **Passkeys (WebAuthn) for the web console** — behind a default-off `passkeys`
   Cargo feature so the default self-host build stays lean (webauthn-rs pulls
