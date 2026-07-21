@@ -24,6 +24,8 @@ pub mod resolver;
 pub mod security;
 pub mod signaling;
 pub mod throttle;
+#[cfg(feature = "passkeys")]
+pub mod webauthn;
 
 pub use config::Config;
 pub use db::AppState;
@@ -117,9 +119,31 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         .route("/api/ws-ticket", get(api::ws_ticket))
         .route("/ws", get(signaling::ws_handler))
         // Stateless direct-pairing mailbox (no account) — QR/PAKE flow.
-        .route("/pair", get(signaling::ws_pair_handler))
-        // Bind the core state (Router<AppState> → Router<()>), merge the plugin's
-        // already-stateful routes, then apply the auth log + per-IP rate limiter.
+        .route("/pair", get(signaling::ws_pair_handler));
+
+    // Passkey (WebAuthn) sign-in routes — only compiled with `--features passkeys`,
+    // and further gated at runtime by `RMD_RZ_WEBAUTHN_*` (unset ⇒ handlers 404).
+    #[cfg(feature = "passkeys")]
+    let limited = limited
+        .route(
+            "/api/webauthn/register/start",
+            post(webauthn::register_start),
+        )
+        .route(
+            "/api/webauthn/register/finish",
+            post(webauthn::register_finish),
+        )
+        .route("/api/webauthn/login/start", post(webauthn::login_start))
+        .route("/api/webauthn/login/finish", post(webauthn::login_finish))
+        .route("/api/webauthn/credentials", get(webauthn::list_credentials))
+        .route(
+            "/api/webauthn/credentials/delete",
+            post(webauthn::delete_credential),
+        );
+
+    // Bind the core state (Router<AppState> → Router<()>), merge the plugin's
+    // already-stateful routes, then apply the auth log + per-IP rate limiter.
+    let limited = limited
         .with_state(state)
         .merge(extra)
         .layer(axum::middleware::from_fn_with_state(

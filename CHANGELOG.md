@@ -4,6 +4,20 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-21
+
+### Added
+- **Passkeys (WebAuthn) for the web console** — behind a default-off `passkeys`
+  Cargo feature so the default self-host build stays lean (webauthn-rs pulls
+  OpenSSL); enable with `--features passkeys`. A signed-in user can add a passkey
+  ("Add passkey" in the console) and then sign in **passwordless** ("Sign in with a
+  passkey"). A verified assertion mints an opaque, hashed **console session token**
+  (new `user_sessions` table) that the device-management endpoints accept as
+  `Authorization: Bearer` alongside HTTP Basic — so both sign-in methods work
+  everywhere. Registered passkeys live in `webauthn_credentials` (migration `0003`).
+  Active only when `RMD_RZ_WEBAUTHN_RP_ID` + `RMD_RZ_WEBAUTHN_ORIGIN` are set;
+  unset ⇒ the routes 404 and nothing changes.
+
 ## [0.3.0] - 2026-07-20
 
 ### Changed

@@ -703,8 +703,10 @@
   async function api(path,opts){ return fetch(API+path,opts); }
   async function listDevices(){ const r=await api('/api/devices',{headers:{authorization:auth}}); if(!r.ok) throw r; return r.json(); }
   async function issueToken(device_id,name,role){
-    const r=await api('/api/devices',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({username:user,password:passOf(),device_id,name,public_key:'browser',role})});
+    // Auth via the session/Basic header (works for both password + passkey login),
+    // so no password needs to ride in the body.
+    const r=await api('/api/devices',{method:'POST',headers:{authorization:auth,'content-type':'application/json'},
+      body:JSON.stringify({device_id,name,public_key:'browser',role})});
     if(!r.ok) throw new Error('request failed ('+r.status+')'); return (await r.json()).token;
   }
   // This browser's own signaling identity: a viewer device whose token lets us
@@ -716,6 +718,62 @@
     const id=crypto.randomUUID().replace(/-/g,'');
     t=await issueToken(id,'web viewer (this browser)','viewer');
     localStorage.setItem(VTOK(),t); localStorage.setItem(VDEV(),id); return t;
+  }
+
+  // ---- Passkeys (WebAuthn) ----
+  // The server speaks base64url for all binary fields; convert to/from ArrayBuffer
+  // for the browser credential APIs.
+  const passkeyOK = !!(window.PublicKeyCredential && navigator.credentials && navigator.credentials.create);
+  const b64uToBuf=(s)=>{ s=s.replace(/-/g,'+').replace(/_/g,'/'); const pad=s.length%4?4-(s.length%4):0; s+='='.repeat(pad);
+    const bin=atob(s), u=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i); return u.buffer; };
+  const bufToB64u=(buf)=>{ const u=new Uint8Array(buf); let bin=''; for(let i=0;i<u.length;i++)bin+=String.fromCharCode(u[i]);
+    return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); };
+  // Add a passkey to the currently-signed-in account.
+  async function addPasskey(){
+    if(!passkeyOK){ alert('This browser does not support passkeys.'); return; }
+    let r=await api('/api/webauthn/register/start',{method:'POST',headers:{authorization:auth,'content-type':'application/json'},body:'{}'});
+    if(r.status===404){ alert('Passkeys are not enabled on this server.'); return; }
+    if(!r.ok){ alert('Could not start passkey setup ('+r.status+').'); return; }
+    const {state,options}=await r.json(), pk=options.publicKey;
+    pk.challenge=b64uToBuf(pk.challenge); pk.user.id=b64uToBuf(pk.user.id);
+    if(pk.excludeCredentials) pk.excludeCredentials.forEach(c=>c.id=b64uToBuf(c.id));
+    let cred; try{ cred=await navigator.credentials.create({publicKey:pk}); }
+    catch(e){ if(e.name!=='NotAllowedError') alert('Passkey creation failed: '+(e.message||e)); return; }
+    const out={ id:cred.id, rawId:bufToB64u(cred.rawId), type:cred.type,
+      response:{ clientDataJSON:bufToB64u(cred.response.clientDataJSON), attestationObject:bufToB64u(cred.response.attestationObject),
+        transports:cred.response.getTransports?cred.response.getTransports():[] },
+      extensions:cred.getClientExtensionResults?cred.getClientExtensionResults():{} };
+    const name=(prompt('Name this passkey (e.g. “MacBook Touch ID”):')||'').trim()||null;
+    r=await api('/api/webauthn/register/finish',{method:'POST',headers:{authorization:auth,'content-type':'application/json'},
+      body:JSON.stringify({state,name,credential:out})});
+    if(r.ok) alert('Passkey added — you can sign in with it next time.');
+    else alert('Passkey setup failed: '+((await r.json().catch(()=>({}))).error||('HTTP '+r.status)));
+  }
+  // Sign in with a passkey (passwordless). Needs the username to look up credentials.
+  async function passkeyLogin(){
+    const e=$('e'); if(e)e.textContent='';
+    const u=($('u')?$('u').value:'').trim();
+    if(!u){ if(e)e.textContent='Enter your username, then use your passkey.'; return; }
+    let r=await api('/api/webauthn/login/start',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:u})});
+    if(r.status===404){ if(e)e.textContent='Passkeys are not enabled on this server.'; return; }
+    if(r.status===401){ if(e)e.textContent='No passkey found for that account.'; return; }
+    if(!r.ok){ if(e)e.textContent='Passkey sign-in failed ('+r.status+').'; return; }
+    const {state,options}=await r.json(), pk=options.publicKey;
+    pk.challenge=b64uToBuf(pk.challenge);
+    if(pk.allowCredentials) pk.allowCredentials.forEach(c=>c.id=b64uToBuf(c.id));
+    let cred; try{ cred=await navigator.credentials.get({publicKey:pk}); }
+    catch(err){ if(err.name!=='NotAllowedError'&&e)e.textContent='Passkey failed: '+(err.message||err); return; }
+    const out={ id:cred.id, rawId:bufToB64u(cred.rawId), type:cred.type,
+      response:{ clientDataJSON:bufToB64u(cred.response.clientDataJSON), authenticatorData:bufToB64u(cred.response.authenticatorData),
+        signature:bufToB64u(cred.response.signature), userHandle:cred.response.userHandle?bufToB64u(cred.response.userHandle):null },
+      extensions:cred.getClientExtensionResults?cred.getClientExtensionResults():{} };
+    r=await api('/api/webauthn/login/finish',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({state,credential:out})});
+    if(!r.ok){ if(e)e.textContent='Passkey verification failed.'; return; }
+    const j=await r.json();
+    auth='Bearer '+j.session; user=j.username;
+    sessionStorage.setItem('rmd_va',auth); sessionStorage.setItem('rmd_vu',user);
+    try{ await viewerToken(); }catch(err){ if(e)e.textContent=String(err.message||err); return; }
+    go('#/devices');
   }
 
   function frame(inner){ el.innerHTML=`<div class="brand" style="margin-bottom:8px">
@@ -742,9 +800,11 @@
       <label>Username</label><input id="u" autocomplete="username" value="${esc(user)}">
       <label>Password</label><input id="p" type="password" autocomplete="current-password">
       <div class="err" id="e"></div>
-      <div class="row"><button id="go">${mode==='login'?'Sign in':'Create account'}</button>${tog}</div>`);
+      <div class="row"><button id="go">${mode==='login'?'Sign in':'Create account'}</button>${tog}</div>
+      ${mode==='login'&&passkeyOK?`<div class="row" style="margin-top:10px"><button class="ghost" id="pkgo" style="width:100%">🔑 Sign in with a passkey</button></div>`:''}`);
     $('go').onclick=submitAuth;
     if($('tog'))$('tog').onclick=()=>{mode=mode==='login'?'register':'login'; renderLogin();};
+    if($('pkgo'))$('pkgo').onclick=passkeyLogin;
     $('p').addEventListener('keydown',e=>{if(e.key==='Enter')submitAuth();});
     if(!user)$('u').focus();
   }
@@ -809,9 +869,11 @@
       <div id="panel">${panelHtml}</div>
       <div class="row"><button id="addHost">+ Register a host</button>
         <button class="ghost sm" id="refresh">Refresh</button>
-        <button class="ghost sm" id="signout" style="margin-left:auto">Sign out</button></div>`);
+        ${passkeyOK?`<button class="ghost sm" id="addpk" style="margin-left:auto">🔑 Add passkey</button>`:''}
+        <button class="ghost sm" id="signout"${passkeyOK?'':' style="margin-left:auto"'}>Sign out</button></div>`);
     el.querySelectorAll('[data-act]').forEach(b=>b.onclick=()=>deviceAction(b.dataset));
     $('addHost').onclick=registerHost; if($('addHostCta'))$('addHostCta').onclick=registerHost;
+    if($('addpk'))$('addpk').onclick=addPasskey;
     $('refresh').onclick=()=>{panelHtml='';renderDevices();};
     $('signout').onclick=()=>{sessionStorage.clear(); localStorage.removeItem('rmd_vtok_'+user); auth=null; go('#/login');};
     wirePanel();
