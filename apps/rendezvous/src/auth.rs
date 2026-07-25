@@ -56,8 +56,24 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// How long a WebSocket ticket is valid — just long enough to open the socket.
-const TICKET_TTL: Duration = Duration::from_secs(30);
+/// How long a WebSocket ticket is valid — long enough to open the socket even when
+/// the ticket is minted by a third-party integration (which relays it server→server
+/// →browser) or a mobile/backgrounded tab that only finishes the `/ws` handshake
+/// after a push-wake. Tickets are still single-use, so a generous TTL costs little.
+///
+/// Default 120s; override with `RMD_WS_TICKET_TTL` (whole seconds, clamped to
+/// 5..=3600). Read once and cached.
+fn ticket_ttl() -> Duration {
+    static TTL: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *TTL.get_or_init(|| {
+        let secs = std::env::var("RMD_WS_TICKET_TTL")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|s| s.clamp(5, 3600))
+            .unwrap_or(120);
+        Duration::from_secs(secs)
+    })
+}
 
 /// Short-lived, single-use tickets that authorize a `/ws` upgrade without putting
 /// a long-lived bearer token in the URL (which leaks into proxy/access logs and
@@ -77,14 +93,14 @@ impl TicketStore {
         Self::default()
     }
 
-    /// Mint a one-time ticket for `cred`, valid for [`TICKET_TTL`].
+    /// Mint a one-time ticket for `cred`, valid for [`ticket_ttl`].
     pub fn issue(&self, cred: &crate::resolver::ResolvedCredential) -> String {
         let ticket = generate_token();
         let mut m = self.inner.lock().unwrap();
         let now = Instant::now();
         // Opportunistic cleanup so the map can't grow without bound.
         m.retain(|_, (_, exp)| *exp > now);
-        m.insert(ticket.clone(), (cred.clone(), now + TICKET_TTL));
+        m.insert(ticket.clone(), (cred.clone(), now + ticket_ttl()));
         ticket
     }
 
