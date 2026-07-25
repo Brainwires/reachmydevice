@@ -4,6 +4,8 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-25
+
 ### Changed
 - **`/ws` ticket TTL raised 30s → 120s, and made configurable** via
   `RMD_WS_TICKET_TTL` (whole seconds, clamped to 5..=3600). Tickets are still
