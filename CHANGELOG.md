@@ -4,6 +4,17 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-25
+
+### Changed
+- **`/ws` ticket TTL raised 30s → 120s, and made configurable** via
+  `RMD_WS_TICKET_TTL` (whole seconds, clamped to 5..=3600). Tickets are still
+  single-use. 30s was too tight for third-party integrations that mint a ticket
+  server-side and relay it (server→server→browser), and for mobile/backgrounded
+  tabs that only finish the `/ws` handshake after a push-wake — the ticket could
+  expire before redeem, producing intermittent `auth-fail` on an otherwise valid
+  ticket. The first-party viewer (mint-then-connect in one tick) is unaffected.
+
 ## [0.3.1] - 2026-07-21
 
 ### Added
