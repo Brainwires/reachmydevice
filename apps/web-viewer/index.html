@@ -395,8 +395,11 @@
     edit:'<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg>',
     del:'<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2"/><path d="M6 7l1 13a2 2 0 002 2h6a2 2 0 002-2l1-13"/><path d="M10 11v6M14 11v6"/></svg>'};
 
-  // ================= Session mode (?token&host present) =====================
-  if(q.get('token') && q.get('host')){
+  // ================= Session mode (?host present + token in sessionStorage) =====
+  // The bearer token rides via sessionStorage (set by doConnect), never the URL, so a
+  // leaked/pasted session URL can't auto-connect: no token in this tab → fall through
+  // to the console/login below. `host` in the URL is just a device id (not a secret).
+  if(q.get('host') && sessionStorage.getItem('rmd_vs_tok')){
     $('stage').classList.remove('hidden'); $('overlay').classList.remove('hidden'); $('bar').classList.remove('hidden');
     $('ovHint').textContent='host '+(q.get('host')||'').slice(0,12)+'…';
     const status=document.createElement('span'); status.id='status'; status.hidden=true; document.body.appendChild(status);
@@ -917,7 +920,12 @@
     const x=$('closeCmd'); if(x) x.onclick=()=>{panelHtml='';renderDevices();};
   }
   async function doConnect(hostId){
-    try{ const t=await viewerToken(); location.href=`/app/?token=${encodeURIComponent(t)}&host=${encodeURIComponent(hostId)}`; }
+    // The viewer token is a bearer credential — keep it OUT of the URL. A URL-borne
+    // token lets anyone who obtains the link (history, referrer, access logs, a shared
+    // address, an incognito paste) connect WITHOUT logging in. Hand it to the viewer
+    // page via sessionStorage instead — it survives this same-tab reload but is NOT
+    // carried into a new/incognito window — exactly like the connection password.
+    try{ const t=await viewerToken(); sessionStorage.setItem('rmd_vs_tok',t); location.href=`/app/?host=${encodeURIComponent(hostId)}`; }
     catch(e){ alert('Could not get a viewer token: '+(e.message||e)); }
   }
   // Hosts the viewer has learned need a connection password: prompt for it INSIDE

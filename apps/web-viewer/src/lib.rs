@@ -32,8 +32,9 @@ use web_sys::{
     Response, TouchEvent, WheelEvent,
 };
 
-/// Runtime configuration, from URL query params on the page:
-/// `?server=wss://app.reachmy.dev&token=…&host=<device_id>`.
+/// Runtime configuration. `server` + `host` come from the page URL query
+/// (`?server=wss://app.reachmy.dev&host=<device_id>`); the bearer `token` is handed
+/// off out-of-band via `sessionStorage` (never the URL — see [`session_token`]).
 #[derive(Clone)]
 struct Config {
     /// WebSocket base, e.g. `wss://app.reachmy.dev` (no trailing `/ws`).
@@ -55,10 +56,13 @@ impl Config {
             .filter(|s| !s.is_empty())
             .or_else(|| default_ws_base(&window))
             .ok_or("missing ?server=")?;
-        let token = params.get("token").unwrap_or_default();
+        // The bearer token is handed off via sessionStorage (see `session_token`),
+        // NEVER read from the URL — a URL-borne credential lets anyone with the link
+        // connect without logging in, and it leaks via history/referrer/access logs.
+        let token = session_token().unwrap_or_default();
         let host_id = params.get("host").unwrap_or_default();
         if token.is_empty() {
-            return Err("missing ?token=".into());
+            return Err("missing session token (open a device from the console to connect)".into());
         }
         if host_id.is_empty() {
             return Err("missing ?host= (the host device id)".into());
@@ -208,7 +212,8 @@ pub fn start() {
     let _ = tracing_wasm::try_set_as_global_default();
     // Only run a session when the connect params are present. Otherwise the page's
     // connect screen (login + host picker, in index.html) is shown and it will
-    // reload here with `?token=&host=` once the user chooses a host.
+    // reload here with `?host=` (plus the token in sessionStorage) once the user
+    // chooses a host.
     if !has_session_params() {
         return;
     }
@@ -220,16 +225,16 @@ pub fn start() {
     });
 }
 
-/// Whether the URL carries both `token` and `host` (i.e. a session to run).
+/// Whether this tab has a session to run: a `host` in the URL AND a bearer token
+/// handed off via sessionStorage (see [`session_token`]) — never a URL token, so a
+/// pasted/leaked session URL alone can't start a session.
 fn has_session_params() -> bool {
-    web_sys::window()
+    let has_host = web_sys::window()
         .and_then(|w| w.location().search().ok())
         .and_then(|s| web_sys::UrlSearchParams::new_with_str(&s).ok())
-        .map(|p| {
-            p.get("token").filter(|t| !t.is_empty()).is_some()
-                && p.get("host").filter(|h| !h.is_empty()).is_some()
-        })
-        .unwrap_or(false)
+        .and_then(|p| p.get("host").filter(|h| !h.is_empty()))
+        .is_some();
+    has_host && session_token().is_some()
 }
 
 async fn run() -> Result<(), String> {
@@ -771,6 +776,18 @@ fn remember_password_required(host: &str, required: bool) {
             let _ = ls.remove_item(&key);
         }
     }
+}
+
+/// The viewer's device bearer token, handed off from the console via `sessionStorage`
+/// under `rmd_vs_tok` — NEVER the URL. A URL-borne token would let anyone who obtains
+/// the link (browser history, `Referer`, access logs, a shared address, an incognito
+/// paste) connect without logging in; `sessionStorage` is per-tab and is not carried
+/// into a new/incognito window. Kept (not consumed) so this tab's reloads can
+/// re-authenticate; it's cleared on tab close and on sign-out.
+fn session_token() -> Option<String> {
+    let ss = web_sys::window()?.session_storage().ok().flatten()?;
+    let t = ss.get_item("rmd_vs_tok").ok().flatten()?;
+    (!t.is_empty()).then_some(t)
 }
 
 /// Take a password handed off from the device list's Connect prompt (via
