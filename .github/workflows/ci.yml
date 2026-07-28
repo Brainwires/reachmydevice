@@ -39,6 +39,9 @@ jobs:
       - name: Build
         run: cargo build --all-targets
       - name: Test
+        # Bound a hung test (a flaky deadlock has run 60+ min before) so it fails
+        # fast instead of blocking the whole run. Generous vs. normal compile+test.
+        timeout-minutes: 30
         run: cargo test --all
 
   # Linux: the portable crates (protocol, transport, codec, input, capture,
@@ -70,6 +73,9 @@ jobs:
           -p rmd-rendezvous -p rmd-signal-dev
           --all-targets -- -D warnings
       - name: Test (portable crates)
+        # Bound a hung test (a flaky deadlock has run 60+ min before) so it fails
+        # fast instead of blocking the whole run. Generous vs. normal compile+test.
+        timeout-minutes: 30
         run: >
           cargo test
           -p rmd-protocol -p rmd-transport -p rmd-codec
@@ -110,8 +116,16 @@ jobs:
     # cargo-fuzz needs nightly (-Z sanitizer flags). The repo's rust-toolchain.toml
     # pins 1.92.0 and overrides the installed nightly per-directory, so force
     # nightly explicitly for every cargo/rustc invocation in this job.
+    #
+    # PINNED nightly (not floating `nightly`): a floating nightly regressed the
+    # ASAN codegen path and broke the fuzz *build* (rustc failed compiling tokio
+    # under -Zsanitizer=address, exit 101) — an environmental failure unrelated to
+    # any code change, which then blocked releases. Bump this date deliberately
+    # after confirming a newer nightly still builds the fuzz targets. Both the
+    # toolchain install AND RUSTUP_TOOLCHAIN must name the same pinned date, or the
+    # env var re-selects floating `nightly` for every cargo call.
     env:
-      RUSTUP_TOOLCHAIN: nightly
+      RUSTUP_TOOLCHAIN: nightly-2026-07-20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -122,7 +136,9 @@ jobs:
           sudo apt-get install -y nasm pkg-config \
             libx11-dev libxext-dev libxtst-dev libxdamage-dev libxcb1-dev \
             libxkbcommon-dev libwayland-dev libasound2-dev
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-20
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
