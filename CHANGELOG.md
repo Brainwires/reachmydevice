@@ -4,6 +4,20 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+### Security
+- **Web viewer now requires a live login to connect.** The browser no longer holds
+  a durable, self-authenticating viewer device token. Connecting authenticates with
+  the console **session** (proof of an active login), which the viewer page receives
+  via `sessionStorage` — never the URL. A pasted/leaked `/app/?host=…` link, or the
+  same link opened in a new/incognito window, lands on the sign-in screen instead of
+  connecting. The session mints a one-time `/ws` ticket and authenticates `/api/ice`
+  via the `Authorization` header, so no bearer credential ever rides in a request URL
+  (out of access logs / `Referer`). Host daemons (`rmdd`), the native viewer, and
+  tenant member JWTs are unaffected.
+- `POST /api/login` mints a session token for password sign-in (mirroring passkey
+  login), so the console holds a revocable session regardless of sign-in method and
+  the raw password never becomes a connection credential.
+
 ## [0.3.2] - 2026-07-25
 
 ### Changed

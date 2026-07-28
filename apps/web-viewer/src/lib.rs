@@ -39,7 +39,9 @@ use web_sys::{
 struct Config {
     /// WebSocket base, e.g. `wss://app.reachmy.dev` (no trailing `/ws`).
     server: String,
-    /// Device bearer token for the rendezvous `/ws` auth.
+    /// Live console **session** token (proof of an active login), handed off via
+    /// `sessionStorage`. Used to authenticate `/api/ice` and to mint a one-time
+    /// `/ws` ticket — never sent in a URL, and never a durable device token.
     token: String,
     /// The host device_id to connect to.
     host_id: String,
@@ -90,16 +92,16 @@ fn default_ws_base(window: &web_sys::Window) -> Option<String> {
 /// (`{urls, username?, credential?}`), so the array is used verbatim. Falls back
 /// to a public STUN server if the request fails, so a same-LAN session can still
 /// try direct/reflexive connectivity.
-async fn fetch_ice_servers(window: &web_sys::Window, ws_base: &str, token: &str) -> js_sys::Array {
+async fn fetch_ice_servers(_window: &web_sys::Window, ws_base: &str, token: &str) -> js_sys::Array {
     let http_base = ws_base
         .replacen("wss://", "https://", 1)
         .replacen("ws://", "http://", 1);
-    let url = format!("{}/api/ice?token={}", http_base.trim_end_matches('/'), token);
-    match fetch_ice_array(window, &url).await {
+    let url = format!("{}/api/ice", http_base.trim_end_matches('/'));
+    match fetch_ice_array(&url, token).await {
         Ok(arr) if arr.length() > 0 => return arr,
         Ok(_) => web_sys::console::warn_1(&"[rmd] /api/ice returned no servers".into()),
         Err(e) => web_sys::console::warn_1(
-            &format!("[rmd] /api/ice failed ({e:?}); falling back to public STUN").into(),
+            &format!("[rmd] /api/ice failed ({e}); falling back to public STUN").into(),
         ),
     }
     let ice = js_sys::Array::new();
@@ -109,14 +111,41 @@ async fn fetch_ice_servers(window: &web_sys::Window, ws_base: &str, token: &str)
     ice
 }
 
-/// Perform the `/api/ice` GET and extract the `ice_servers` array.
-async fn fetch_ice_array(window: &web_sys::Window, url: &str) -> Result<js_sys::Array, JsValue> {
-    let resp: Response = JsFuture::from(window.fetch_with_str(url)).await?.dyn_into()?;
+/// Perform the `/api/ice` GET (bearer in the `Authorization` header, never the URL)
+/// and extract the `ice_servers` array.
+async fn fetch_ice_array(url: &str, token: &str) -> Result<js_sys::Array, String> {
+    let json = authed_get_json(url, token).await?;
+    js_sys::Reflect::get(&json, &"ice_servers".into())
+        .ok()
+        .and_then(|v| v.dyn_into::<js_sys::Array>().ok())
+        .ok_or_else(|| "no ice_servers array".to_string())
+}
+
+/// Issue an authenticated `GET url` with `Authorization: Bearer <token>` and return
+/// the parsed JSON body. The bearer stays in a header — never the URL query — so it
+/// can't leak into access logs, `Referer`, or browser history. Shared by the ICE
+/// fetch and the `/api/ws-ticket` mint (see [`signaling`]).
+pub(crate) async fn authed_get_json(url: &str, token: &str) -> Result<JsValue, String> {
+    let window = web_sys::window().ok_or("no window")?;
+    let init = web_sys::RequestInit::new();
+    init.set_method("GET");
+    let req = web_sys::Request::new_with_str_and_init(url, &init)
+        .map_err(|e| format!("request: {e:?}"))?;
+    req.headers()
+        .set("Authorization", &format!("Bearer {token}"))
+        .map_err(|e| format!("auth header: {e:?}"))?;
+    let resp: Response = JsFuture::from(window.fetch_with_request(&req))
+        .await
+        .map_err(|e| format!("fetch: {e:?}"))?
+        .dyn_into()
+        .map_err(|_| "not a Response".to_string())?;
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()).into());
+        return Err(format!("HTTP {}", resp.status()));
     }
-    let json = JsFuture::from(resp.json()?).await?;
-    js_sys::Reflect::get(&json, &"ice_servers".into())?.dyn_into::<js_sys::Array>()
+    let promise = resp.json().map_err(|e| format!("json: {e:?}"))?;
+    JsFuture::from(promise)
+        .await
+        .map_err(|e| format!("json body: {e:?}"))
 }
 
 /// Shared session state across the many web-sys callbacks.
@@ -348,7 +377,7 @@ async fn connect(app: Rc<App>) {
             return;
         }
     };
-    let relay = match Relay::connect(&app.cfg.server, &app.cfg.token) {
+    let relay = match Relay::connect(&app.cfg.server, &app.cfg.token).await {
         Ok(r) => r,
         Err(e) => {
             pc.close();

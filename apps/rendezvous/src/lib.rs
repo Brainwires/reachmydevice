@@ -101,6 +101,9 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
         // The `curl https://reachmy.dev/install.sh | sh` one-liner.
         .route("/install.sh", get(install_script))
         .route("/api/register", post(api::register_user))
+        // Password sign-in → opaque session token (parallels passkey login), so the
+        // console holds a session bearer no matter how the user signed in.
+        .route("/api/login", post(api::login))
         // Public: whether new-account signup is currently open (for UI + ops).
         .route("/api/registration", get(api::get_registration))
         // Admin: flip signup open/closed at runtime (RMD_RZ_ADMIN_TOKEN bearer).
