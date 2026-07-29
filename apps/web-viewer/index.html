@@ -395,8 +395,11 @@
     edit:'<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg>',
     del:'<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2"/><path d="M6 7l1 13a2 2 0 002 2h6a2 2 0 002-2l1-13"/><path d="M10 11v6M14 11v6"/></svg>'};
 
-  // ================= Session mode (?token&host present) =====================
-  if(q.get('token') && q.get('host')){
+  // ================= Session mode (?host present + token in sessionStorage) =====
+  // The bearer token rides via sessionStorage (set by doConnect), never the URL, so a
+  // leaked/pasted session URL can't auto-connect: no token in this tab → fall through
+  // to the console/login below. `host` in the URL is just a device id (not a secret).
+  if(q.get('host') && sessionStorage.getItem('rmd_vs_tok')){
     $('stage').classList.remove('hidden'); $('overlay').classList.remove('hidden'); $('bar').classList.remove('hidden');
     $('ovHint').textContent='host '+(q.get('host')||'').slice(0,12)+'…';
     const status=document.createElement('span'); status.id='status'; status.hidden=true; document.body.appendChild(status);
@@ -694,8 +697,6 @@
   // rendezvous without that endpoint behaves as before.
   let signupOpen=true, signupChecked=false;
   const el=$('cardBody');
-  const basic=(u,p)=>'Basic '+btoa(u+':'+p);
-  const passOf=()=>{ try{ return atob((auth||'').slice(6)).split(':').slice(1).join(':'); }catch(e){ return ''; } };
   const esc=s=>(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const wssBase=()=>(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/ws';
   const fmtSeen=t=>{if(!t)return{txt:'never seen',on:false};const d=new Date(t*1000),m=Math.round((Date.now()-d)/60000);
@@ -709,16 +710,9 @@
       body:JSON.stringify({device_id,name,public_key:'browser',role})});
     if(!r.ok) throw new Error('request failed ('+r.status+')'); return (await r.json()).token;
   }
-  // This browser's own signaling identity: a viewer device whose token lets us
-  // authenticate to /ws. Reused across sessions (localStorage); auto re-created if
-  // the device is deleted. Hidden from the device list (it's not something to view).
-  const VTOK=()=>'rmd_vtok_'+user, VDEV=()=>'rmd_vdev_'+user;
-  async function viewerToken(){
-    let t=localStorage.getItem(VTOK()); if(t) return t;
-    const id=crypto.randomUUID().replace(/-/g,'');
-    t=await issueToken(id,'web viewer (this browser)','viewer');
-    localStorage.setItem(VTOK(),t); localStorage.setItem(VDEV(),id); return t;
-  }
+  // The browser holds NO durable device token. Connecting authenticates with the
+  // live console **session** (below), so a leaked URL or a copied localStorage value
+  // can't reach the relay without an active login. See doConnect / rmdExt.connect.
 
   // ---- Passkeys (WebAuthn) ----
   // The server speaks base64url for all binary fields; convert to/from ArrayBuffer
@@ -772,7 +766,6 @@
     const j=await r.json();
     auth='Bearer '+j.session; user=j.username;
     sessionStorage.setItem('rmd_va',auth); sessionStorage.setItem('rmd_vu',user);
-    try{ await viewerToken(); }catch(err){ if(e)e.textContent=String(err.message||err); return; }
     go('#/devices');
   }
 
@@ -816,11 +809,17 @@
       if(mode==='register'){ const r=await api('/api/register',{method:'POST',headers:{'content-type':'application/json'},
           body:JSON.stringify({username:u,password:p})});
         if(!r.ok){e.textContent=(await r.json().catch(()=>({}))).error||('Registration failed ('+r.status+')');return;} }
-      auth=basic(u,p); const r=await api('/api/devices',{headers:{authorization:auth}});
+      // Sign in for an opaque SESSION token (like passkey login), so the browser holds
+      // a revocable proof-of-login rather than the raw password or a durable device
+      // token. This session is what authorizes every connection.
+      const r=await api('/api/login',{method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({username:u,password:p})});
       if(r.status===401){e.textContent='Invalid username or password.';auth=null;return;}
+      if(r.status===429){e.textContent='Too many attempts — wait a moment and try again.';auth=null;return;}
       if(!r.ok){e.textContent='Sign-in failed ('+r.status+').';auth=null;return;}
-      user=u; sessionStorage.setItem('rmd_va',auth); sessionStorage.setItem('rmd_vu',u);
-      try{ await viewerToken(); }catch(err){ e.textContent=String(err.message||err); return; }
+      const j=await r.json();
+      auth='Bearer '+j.session; user=j.username||u;
+      sessionStorage.setItem('rmd_va',auth); sessionStorage.setItem('rmd_vu',user);
       go('#/devices');
     }catch(err){ e.textContent='Network error: '+(err.message||err); }
     finally{ $('go').disabled=false; }
@@ -831,10 +830,6 @@
   async function renderDevices(){
     let all=[]; try{ all=await listDevices(); }
     catch(r){ auth=null; sessionStorage.clear(); return go('#/login'); }
-    // Heal: if this browser's viewer device was deleted, drop the stale token so
-    // Connect re-mints one.
-    const myDev=localStorage.getItem(VDEV());
-    if(myDev && !all.some(d=>d.device_id===myDev)){ localStorage.removeItem(VTOK()); localStorage.removeItem(VDEV()); }
     // The list is an address book of things you can connect TO — i.e. hosts.
     // Viewer-only clients (this browser and any others) aren't connectable, so
     // they're hidden rather than shown as dead rows.
@@ -917,8 +912,15 @@
     const x=$('closeCmd'); if(x) x.onclick=()=>{panelHtml='';renderDevices();};
   }
   async function doConnect(hostId){
-    try{ const t=await viewerToken(); location.href=`/app/?token=${encodeURIComponent(t)}&host=${encodeURIComponent(hostId)}`; }
-    catch(e){ alert('Could not get a viewer token: '+(e.message||e)); }
+    // Hand the viewer page our live SESSION token (proof of an active login), not a
+    // durable device token — and via sessionStorage, never the URL. sessionStorage
+    // survives this same-tab reload but is NOT carried into a new/incognito window, so
+    // a pasted/leaked `/app/?host=…` link can't connect without signing in first. The
+    // WASM uses it to authenticate /api/ice and to mint a one-time /ws ticket.
+    const tok=(auth||'').replace(/^Bearer\s+/i,'');
+    if(!tok){ alert('Please sign in again.'); return go('#/login'); }
+    sessionStorage.setItem('rmd_vs_tok',tok);
+    location.href=`/app/?host=${encodeURIComponent(hostId)}`;
   }
   // Hosts the viewer has learned need a connection password: prompt for it INSIDE
   // this tap. iOS only raises the soft keyboard when focus() runs in a trusted user
@@ -973,7 +975,11 @@
   // After registering, an ext.js re-dispatches the current hash with rmdExt.go().
   const _extRoutes={}, _extRender=[];
   const emitRender=screen=>{ for(const cb of _extRender){ try{ cb(screen,el); }catch(e){ console.error('[ext]',e); } } };
-  window.rmdExt={ el:$, api, go, frame, auth:()=>({auth,user}), viewerToken,
+  // `connect(hostId)` is the ONLY supported way for an overlay to start a session:
+  // it stashes the live session token in sessionStorage and navigates — so plugins
+  // never build viewer URLs (and never put a credential in one). `auth()` exposes the
+  // session bearer for a plugin's own authenticated API calls.
+  window.rmdExt={ el:$, api, go, frame, auth:()=>({auth,user}), connect:doConnect,
     route(hash,fn){ _extRoutes[hash]=fn; }, onRender(cb){ _extRender.push(cb); } };
   // Cache-bust ext.js per load: it has no content hash, and static assets are
   // served with a long max-age, so a fixed URL goes stale for hours. index.html

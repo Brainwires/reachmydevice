@@ -42,10 +42,16 @@ pub struct Relay {
 }
 
 impl Relay {
-    /// Open the authenticated relay socket. The `onmessage` handler is wired here
-    /// and dispatches signals to the closure registered via [`Relay::on_signal`].
-    pub fn connect(server: &str, token: &str) -> Result<Relay, String> {
-        let url = format!("{}/ws?token={}", server.trim_end_matches('/'), token);
+    /// Open the authenticated relay socket. The bearer `token` is a live console
+    /// session; we exchange it for a one-time `/ws` ticket over HTTPS (bearer in the
+    /// `Authorization` header, via [`crate::authed_get_json`]) and open the socket
+    /// with `?ticket=`. A browser WebSocket can't send an auth header, so the ticket
+    /// indirection keeps the session token out of the `/ws?…` URL (and thus out of
+    /// access logs / `Referer`). The `onmessage` handler is wired here and dispatches
+    /// signals to the closure registered via [`Relay::on_signal`].
+    pub async fn connect(server: &str, token: &str) -> Result<Relay, String> {
+        let ticket = mint_ws_ticket(server, token).await?;
+        let url = format!("{}/ws?ticket={}", server.trim_end_matches('/'), ticket);
         let ws = WebSocket::new(&url).map_err(|e| format!("WebSocket::new: {e:?}"))?;
         ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
@@ -136,4 +142,20 @@ impl Relay {
             cb.forget();
         }
     }
+}
+
+/// Exchange the live session `token` for a one-time `/ws` ticket via
+/// `GET /api/ws-ticket` (bearer in the `Authorization` header). Returns the ticket
+/// string to open `/ws?ticket=`.
+async fn mint_ws_ticket(server: &str, token: &str) -> Result<String, String> {
+    let http_base = server
+        .replacen("wss://", "https://", 1)
+        .replacen("ws://", "http://", 1);
+    let url = format!("{}/api/ws-ticket", http_base.trim_end_matches('/'));
+    let json = crate::authed_get_json(&url, token).await?;
+    js_sys::Reflect::get(&json, &"ticket".into())
+        .ok()
+        .and_then(|v| v.as_string())
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "ws-ticket response had no ticket".to_string())
 }

@@ -1,9 +1,14 @@
-//! HTTP API: user registration, device registration (token issuance), and the
-//! user-scoped device list.
+//! HTTP API: user registration + sign-in, device registration (token issuance),
+//! and the user-scoped device list.
 //!
-//! - User-scoped endpoints authenticate with HTTP Basic (`username:password`).
-//! - Device registration authenticates the owning user in the body and returns a
-//!   long-lived device **bearer token** used for the signaling WebSocket.
+//! - User-scoped endpoints authenticate with an opaque **session** token
+//!   (`Authorization: Bearer`, minted by password or passkey sign-in) or HTTP Basic
+//!   (`username:password`).
+//! - Device registration authenticates the owning user (session/Basic header, or
+//!   in-body credentials for native CLI clients) and returns a long-lived device
+//!   **bearer token** used by native clients / hosts for the signaling WebSocket.
+//! - The browser viewer holds no device token: it connects with the session (see
+//!   [`ws_ticket`] / [`ice_servers`]), so relay access requires a live login.
 
 use crate::auth;
 use crate::db::{AppState, now_unix};
@@ -125,6 +130,32 @@ pub async fn register_user(
         }
         Err(e) => Err(AppError::Db(e)),
     }
+}
+
+#[derive(Deserialize)]
+pub struct LoginBody {
+    username: String,
+    password: String,
+}
+
+/// `POST /api/login` — password sign-in for the web console. Verifies the password
+/// (with the same per-username lockout/backoff as every other password check) and
+/// mints an opaque **session token** the console then presents as
+/// `Authorization: Bearer`, mirroring passkey login (`/api/webauthn/login/finish`).
+///
+/// This makes the console hold a session token *regardless* of sign-in method, so
+/// the browser never keeps the raw password around and the connection path has a
+/// uniform bearer to authenticate with — one that proves a live login and can be
+/// revoked on sign-out, unlike a durable device token.
+pub async fn login(
+    State(state): State<AppState>,
+    Json(body): Json<LoginBody>,
+) -> AppResult<Json<serde_json::Value>> {
+    let user_id = authenticate_user(&state, &body.username, &body.password).await?;
+    let session = mint_user_session(&state.pool, user_id).await?;
+    Ok(Json(
+        serde_json::json!({ "session": session, "username": body.username }),
+    ))
 }
 
 /// Current runtime value of the open-registration flag: the DB `settings` row,
@@ -344,6 +375,19 @@ fn request_token(headers: &HeaderMap, q: &TokenQuery) -> Option<String> {
     bearer_token(headers).or_else(|| q.token.clone())
 }
 
+/// If the request carries a valid console **session** as `Authorization: Bearer`,
+/// the owning `user_id`. This is the first-party (web-viewer) credential: proof of
+/// a live login, *not* a durable device token. A device token or member JWT never
+/// matches a `user_sessions` row, so this returns `Ok(None)` for them and the
+/// caller falls through to the device-token / JWT resolver. Sessions are only ever
+/// read from the header — never a URL query — so they can't leak into access logs.
+async fn session_user(state: &AppState, headers: &HeaderMap) -> AppResult<Option<i64>> {
+    match bearer_token(headers) {
+        Some(bearer) => user_id_for_session(&state.pool, &bearer).await,
+        None => Ok(None),
+    }
+}
+
 /// HMAC-SHA1 coturn credential for `username` (the `--use-auth-secret` scheme).
 fn mint_turn_credential(secret: &str, username: &str) -> String {
     // HMAC accepts a key of any length, so this never fails.
@@ -393,15 +437,21 @@ pub async fn ice_servers(
     headers: HeaderMap,
     Query(q): Query<TokenQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let token = request_token(&headers, &q).ok_or(AppError::Unauthorized)?;
-    // Resolve the presented credential to an identity via the pluggable resolver.
-    // The default accepts device tokens only (resolving the owning user + stamping
-    // `last_seen`); a paid build also accepts tenant member JWTs, which resolve to
-    // the platform account's admin user_id (so relay rolls up per-account). Only a
-    // resolvable credential reaches the relay gate.
-    let user_id = match state.credential_resolver.resolve(&state.pool, &token).await {
-        Some(cred) => cred.user_id,
-        None => return Err(AppError::Unauthorized),
+    // First-party web viewer authenticates with a live console **session**
+    // (`Authorization: Bearer`), proving an active login rather than presenting a
+    // durable device token. Otherwise resolve the presented credential via the
+    // pluggable resolver: the default accepts device tokens only (resolving the
+    // owning user + stamping `last_seen`); a paid build also accepts tenant member
+    // JWTs, which resolve to the platform account's admin user_id (so relay rolls up
+    // per-account). Only a session or a resolvable credential reaches the relay gate.
+    let user_id = if let Some(uid) = session_user(&state, &headers).await? {
+        uid
+    } else {
+        let token = request_token(&headers, &q).ok_or(AppError::Unauthorized)?;
+        match state.credential_resolver.resolve(&state.pool, &token).await {
+            Some(cred) => cred.user_id,
+            None => return Err(AppError::Unauthorized),
+        }
     };
 
     // Ask the relay-entitlement policy whether this user may use TURN. The
@@ -461,6 +511,24 @@ pub async fn ws_ticket(
     headers: HeaderMap,
     Query(q): Query<TokenQuery>,
 ) -> AppResult<Json<WsTicketResp>> {
+    // First-party web viewer: the credential is a live console **session** (proof
+    // the user is logged in *right now*), not a durable device token. Mint a fresh,
+    // per-connection viewer signaling id so the browser never holds a long-lived
+    // relay credential — a stolen or stale `/app/?host=…` URL can't reconnect
+    // without an active login. The `v:` prefix can't collide with a colon-free hex
+    // `device_id` or a `t:` tenant member id.
+    if let Some(user_id) = session_user(&state, &headers).await? {
+        let signaling_id = format!("v:{user_id}:{}", &auth::generate_token()[..16]);
+        let cred = crate::resolver::ResolvedCredential {
+            user_id,
+            signaling_id,
+        };
+        let ticket = state.ws_tickets.issue(&cred);
+        return Ok(Json(WsTicketResp { ticket }));
+    }
+    // Otherwise resolve a bearer credential via the pluggable resolver: a device
+    // token (native clients / hosts) or a tenant member JWT (paid build). The
+    // deprecated `?token=` query fallback stays for those non-browser callers.
     let token = request_token(&headers, &q).ok_or(AppError::Unauthorized)?;
     let cred = state
         .credential_resolver
@@ -584,8 +652,10 @@ pub async fn mint_user_session(pool: &SqlitePool, user_id: i64) -> AppResult<Str
     Ok(token)
 }
 
-/// Resolve a console session token → `user_id`, if valid and unexpired.
-async fn user_id_for_session(pool: &SqlitePool, token: &str) -> AppResult<Option<i64>> {
+/// Resolve a console session token → `user_id`, if valid and unexpired. Public so
+/// a plugin can authenticate its own user-scoped routes off the same session the
+/// console holds (rather than a durable device token).
+pub async fn user_id_for_session(pool: &SqlitePool, token: &str) -> AppResult<Option<i64>> {
     let row: Option<(i64,)> =
         sqlx::query_as("SELECT user_id FROM user_sessions WHERE token_hash = ? AND expires_at > ?")
             .bind(auth::hash_token(token))
@@ -676,4 +746,116 @@ pub async fn device_id_for_token(pool: &SqlitePool, token: &str) -> AppResult<Op
     Ok(resolve_device_token(pool, token)
         .await?
         .map(|(_, device_id)| device_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::connect_and_migrate;
+
+    async fn pool_with_user(db_name: &str) -> (SqlitePool, i64) {
+        let url = format!("sqlite:file:{db_name}?mode=memory&cache=shared");
+        let pool = connect_and_migrate(&url).await.unwrap();
+        // Bootstrap a single account directly (first-user path).
+        crate::db::create_user_if_allowed(&pool, "alice", "hash", false, true)
+            .await
+            .unwrap();
+        let (uid,): (i64,) = sqlx::query_as("SELECT id FROM users WHERE username = ?")
+            .bind("alice")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        (pool, uid)
+    }
+
+    /// The security-critical property behind session-first-with-device-fallback
+    /// resolution (`ws_ticket` / `ice_servers`): a console **session** and a device
+    /// **token** live in separate tables, so a given bearer resolves on exactly one
+    /// path. A session is never mistaken for a device token (and vice versa), and an
+    /// expired session is rejected — so a stale credential can't reach the relay.
+    #[tokio::test]
+    async fn session_and_device_token_paths_are_isolated() {
+        let (pool, uid) = pool_with_user("sess_iso").await;
+
+        // A live session resolves to its owner.
+        let session = mint_user_session(&pool, uid).await.unwrap();
+        assert_eq!(
+            user_id_for_session(&pool, &session).await.unwrap(),
+            Some(uid)
+        );
+
+        // A device token for the same user, inserted directly.
+        let device_token = auth::generate_token();
+        sqlx::query(
+            "INSERT INTO devices (user_id, device_id, name, public_key, role, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(uid)
+        .bind("dev1")
+        .bind("d")
+        .bind("pk")
+        .bind("viewer")
+        .bind(now_unix())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (device_pk,): (i64,) = sqlx::query_as("SELECT id FROM devices WHERE device_id = ?")
+            .bind("dev1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO device_tokens (device_pk, token_hash, created_at, expires_at) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(device_pk)
+        .bind(auth::hash_token(&device_token))
+        .bind(now_unix())
+        .bind(Option::<i64>::None)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Cross-isolation: neither credential resolves on the other's path.
+        assert_eq!(
+            user_id_for_session(&pool, &device_token).await.unwrap(),
+            None
+        );
+        assert!(
+            resolve_device_token(&pool, &session)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Each still resolves correctly on its own path.
+        assert_eq!(
+            resolve_device_token(&pool, &device_token).await.unwrap(),
+            Some((uid, "dev1".to_string()))
+        );
+
+        // An expired session is rejected (a stale bearer can't mint a ticket).
+        let expired = auth::generate_token();
+        sqlx::query(
+            "INSERT INTO user_sessions (user_id, token_hash, created_at, expires_at) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(uid)
+        .bind(auth::hash_token(&expired))
+        .bind(now_unix() - 100)
+        .bind(now_unix() - 10)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(user_id_for_session(&pool, &expired).await.unwrap(), None);
+
+        // Garbage resolves to neither.
+        assert_eq!(user_id_for_session(&pool, "deadbeef").await.unwrap(), None);
+        assert!(
+            resolve_device_token(&pool, "deadbeef")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }
