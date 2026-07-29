@@ -4,6 +4,8 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-28
+
 ### Security
 - **Web viewer now requires a live login to connect.** The browser no longer holds
   a durable, self-authenticating viewer device token. Connecting authenticates with
