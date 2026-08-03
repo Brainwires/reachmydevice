@@ -176,6 +176,26 @@ fn park_unconfigured(reason: &str) -> ! {
     }
 }
 
+/// Refuse to run an internet-reachable host that has no access control at all.
+/// Like [`park_unconfigured`], this parks instead of exiting so a supervised
+/// daemon doesn't restart-loop; the operator fixes it by setting a credential
+/// (or opting into an open relay) and restarting.
+fn park_open_relay() -> ! {
+    tracing::error!(
+        "refusing to serve: this host is reachable through a rendezvous but has no \
+         access control (no connect password, no authorized-keys, RMD_REQUIRE_AUTH \
+         unset). Anyone who learns its device_id could take full control. Set one of:\n  \
+         rmdd set password <connection-password>       # RealVNC-style password\n  \
+         echo <viewer-device-id> >> ~/.config/rmd/authorized_keys   # allowlist\n  \
+         RMD_REQUIRE_AUTH=1                             # require an authorized identity\n\
+         Or set RMD_ALLOW_OPEN_RELAY=1 to intentionally run an open host, then restart.\n\
+         Idling — won't auto-exit, so the service won't restart-loop. Stop the service to exit."
+    );
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
 /// Handle the `rmdd set|unset|list` settings subcommands. These load (or
 /// first-run create) the device identity, open the encrypted settings store, and
 /// mutate it — then exit without starting a session. `list` prints keys only,
@@ -418,6 +438,22 @@ fn main() -> anyhow::Result<()> {
         identity,
         connect_password,
     };
+
+    // Fail closed on an open relay. An internet-reachable host (connected to a
+    // rendezvous) with no access control whatsoever — no authorization gate
+    // (`require_authorization` already folds in RMD_REQUIRE_AUTH and a non-empty
+    // authorized-keys list) and no connect password — would grant full screen
+    // capture + input injection to anyone who learns its device_id, which the
+    // system does not treat as a secret. Refuse to serve unless the operator sets
+    // a credential, or explicitly opts into an open relay. LAN/dev signaling
+    // (no rendezvous URL) is unaffected.
+    if rendezvous_url.is_some()
+        && !cfg.require_authorization
+        && cfg.connect_password.is_none()
+        && std::env::var("RMD_ALLOW_OPEN_RELAY").is_err()
+    {
+        park_open_relay();
+    }
 
     tracing::info!(
         display = cfg.display_index,

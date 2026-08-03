@@ -38,6 +38,19 @@ pub fn verify_password(password: &str, phc: &str) -> bool {
     }
 }
 
+/// A fixed, valid Argon2id PHC string used only to equalize failed-login timing.
+///
+/// When a login names a username that doesn't exist, [`verify_password`] is run
+/// against this hash so the request costs the same single Argon2 verify as a
+/// known user with a wrong password. Without it, the missing-user path returns
+/// immediately and the timing delta leaks which usernames exist. The salt is
+/// random-but-fixed (it needn't be secret); it's produced with the same pinned
+/// params as real hashes, so the verify cost matches production. Computed once.
+pub fn dummy_phc() -> &'static str {
+    static PHC: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PHC.get_or_init(|| hash_password("rmd-timing-equalizer").expect("argon2 hash of constant"))
+}
+
 /// Generate a new opaque device token (256 bits, hex-encoded).
 pub fn generate_token() -> String {
     let mut bytes = [0u8; 32];
@@ -124,6 +137,24 @@ mod tests {
         let phc = hash_password("correct horse battery staple").unwrap();
         assert!(verify_password("correct horse battery staple", &phc));
         assert!(!verify_password("wrong", &phc));
+    }
+
+    #[test]
+    fn dummy_phc_is_a_real_verifiable_hash() {
+        let phc = dummy_phc();
+        // Must be a well-formed Argon2id PHC so `verify_password` actually runs the
+        // KDF — a malformed string would make verify short-circuit to `false`
+        // without the Argon2 work, defeating the timing equalizer.
+        assert!(
+            phc.starts_with("$argon2id$"),
+            "dummy PHC must be argon2id: {phc}"
+        );
+        assert!(PasswordHash::new(phc).is_ok(), "dummy PHC must parse");
+        // It does real verify work: the seed password matches, anything else doesn't.
+        assert!(verify_password("rmd-timing-equalizer", phc));
+        assert!(!verify_password("not the seed", phc));
+        // Stable across calls (computed once).
+        assert_eq!(dummy_phc(), phc);
     }
 
     #[test]

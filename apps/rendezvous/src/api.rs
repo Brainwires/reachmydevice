@@ -552,9 +552,14 @@ async fn authenticate_user(state: &AppState, username: &str, password: &str) -> 
             .bind(username)
             .fetch_optional(&state.pool)
             .await?;
-    let Some((id, hash)) = row else {
-        state.throttle.record_failure(username);
-        return Err(AppError::Unauthorized);
+    // Always run exactly one Argon2 verify, even when the username doesn't exist:
+    // verify against a fixed dummy hash in that case so an unknown user costs the
+    // same work as a known user with a wrong password. Otherwise the early-out
+    // leaks username existence via timing (account enumeration). A non-existent
+    // user is still rejected regardless of the verify result (`id` is `None`).
+    let (id, hash) = match row {
+        Some((id, hash)) => (Some(id), hash),
+        None => (None, auth::dummy_phc().to_string()),
     };
     // Argon2 is CPU + memory heavy (64 MiB / 3 passes). Cap concurrency with a
     // semaphore and run it on the blocking pool so a flood of auth'd requests
@@ -570,12 +575,15 @@ async fn authenticate_user(state: &AppState, username: &str, password: &str) -> 
         .await
         .unwrap_or(false);
     drop(_permit);
-    if ok {
-        state.throttle.record_success(username);
-        Ok(id)
-    } else {
-        state.throttle.record_failure(username);
-        Err(AppError::Unauthorized)
+    match id {
+        Some(id) if ok => {
+            state.throttle.record_success(username);
+            Ok(id)
+        }
+        _ => {
+            state.throttle.record_failure(username);
+            Err(AppError::Unauthorized)
+        }
     }
 }
 
@@ -751,7 +759,8 @@ pub async fn device_id_for_token(pool: &SqlitePool, token: &str) -> AppResult<Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::connect_and_migrate;
+    use crate::config::Config;
+    use crate::db::{AppState, connect_and_migrate};
 
     async fn pool_with_user(db_name: &str) -> (SqlitePool, i64) {
         let url = format!("sqlite:file:{db_name}?mode=memory&cache=shared");
@@ -766,6 +775,55 @@ mod tests {
             .await
             .unwrap();
         (pool, uid)
+    }
+
+    fn test_config() -> Config {
+        Config {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            database_url: "sqlite::memory:".to_string(),
+            allow_open_registration: false,
+            admin_token: None,
+            bootstrap_token: None,
+            trusted_proxy_header: None,
+            token_ttl_secs: None,
+            turn: None,
+        }
+    }
+
+    /// `authenticate_user` accepts the right password, rejects a wrong one, and
+    /// rejects an unknown username. The unknown-username path must run the dummy
+    /// Argon2 verify (timing equalizer) rather than short-circuiting — this test
+    /// exercises that branch and asserts it still fails closed.
+    #[tokio::test]
+    async fn authenticate_user_verifies_and_unknown_user_is_rejected() {
+        let (pool, uid) = pool_with_user("authn_timing").await;
+        // Replace alice's placeholder hash with a real Argon2 hash of a known pw.
+        let real = auth::hash_password("correct horse").unwrap();
+        sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+            .bind(&real)
+            .bind(uid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let state = AppState::new(pool, test_config(), rmd_entitlement::allow_all());
+
+        // Correct password → the user id.
+        assert_eq!(
+            authenticate_user(&state, "alice", "correct horse")
+                .await
+                .unwrap(),
+            uid
+        );
+        // Wrong password → Unauthorized.
+        assert!(matches!(
+            authenticate_user(&state, "alice", "wrong").await,
+            Err(AppError::Unauthorized)
+        ));
+        // Unknown username → Unauthorized (runs the dummy-verify equalizer path).
+        assert!(matches!(
+            authenticate_user(&state, "ghost", "whatever").await,
+            Err(AppError::Unauthorized)
+        ));
     }
 
     /// The security-critical property behind session-first-with-device-fallback

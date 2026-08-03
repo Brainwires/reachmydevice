@@ -4,6 +4,24 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-03
+
+### Security
+- **Host fails closed on an open relay.** A `rmdd` reachable through a rendezvous
+  (internet-reachable) with no access control whatsoever — no connect password, no
+  authorized-keys list, and `RMD_REQUIRE_AUTH` unset — now refuses to serve instead of
+  accepting any peer that completes the handshake. Previously the only barrier was
+  secrecy of the `device_id`, which the system does not treat as a secret. The daemon
+  logs an actionable message and parks (it won't restart-loop under a supervisor); set a
+  connect password, an authorized-keys entry, or `RMD_REQUIRE_AUTH` — or opt into an
+  open host explicitly with `RMD_ALLOW_OPEN_RELAY=1`. LAN/dev signaling is unaffected.
+  The `HostConfig` library default also flips to `require_authorization: true` so
+  embedders fail closed by default.
+- **Login timing no longer leaks whether a username exists.** `authenticate_user` now
+  runs a dummy Argon2 verify on the unknown-username path, so an unknown user costs the
+  same work as a known user with a wrong password (closes a low-severity account
+  enumeration side channel).
+
 ## [0.4.0] - 2026-07-28
 
 ### Security
