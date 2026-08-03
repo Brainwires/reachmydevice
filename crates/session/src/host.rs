@@ -118,7 +118,10 @@ impl Default for HostConfig {
             bind_addr: "0.0.0.0:0".to_string(),
             enable_audio: false,
             video_codec: codec::VideoCodec::default(),
-            require_authorization: false,
+            // Fail closed by default: an embedder that takes the default must opt
+            // into an open host explicitly. The `rmdd` daemon sets this field
+            // itself and guards the open-relay case at startup.
+            require_authorization: true,
             authorized_device_ids: Vec::new(),
             identity: None,
             connect_password: None,
