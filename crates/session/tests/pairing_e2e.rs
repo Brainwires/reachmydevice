@@ -66,6 +66,63 @@ fn two_devices_pair_over_the_stateless_relay() {
     let _ = std::fs::remove_file(&db_path);
 }
 
+/// Regression test for the first-frame drop race: one device connects and would
+/// (in the buggy client) fire its `Hello` into an empty room before the peer
+/// joins, deadlocking both sides. Here device B joins ~250ms after A, so A is
+/// definitely alone when it starts. The whole exchange is bounded by a timeout —
+/// if the race regresses this FAILS quickly instead of hanging to the CI limit.
+#[test]
+fn staggered_join_still_pairs() {
+    let db_path = std::env::temp_dir().join(format!("or-pair-stagger-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&db_path);
+    let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
+            let cfg = Config {
+                bind_addr: "127.0.0.1:0".parse().unwrap(),
+                database_url: db_url,
+                allow_open_registration: false,
+                admin_token: None,
+                bootstrap_token: None,
+                trusted_proxy_header: None,
+                token_ttl_secs: None,
+                turn: None,
+            };
+            let state = init_state(cfg).await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            addr_tx.send(listener.local_addr().unwrap()).unwrap();
+            serve(state, listener).await.unwrap();
+        });
+    });
+    let addr = addr_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let ws_base = format!("ws://{addr}");
+
+    let code = generate_pairing_code().unwrap();
+    let id_a = DeviceIdentity::generate().unwrap();
+    let id_b = DeviceIdentity::generate().unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (ra, rb) = rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let a = pair_pake(&ws_base, &code, &id_a, "device-a");
+            let b = async {
+                // A is alone in the room while it decides whether to send.
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                pair_pake(&ws_base, &code, &id_b, "device-b").await
+            };
+            tokio::join!(a, b)
+        })
+        .await
+        .expect("pairing timed out — the first-frame drop race has regressed")
+    });
+
+    assert_eq!(ra.expect("A pairing failed").device_id, id_b.device_id());
+    assert_eq!(rb.expect("B pairing failed").device_id, id_a.device_id());
+    let _ = std::fs::remove_file(&db_path);
+}
+
 #[test]
 fn mismatched_code_fails_to_pair() {
     let db_path = std::env::temp_dir().join(format!("or-pair-bad-{}.db", std::process::id()));

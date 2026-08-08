@@ -62,6 +62,33 @@ pub async fn pair_pake(
         Ok(())
     }
 
+    // Wait until the relay signals the other party has joined the room. The relay
+    // is a blind mailbox that only forwards frames between members *currently*
+    // present, so sending our first message before the peer has joined drops it —
+    // and both sides then deadlock waiting for a frame that never arrives. The
+    // relay emits `{"peer":"joined"}` to both parties once the room holds two
+    // members; gating our first send on that makes the exchange race-free.
+    async fn wait_for_peer<S>(stream: &mut S) -> anyhow::Result<()>
+    where
+        S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    {
+        while let Some(msg) = stream.next().await {
+            let Message::Text(text) = msg? else { continue };
+            let v: serde_json::Value = serde_json::from_str(&text)?;
+            match v.get("peer").and_then(|p| p.as_str()) {
+                Some("joined") => return Ok(()),
+                Some("left") => anyhow::bail!("peer left before pairing started"),
+                _ => {}
+            }
+            if v.get("error").is_some() {
+                anyhow::bail!("relay: {text}");
+            }
+            // Nothing else is expected before the join signal (the peer gates its
+            // first send the same way), so ignore any stray frame and keep waiting.
+        }
+        anyhow::bail!("pairing socket closed before a peer joined");
+    }
+
     // Receive the next PairMsg, skipping relay control frames (`{"peer":…}`).
     async fn recv<S>(stream: &mut S) -> anyhow::Result<PairMsg>
     where
@@ -80,6 +107,10 @@ pub async fn pair_pake(
         }
         anyhow::bail!("pairing socket closed before peer responded");
     }
+
+    // 0. Wait for the peer to be present before sending, so the relay actually
+    //    forwards our first frame instead of dropping it into an empty room.
+    wait_for_peer(&mut stream).await?;
 
     // 1. Start SPAKE2 and announce ourselves (msg + identity).
     let (exchange, pake_msg) = pairing::pake_start(&secret);
