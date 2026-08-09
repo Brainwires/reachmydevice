@@ -4,6 +4,17 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+### Fixed
+- **Direct pairing no longer races on the first frame.** The `/pair` relay is a
+  blind mailbox that only forwards between peers currently in the room, and it
+  emits `{"peer":"joined"}` once both are present — but the pairing client sent its
+  first SPAKE2 `Hello` immediately on connect, before the peer had necessarily
+  joined. When both devices connected concurrently, one side's `Hello` could be
+  dropped into an empty room, deadlocking both until timeout (observed as an
+  intermittent CI hang in `two_devices_pair_over_the_stateless_relay`). The client
+  now waits for the join signal before its first send. Added a staggered-join
+  regression test bounded by a timeout so any recurrence fails fast.
+
 ## [0.5.0] - 2026-08-03
 
 ### Security
