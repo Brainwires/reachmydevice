@@ -21,6 +21,7 @@ use rmd_session::{HostConfig, HostStatus, SignalClient, Signaling, run_host_repo
 use rmd_transport::IceServer;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 mod service;
 
@@ -51,8 +52,16 @@ fn setting_or_env_or<T: std::str::FromStr>(
 
 /// Assemble the host's ICE servers: any manual `RMD_ICE` URLs first, then the
 /// STUN/TURN servers the rendezvous mints for this device (`/api/ice`) when in
-/// rendezvous mode. A fetch failure is logged and skipped — the session still
-/// runs, just without a relay (so cross-NAT viewers may not connect).
+/// rendezvous mode.
+///
+/// The relay candidate is allocated from these **once** at transport startup and
+/// reused for the process's lifetime, so a fetch that fails here leaves the host
+/// relay-less until it is restarted — cross-NAT viewers then can't connect at all.
+/// A transient blip at startup is common (a reboot racing the rendezvous, a
+/// briefly-wedged macOS resolver, a Cloudflare 5xx), so we **retry with backoff**
+/// for a bounded window (`RMD_ICE_FETCH_MAX_WAIT` seconds, default 120) before
+/// falling back to a relay-less start. A 401 (an expired token) is re-minted in
+/// place via the identity-key refresher and the fetch retried once.
 fn ice_servers(
     rendezvous_url: Option<&str>,
     token: Option<&str>,
@@ -72,26 +81,46 @@ fn ice_servers(
     if let (Some(url), Some(tok)) = (rendezvous_url, token) {
         let base = rmd_session::account::rest_base_from_ws(url);
         let client = rmd_session::AccountClient::new(&base);
-        let mut fetched = client.ice_servers(tok);
-        // If the token was rejected (401), re-mint it via the identity key and
-        // retry once so the relay works even when the token expired before boot.
-        if is_http_unauthorized(&fetched) {
-            if let Some(new_token) = refresher.and_then(|r| r()) {
-                tracing::info!("ICE fetch got 401; refreshed token and retrying");
-                fetched = client.ice_servers(&new_token);
-                refreshed_token = Some(new_token);
+        // The token we authenticate with; may be re-minted once on a 401 mid-loop.
+        let mut auth = tok.to_string();
+        let deadline = Instant::now() + Duration::from_secs(env_or("RMD_ICE_FETCH_MAX_WAIT", 120));
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            let mut fetched = client.ice_servers(&auth);
+            // If the token was rejected (401), re-mint it via the identity key and
+            // retry so the relay works even when the token expired before boot. Only
+            // once — a second 401 means the fresh token is bad too, so don't spin.
+            if is_http_unauthorized(&fetched) && refreshed_token.is_none() {
+                if let Some(new_token) = refresher.and_then(|r| r()) {
+                    tracing::info!("ICE fetch got 401; refreshed token and retrying");
+                    fetched = client.ice_servers(&new_token);
+                    auth = new_token.clone();
+                    refreshed_token = Some(new_token);
+                }
             }
-        }
-        match fetched {
-            Ok(mut list) if !list.is_empty() => {
-                tracing::info!(count = list.len(), "fetched ICE servers from rendezvous");
-                servers.append(&mut list);
+            match fetched {
+                Ok(mut list) if !list.is_empty() => {
+                    tracing::info!(count = list.len(), "fetched ICE servers from rendezvous");
+                    servers.append(&mut list);
+                    break;
+                }
+                // The deployment advertises no ICE servers — a valid answer, not a
+                // failure; don't spin retrying it.
+                Ok(_) => break,
+                Err(e) => {
+                    if Instant::now() >= deadline {
+                        tracing::warn!(
+                            error = %e,
+                            "could not fetch ICE servers from rendezvous after retries; \
+                             continuing without a relay (cross-NAT viewers may not connect)"
+                        );
+                        break;
+                    }
+                    tracing::warn!(error = %e, "ICE server fetch failed; retrying in {backoff:?}");
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(Duration::from_secs(15));
+                }
             }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(
-                error = %e,
-                "could not fetch ICE servers from rendezvous; continuing without a relay"
-            ),
         }
     }
     (servers, refreshed_token)
@@ -148,6 +177,76 @@ fn refresh_and_persist_token(
     }
     tracing::info!("re-minted device bearer token via identity-key refresh");
     Some(new)
+}
+
+/// The earliest coturn credential expiry (unix seconds) across the credentialed
+/// TURN servers, if any. The rendezvous mints ephemeral coturn creds whose
+/// username is `<expiry>:<id>` (see `rmd_transport::IceServer` docs), so the leading
+/// field is the expiry. `None` when there's no credentialed TURN server (STUN-only
+/// or a manual `RMD_ICE` list) or the format isn't recognised.
+fn earliest_turn_expiry(servers: &[IceServer]) -> Option<u64> {
+    servers
+        .iter()
+        .filter(|s| s.urls.iter().any(|u| u.starts_with("turn:")))
+        .filter_map(|s| s.username.as_deref())
+        .filter_map(|u| u.split(':').next()?.parse::<u64>().ok())
+        .min()
+}
+
+/// Keep the host's TURN relay credential fresh. rmdd allocates its relay candidate
+/// **once** at startup and never refreshes it, so a host up longer than the
+/// credential's lifetime (`RMD_TURN_TTL` on the server) silently loses its relay:
+/// it stays connected but cross-NAT viewers can no longer reach it. Rather than
+/// re-allocate on the live media path, we restart the process **in place** shortly
+/// before the credential expires — a fresh start re-fetches ICE and re-allocates —
+/// and only while **no session is active**, so an in-progress connection is never
+/// interrupted. Reuses the same supervised-relaunch path as the DNS watchdog. A
+/// no-op when there's no credentialed TURN server (LAN/dev, STUN-only).
+fn spawn_turn_refresh(servers: &[IceServer], session_active: Arc<AtomicBool>) {
+    /// Restart this long before the credential lapses (leaves margin to reconnect).
+    const LEAD: u64 = 300;
+    /// Refuse to schedule a refresh nearer than this — guards against a mis-parsed
+    /// or already-expired timestamp turning into a restart loop.
+    const MIN_LEAD: u64 = 600;
+
+    let Some(expiry) = earliest_turn_expiry(servers) else {
+        return;
+    };
+    let now = now_unix().max(0) as u64;
+    if expiry <= now + MIN_LEAD {
+        tracing::warn!(
+            expiry,
+            now,
+            "TURN credential expiry too soon or unrecognised; not scheduling a refresh"
+        );
+        return;
+    }
+    tracing::info!(
+        expiry,
+        in_secs = expiry.saturating_sub(now),
+        "scheduling TURN credential refresh before expiry"
+    );
+    std::thread::spawn(move || {
+        loop {
+            let now = now_unix().max(0) as u64;
+            let refresh_at = expiry.saturating_sub(LEAD);
+            if now < refresh_at {
+                // Nap until refresh time, capped so we re-check periodically.
+                std::thread::sleep(Duration::from_secs((refresh_at - now).min(3600)));
+                continue;
+            }
+            // Past refresh time: wait for an idle moment, then restart for fresh creds.
+            if session_active.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(30));
+                continue;
+            }
+            tracing::info!(
+                expiry,
+                "refreshing TURN credential before it expires — restarting host in place"
+            );
+            rmd_session::rendezvous::restart_in_place();
+        }
+    });
 }
 
 /// Load authorized viewer `device_id`s for unattended access. Reads
@@ -1067,6 +1166,11 @@ fn main() -> anyhow::Result<()> {
     // client so its wedged-resolver watchdog never restarts us mid-session.
     let session_active = Arc::new(AtomicBool::new(false));
 
+    // Keep the TURN relay credential fresh: restart in place (when idle) before it
+    // lapses, since the relay is allocated once at startup and never refreshed.
+    // No-op unless we actually have a credentialed TURN server.
+    spawn_turn_refresh(&cfg.ice_servers, session_active.clone());
+
     // The host is the offerer; it learns the viewer's id from the rendezvous hello.
     let signaling = build_signaling(
         None,
@@ -1089,10 +1193,50 @@ fn main() -> anyhow::Result<()> {
     })
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    fn turn(username: Option<&str>) -> IceServer {
+        IceServer {
+            urls: vec!["turn:1.2.3.4:3478?transport=udp".to_string()],
+            username: username.map(str::to_string),
+            credential: username.map(|_| "cred".to_string()),
+        }
+    }
+
+    #[test]
+    fn earliest_turn_expiry_parses_leading_timestamp() {
+        // coturn REST username is `<expiry>:<id>`.
+        assert_eq!(
+            earliest_turn_expiry(&[turn(Some("1700000000:42"))]),
+            Some(1_700_000_000)
+        );
+    }
+
+    #[test]
+    fn earliest_turn_expiry_takes_the_minimum_across_servers() {
+        let servers = vec![turn(Some("1700000900:1")), turn(Some("1700000100:2"))];
+        assert_eq!(earliest_turn_expiry(&servers), Some(1_700_000_100));
+    }
+
+    #[test]
+    fn earliest_turn_expiry_none_for_stun_or_credentialless() {
+        // STUN-only (no username) and manual URL-only entries carry no expiry.
+        assert_eq!(earliest_turn_expiry(&[turn(None)]), None);
+        assert_eq!(
+            earliest_turn_expiry(&[IceServer::urls(vec!["stun:1.2.3.4:3478".to_string()])]),
+            None
+        );
+    }
+
+    #[test]
+    fn earliest_turn_expiry_none_for_unparseable_username() {
+        // A non-timestamp leading field must not yield a bogus (tiny) expiry.
+        assert_eq!(earliest_turn_expiry(&[turn(Some("not-a-timestamp:x"))]), None);
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn splice_cmdline_appends_and_is_idempotent() {
         let key = "GRUB_CMDLINE_LINUX_DEFAULT=";

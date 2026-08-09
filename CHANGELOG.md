@@ -125,6 +125,18 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
   `RMD_KEY_PASSPHRASE` from `~/.config/rmd/key.env` (as the service does via its
   systemd `EnvironmentFile`), so `rmdd set/list` no longer fail with "identity is
   encrypted" from a plain shell.
+- **Host no longer gets stranded relay-less.** rmdd fetched its TURN/ICE
+  credentials from the rendezvous exactly once at startup and allocated the relay
+  candidate from them for its whole lifetime — so a single transient failure at
+  startup (a reboot racing the rendezvous, a briefly-wedged macOS DNS resolver, a
+  Cloudflare 5xx) left the host connected but with **no relay**, and cross-NAT
+  viewers couldn't connect until someone restarted it. Now:
+  - the startup ICE fetch **retries with backoff** for a bounded window
+    (`RMD_ICE_FETCH_MAX_WAIT`, default 120s) instead of giving up after one try; and
+  - a background task **refreshes the credential** before it expires (parsed from
+    the coturn `<expiry>:<id>` username) by restarting the host in place — only while
+    no session is active — since the relay is allocated once and never renewed. This
+    also fixes hosts silently losing their relay after `RMD_TURN_TTL`.
 
 ## [0.6.2] - 2026-08-12
 
