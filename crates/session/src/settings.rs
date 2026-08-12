@@ -41,6 +41,11 @@ pub const KEY_BITRATE: &str = "bitrate";
 /// by the host at runtime (not via `rmdd set`); may be rotated by the portal.
 pub const KEY_SCREENCAST_RESTORE_TOKEN: &str = "screencast_restore_token";
 
+/// Wayland capture source: `monitor` (dual-use — captures the real display, shown
+/// both locally and remotely) or `virtual` (headless — a virtual monitor that
+/// survives with no physical display). Ignored on X11/macOS. Default `monitor`.
+pub const KEY_CAPTURE_SOURCE: &str = "capture_source";
+
 /// In-memory view of the settings, persisted as one encrypted blob.
 #[derive(Default)]
 pub struct SettingsStore {

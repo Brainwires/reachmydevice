@@ -18,7 +18,7 @@
 //! shutdown signal (dropping the session closes the portal). A second "pw"
 //! thread owns the PipeWire main loop. Stopping the session signals both.
 
-use crate::{CaptureConfig, CaptureSession, DisplayInfo, Frame, FrameSink, PixelFormat};
+use crate::{CaptureConfig, CaptureSession, CaptureSource, DisplayInfo, Frame, FrameSink, PixelFormat};
 use bytes::Bytes;
 use std::sync::{Arc, Mutex};
 use pipewire as pw;
@@ -90,11 +90,19 @@ pub fn start_capture(
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let show_cursor = config.show_cursor;
     let restore_token_in = config.restore_token.clone();
+    let want_virtual = matches!(config.capture_source, CaptureSource::Virtual);
     let fps = config.fps.max(1);
+    // Preferred capture size. For a VIRTUAL source this also sizes the virtual
+    // monitor the compositor creates, so it matches the configured resolution
+    // instead of the format default.
+    let width = config.width.max(1);
+    let height = config.height.max(1);
 
     let portal_thread = std::thread::Builder::new()
         .name("rmd-portal".into())
-        .spawn(move || portal_thread_main(show_cursor, restore_token_in, ready_tx, shutdown_rx))?;
+        .spawn(move || {
+            portal_thread_main(show_cursor, want_virtual, restore_token_in, ready_tx, shutdown_rx)
+        })?;
 
     let (pw_quit, pw_quit_rx) = pw::channel::channel::<()>();
     let restore_token: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -118,7 +126,7 @@ pub fn start_capture(
                 *restore_token_bg.lock().unwrap() = token;
             }
             tracing::info!(node_id, "Wayland PipeWire capture streaming");
-            if let Err(e) = pw_run(fd, node_id, fps, sink, pw_quit_rx) {
+            if let Err(e) = pw_run(PwConnect::Fd(fd), node_id, fps, width, height, sink, pw_quit_rx) {
                 tracing::error!(error = %e, "PipeWire capture loop ended with error");
             }
         })?;
@@ -138,6 +146,7 @@ pub fn start_capture(
 /// borrows the proxy, and dropping either closes the portal stream.
 fn portal_thread_main(
     show_cursor: bool,
+    want_virtual: bool,
     restore_token_in: Option<String>,
     ready_tx: std::sync::mpsc::Sender<Result<(OwnedFd, u32, Option<String>), String>>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -159,14 +168,43 @@ fn portal_thread_main(
             let proxy = Screencast::new().await?;
             let session = proxy.create_session().await?;
             let cursor = if show_cursor { CursorMode::Embedded } else { CursorMode::Hidden };
+            // Pick the source per config. `Monitor` (default) captures the real
+            // display — shown locally and remotely (dual-use) — but dies if the
+            // monitor is unplugged. `Virtual` asks the compositor for a virtual
+            // monitor that survives with no physical display (headless), the
+            // Wayland equivalent of an Xvfb framebuffer. Virtual falls back to
+            // Monitor if the portal can't provide it.
+            let source = if want_virtual {
+                let avail = proxy
+                    .available_source_types()
+                    .await
+                    .unwrap_or_else(|_| SourceType::Monitor.into());
+                if avail.contains(SourceType::Virtual) {
+                    SourceType::Virtual
+                } else {
+                    SourceType::Monitor
+                }
+            } else {
+                SourceType::Monitor
+            };
+            tracing::info!(
+                source = if matches!(source, SourceType::Virtual) { "virtual" } else { "monitor" },
+                "selecting Wayland ScreenCast source"
+            );
             proxy
                 .select_sources(
                     &session,
                     cursor,
-                    SourceType::Monitor.into(),
+                    source.into(),
                     false,                        // single source
-                    restore_token_in.as_deref(), // reuse a prior grant if we have one
-                    PersistMode::ExplicitlyRevoked, // remember until the user revokes it
+                    restore_token_in.as_deref(), // reuse this run's grant if we have one
+                    // Persist the approval only while rmdd runs (NOT ExplicitlyRevoked,
+                    // which leaves a permanent session mutter keeps alive across
+                    // restarts — the lingering "screen is being shared" indicator).
+                    // Application scope: approve once per service run via the dialog's
+                    // "remember" checkbox, sessions close cleanly on disconnect, and
+                    // nothing survives an rmdd stop. Re-approve after a restart/reboot.
+                    PersistMode::Application,
                 )
                 .await?;
             let streams = proxy
@@ -187,13 +225,19 @@ fn portal_thread_main(
         .await;
 
         match handshake {
-            Ok((_proxy, _session, fd, node_id, restore_token_out)) => {
+            Ok((_proxy, session, fd, node_id, restore_token_out)) => {
                 if ready_tx.send(Ok((fd, node_id, restore_token_out))).is_err() {
-                    return; // caller gave up
+                    let _ = session.close().await; // caller gave up — still close cleanly
+                    return;
                 }
-                // Keep _proxy/_session alive until shutdown; dropping them ends
-                // the portal session (and the PipeWire stream feeding it).
+                // Keep _proxy/session alive until shutdown, THEN explicitly Close the
+                // portal session. Dropping it does NOT close it: mutter keeps the
+                // ScreenCast/RemoteDesktop session (and the "screen is being shared"
+                // indicator) alive and can refuse new sessions — the Closed signal
+                // isn't forwarded to clients (xdg-desktop-portal#508). So we must
+                // send Close ourselves on teardown.
                 let _ = shutdown_rx.await;
+                let _ = session.close().await;
             }
             Err(e) => {
                 let _ = ready_tx.send(Err(e.to_string()));
@@ -208,12 +252,25 @@ struct StreamData {
     sink: FrameSink,
 }
 
-/// PipeWire thread: connect to the portal's remote fd, attach a stream to
-/// `node_id`, and pump frames into `sink` until `quit_rx` fires.
-fn pw_run(
-    fd: OwnedFd,
+/// How the PipeWire thread reaches the daemon. The xdg portal hands us a
+/// restricted remote fd (`open_pipe_wire_remote`); mutter's direct ScreenCast API
+/// gives only a node id, so we connect to the session's default PipeWire socket.
+pub(crate) enum PwConnect {
+    /// Connect to the portal's remote via this fd (`context.connect_fd`).
+    Fd(OwnedFd),
+    /// Connect to the default session PipeWire socket (`context.connect`).
+    Default,
+}
+
+/// PipeWire thread: connect (portal fd or default socket), attach a stream to
+/// `node_id`, and pump frames into `sink` until `quit_rx` fires. Shared by the
+/// portal ([`start_capture`]) and mutter-direct ([`crate::mutter`]) backends.
+pub(crate) fn pw_run(
+    conn: PwConnect,
     node_id: u32,
     fps: u32,
+    width: u32,
+    height: u32,
     sink: FrameSink,
     quit_rx: pw::channel::Receiver<()>,
 ) -> anyhow::Result<()> {
@@ -221,7 +278,10 @@ fn pw_run(
 
     let mainloop = pw::main_loop::MainLoop::new(None)?;
     let context = pw::context::Context::new(&mainloop)?;
-    let core = context.connect_fd(fd, None)?;
+    let core = match conn {
+        PwConnect::Fd(fd) => context.connect_fd(fd, None)?,
+        PwConnect::Default => context.connect(None)?,
+    };
 
     let stream = pw::stream::Stream::new(
         &core,
@@ -295,7 +355,7 @@ fn pw_run(
     // Ask for CPU-readable BGRA-family formats at the monitor's size. We do NOT
     // advertise DMA-BUF modifiers, so the server hands us memfd/memptr buffers we
     // can map (MAP_BUFFERS) and read on the CPU.
-    let format_pod = build_format_pod(fps);
+    let format_pod = build_format_pod(fps, width, height);
     let mut params = [Pod::from_bytes(&format_pod).expect("valid format pod")];
 
     stream.connect(
@@ -381,8 +441,9 @@ fn to_bgra_frame(
 }
 
 /// Build the `EnumFormat` pod advertising the BGRA-family formats and a size
-/// range (the portal fills in the real monitor size), at up to `fps`.
-fn build_format_pod(fps: u32) -> Vec<u8> {
+/// range whose preferred value is `width`x`height` (which also sizes a virtual
+/// monitor), at up to `fps`.
+fn build_format_pod(fps: u32, width: u32, height: u32) -> Vec<u8> {
     use pw::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
     use pw::spa::param::video::VideoFormat;
     use pw::spa::param::ParamType;
@@ -410,7 +471,7 @@ fn build_format_pod(fps: u32) -> Vec<u8> {
             Choice,
             Range,
             Rectangle,
-            Rectangle { width: 1920, height: 1080 }, // default
+            Rectangle { width, height }, // default (also sizes a virtual monitor)
             Rectangle { width: 1, height: 1 },       // min
             Rectangle { width: 8192, height: 8192 }  // max
         ),

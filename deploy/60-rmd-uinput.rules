@@ -1,0 +1,14 @@
+# ReachMyDevice: let the logged-in user open /dev/uinput so the host daemon
+# (rmdd) can create a virtual input device for remote keyboard/mouse — native on
+# Wayland and X11, no consent prompt.
+#
+# Install:
+#   sudo cp deploy/60-rmd-uinput.rules /etc/udev/rules.d/60-rmd-uinput.rules
+#   sudo udevadm control --reload-rules && sudo udevadm trigger /dev/uinput
+#   sudo modprobe uinput            # ensure the module is loaded (once)
+# Then restart the host:  systemctl --user restart rmd-host.service
+#
+# TAG+="uaccess" grants the active-session user access via systemd-logind (no
+# group juggling). If uaccess isn't honored on your distro, the GROUP/MODE line
+# grants the `input` group instead (then: sudo usermod -aG input <user>).
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

@@ -31,6 +31,7 @@ fn main() -> anyhow::Result<()> {
         height: 720,
         fps: 30,
         show_cursor: true,
+        capture_source: Default::default(),
         restore_token: None,
     };
     println!(

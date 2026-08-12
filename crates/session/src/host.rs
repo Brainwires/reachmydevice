@@ -107,6 +107,9 @@ pub struct HostConfig {
     /// the capture backend re-grant without re-prompting. The host persists a
     /// refreshed token back to the settings store when the portal issues one.
     pub screencast_restore_token: Option<String>,
+    /// Wayland capture source: real monitor (dual-use) vs virtual (headless).
+    /// Ignored on X11/macOS.
+    pub capture_source: capture::CaptureSource,
 }
 
 impl Default for HostConfig {
@@ -130,6 +133,7 @@ impl Default for HostConfig {
             identity: None,
             connect_password: None,
             screencast_restore_token: None,
+            capture_source: capture::CaptureSource::Monitor,
         }
     }
 }
@@ -215,6 +219,7 @@ where
         fps: cfg.fps,
         show_cursor: true,
         restore_token: cfg.screencast_restore_token.clone(),
+        capture_source: cfg.capture_source,
     };
     let mut capture_ctl = CaptureController::start(
         capture_cfg,

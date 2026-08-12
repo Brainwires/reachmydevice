@@ -148,7 +148,14 @@ pub fn hid_to_macos(hid: u32) -> Option<u16> {
 /// Returns `None` for usages outside the v1 common set.
 #[cfg(target_os = "linux")]
 pub fn hid_to_x_keycode(hid: u32) -> Option<u8> {
-    // HID usage -> Linux evdev key code (input-event-codes.h).
+    hid_to_evdev(hid).map(|evdev| (evdev + 8) as u8)
+}
+
+/// Map a USB HID keyboard usage code to a Linux **evdev** key code
+/// (`input-event-codes.h`), for the uinput backend. Returns `None` for usages
+/// outside the v1 common set.
+#[cfg(target_os = "linux")]
+pub fn hid_to_evdev(hid: u32) -> Option<u16> {
     let evdev: u16 = match hid {
         0x04 => 30,
         0x05 => 48,
@@ -272,7 +279,7 @@ pub fn hid_to_x_keycode(hid: u32) -> Option<u8> {
         0xE7 => 126, // RightMeta
         _ => return None,
     };
-    Some((evdev + 8) as u8)
+    Some(evdev)
 }
 
 #[cfg(test)]

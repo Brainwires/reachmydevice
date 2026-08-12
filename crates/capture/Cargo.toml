@@ -81,6 +81,11 @@ ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
 pipewire = "0.8"
 libspa = "0.8"
 tokio = { workspace = true }
+# Direct D-Bus to org.gnome.Mutter.ScreenCast for the GNOME backend (no portal
+# consent prompt, and the session is torn down cleanly on Stop). Pinned to the
+# same major ashpd already resolves so Cargo unifies to one zbus.
+zbus = { version = "4", default-features = false, features = ["tokio"] }
+futures-util = "0.3"
 
 [[example]]
 name = "capture_smoke"

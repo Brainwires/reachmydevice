@@ -29,6 +29,27 @@ const WRAP_MAGIC: &[u8; 4] = b"ORK1";
 const WRAP_SALT_LEN: usize = 16;
 const WRAP_NONCE_LEN: usize = 24;
 
+/// Resolve the identity-key passphrase. Prefers `RMD_KEY_PASSPHRASE` from the
+/// environment (how the daemon gets it, via its systemd `EnvironmentFile`), and
+/// otherwise reads a `key.env` file sitting next to the key (same
+/// `RMD_KEY_PASSPHRASE=…` line). Without this fallback the `rmdd` CLI can't open
+/// an encrypted key from a plain shell — `rmdd set/list` would fail "identity is
+/// encrypted" while the service worked. `config_dir` is the directory holding
+/// `identity.key` (i.e. `~/.config/rmd`).
+fn key_passphrase(config_dir: Option<&Path>) -> Option<String> {
+    if let Ok(v) = std::env::var(KEY_PASSPHRASE_ENV) {
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    let content = std::fs::read_to_string(config_dir?.join("key.env")).ok()?;
+    content.lines().find_map(|line| {
+        let val = line.trim().strip_prefix(KEY_PASSPHRASE_ENV)?.trim_start().strip_prefix('=')?;
+        let val = val.trim().trim_matches('"');
+        (!val.is_empty()).then(|| val.to_string())
+    })
+}
+
 /// Derive a 32-byte wrapping key from a passphrase + salt via Argon2id.
 fn derive_wrap_key(passphrase: &[u8], salt: &[u8]) -> anyhow::Result<Zeroizing<[u8; 32]>> {
     let mut key = Zeroizing::new([0u8; 32]);
@@ -263,7 +284,7 @@ impl DeviceIdentity {
     /// legacy plaintext file is read (with a warning) and transparently upgraded
     /// to the encrypted form when a passphrase is available.
     pub fn load_or_create(path: &Path) -> anyhow::Result<Self> {
-        let passphrase = std::env::var(KEY_PASSPHRASE_ENV).ok();
+        let passphrase = key_passphrase(path.parent());
         if !path.exists() {
             let id = Self::generate()?;
             id.save(path)?;
@@ -312,7 +333,7 @@ impl DeviceIdentity {
             std::fs::create_dir_all(parent)?;
         }
         let seed = Zeroizing::new(self.signing.to_bytes());
-        let bytes = match std::env::var(KEY_PASSPHRASE_ENV).ok() {
+        let bytes = match key_passphrase(path.parent()) {
             Some(pass) => wrap_seed(&seed, pass.as_bytes())?,
             None => {
                 tracing::warn!(

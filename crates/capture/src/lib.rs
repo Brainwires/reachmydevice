@@ -17,19 +17,51 @@ use std::sync::mpsc::Sender;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
+pub mod mutter;
+#[cfg(target_os = "linux")]
 pub mod wayland;
 #[cfg(target_os = "macos")]
 pub mod mac;
 
-/// True when running under a real Wayland session, where X11 `XGetImage` capture
-/// can't see the desktop (rootless XWayland) and we must use the PipeWire portal
-/// backend instead. Honors an `RMD_FORCE_X11=1` escape hatch for debugging.
+/// Which Linux capture backend fits this session.
 #[cfg(target_os = "linux")]
-fn use_wayland_backend() -> bool {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SessionKind {
+    /// Xorg (or forced): X11 `XGetImage` ([`linux`]).
+    X11,
+    /// GNOME Wayland: mutter's direct ScreenCast API ([`mutter`]) — no consent
+    /// prompt, clean teardown.
+    GnomeWayland,
+    /// Other Wayland (KDE, wlroots, …): xdg-desktop-portal ScreenCast ([`wayland`]).
+    OtherWayland,
+}
+
+/// Choose the capture backend. `RMD_FORCE_X11=1` forces X11; `RMD_WAYLAND_BACKEND`
+/// (`mutter`|`portal`) overrides the Wayland pick; otherwise GNOME (by
+/// `XDG_CURRENT_DESKTOP`) uses the mutter-direct backend and everything else the
+/// portal.
+#[cfg(target_os = "linux")]
+fn session_kind() -> SessionKind {
     if std::env::var_os("RMD_FORCE_X11").is_some_and(|v| v == "1") {
-        return false;
+        return SessionKind::X11;
     }
-    std::env::var_os("WAYLAND_DISPLAY").is_some()
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return SessionKind::X11;
+    }
+    match std::env::var("RMD_WAYLAND_BACKEND").ok().as_deref() {
+        Some("portal") => return SessionKind::OtherWayland,
+        Some("mutter") => return SessionKind::GnomeWayland,
+        _ => {}
+    }
+    let is_gnome = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .split(':')
+        .any(|d| d.eq_ignore_ascii_case("GNOME"));
+    if is_gnome {
+        SessionKind::GnomeWayland
+    } else {
+        SessionKind::OtherWayland
+    }
 }
 
 /// Pixel layout of a [`Frame`]. Only BGRA (8:8:8:8) in v1; the codec expects it.
@@ -52,12 +84,29 @@ pub struct DisplayInfo {
 
 /// How to capture. Width/height are the encoded output size (the backend scales
 /// the display to fit); `fps` caps the delivered frame rate.
+/// Which Wayland desktop-portal source to capture. Ignored by the X11/macOS
+/// backends (they always capture the real display).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CaptureSource {
+    /// Capture the real physical monitor — shown both locally and remotely
+    /// (dual-use). Requires a display to be present; the session drops if the
+    /// only monitor is physically unplugged.
+    #[default]
+    Monitor,
+    /// Ask the compositor for a virtual monitor that exists with no physical
+    /// display attached (headless). Survives an unplugged monitor, but is a
+    /// separate output from any attached display.
+    Virtual,
+}
+
 #[derive(Clone, Debug)]
 pub struct CaptureConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
     pub show_cursor: bool,
+    /// Wayland capture source (see [`CaptureSource`]); ignored elsewhere.
+    pub capture_source: CaptureSource,
     /// Opaque portal restore token from a previous session (Wayland only). When
     /// present, the xdg-desktop-portal ScreenCast backend re-grants the same
     /// source without re-prompting the user; `None` prompts (first run). Ignored
@@ -72,6 +121,7 @@ impl Default for CaptureConfig {
             height: 1080,
             fps: 30,
             show_cursor: true,
+            capture_source: CaptureSource::Monitor,
             restore_token: None,
         }
     }
@@ -149,10 +199,10 @@ pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
     }
     #[cfg(target_os = "linux")]
     {
-        if use_wayland_backend() {
-            wayland::list_displays()
-        } else {
-            linux::list_displays()
+        match session_kind() {
+            SessionKind::X11 => linux::list_displays(),
+            SessionKind::GnomeWayland => mutter::list_displays(),
+            SessionKind::OtherWayland => wayland::list_displays(),
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -173,10 +223,10 @@ pub fn start_capture(
     }
     #[cfg(target_os = "linux")]
     {
-        if use_wayland_backend() {
-            wayland::start_capture(config, display_index, sink)
-        } else {
-            linux::start_capture(config, display_index, sink)
+        match session_kind() {
+            SessionKind::X11 => linux::start_capture(config, display_index, sink),
+            SessionKind::GnomeWayland => mutter::start_capture(config, display_index, sink),
+            SessionKind::OtherWayland => wayland::start_capture(config, display_index, sink),
         }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]

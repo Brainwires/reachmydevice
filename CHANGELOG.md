@@ -4,6 +4,44 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+### Added
+- **Native GNOME Wayland capture with no consent prompt.** A new capture backend
+  drives mutter's private `org.gnome.Mutter.ScreenCast` D-Bus API directly (the
+  same interface `gnome-remote-desktop` uses) instead of the xdg-desktop-portal.
+  On GNOME this means **no "share your screen" prompt at all**, and the session is
+  bound to our connection so an explicit `Session.Stop` on disconnect tears it
+  down cleanly — the "screen is being shared" indicator now reflects reality (on
+  only while a viewer is connected) instead of lingering (portal bug #508). The
+  capture backend is chosen per session: X11 → XGetImage, **GNOME Wayland →
+  mutter-direct**, other Wayland (KDE, wlroots) → the portal. `XDG_CURRENT_DESKTOP`
+  drives the pick; `RMD_WAYLAND_BACKEND=portal|mutter` and `RMD_FORCE_X11=1`
+  override.
+- **Native input on every Wayland compositor via uinput.** A new input backend
+  creates a `/dev/uinput` kernel virtual pointer+keyboard, so injected input
+  reaches **native-Wayland windows** (the XTEST/XWayland path could not) and works
+  identically on X11, GNOME, KDE, and wlroots. It's preferred automatically, with
+  XTEST as the fallback (`RMD_INPUT=uinput|xtest` overrides). `/dev/uinput` needs
+  one-time access, granted by the new **`rmdd setup-input`** verb (installs a udev
+  rule via sudo — the only step that needs root; the daemon stays unprivileged);
+  the Linux installer runs it automatically.
+- **Configurable Wayland capture source** — `rmdd set capture_source monitor|virtual`:
+  `monitor` (default) mirrors the real display; `virtual` records a headless
+  virtual monitor that survives with no physical display.
+
+### Fixed
+- **X11 capture honors the configured `width`/`height`** — the X11 backend now
+  area-downscales to the configured encode size (aspect-preserving, never
+  upscaling), matching the macOS and Wayland backends; previously `RMD_WIDTH`/
+  `RMD_HEIGHT` were silently ignored on X11 (streamed at native resolution).
+- **Wayland portal backend hardened** (used for KDE/wlroots): capture start is
+  non-blocking so a slow/interactive portal can't wedge the session or break
+  reconnects; the ScreenCast session is explicitly closed on disconnect; and the
+  portal restore token is persisted so re-grants don't re-prompt.
+- **`rmdd` CLI works with an encrypted identity key** — the CLI now reads
+  `RMD_KEY_PASSPHRASE` from `~/.config/rmd/key.env` (as the service does via its
+  systemd `EnvironmentFile`), so `rmdd set/list` no longer fail with "identity is
+  encrypted" from a plain shell.
+
 ## [0.6.2] - 2026-08-12
 
 ### Fixed

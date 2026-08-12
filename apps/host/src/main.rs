@@ -245,6 +245,83 @@ fn run_settings_command(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `rmdd setup-input`: grant the daemon access to `/dev/uinput` so it can inject
+/// native keyboard/mouse (works on X11 and every Wayland compositor, no per-app
+/// consent prompt). This is the one step that needs root, done via `sudo` here so
+/// the daemon itself stays unprivileged. Idempotent.
+#[cfg(target_os = "linux")]
+fn run_setup_input() -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    const RULE_PATH: &str = "/etc/udev/rules.d/60-rmd-uinput.rules";
+    const RULE: &str = "# Installed by `rmdd setup-input`. Lets the active-session user open\n\
+        # /dev/uinput so rmdd can inject remote keyboard/mouse (native, no prompt).\n\
+        KERNEL==\"uinput\", SUBSYSTEM==\"misc\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\", OPTIONS+=\"static_node=uinput\"\n";
+
+    let writable = || std::fs::OpenOptions::new().write(true).open("/dev/uinput").is_ok();
+    if writable() {
+        println!("/dev/uinput is already accessible — native input is ready.");
+        return Ok(());
+    }
+
+    println!("Setting up native input (uinput). This needs root once; sudo will");
+    println!("prompt for your password.\n");
+
+    // Install the udev rule (piped through `sudo tee`).
+    let mut tee = Command::new("sudo")
+        .args(["tee", RULE_PATH])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("run sudo (is it installed?): {e}"))?;
+    tee.stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(RULE.as_bytes())?;
+    if !tee.wait()?.success() {
+        anyhow::bail!("failed to write {RULE_PATH}");
+    }
+
+    // Load the module now + on every boot, then reapply rules to the live node.
+    let sudo = |a: &[&str]| -> anyhow::Result<()> {
+        if !Command::new("sudo").args(a).status()?.success() {
+            anyhow::bail!("`sudo {}` failed", a.join(" "));
+        }
+        Ok(())
+    };
+    sudo(&["modprobe", "uinput"])?;
+    sudo(&["sh", "-c", "echo uinput > /etc/modules-load.d/rmd-uinput.conf"])?;
+    sudo(&["udevadm", "control", "--reload-rules"])?;
+    sudo(&["udevadm", "trigger", "/dev/uinput"])?;
+
+    // logind applies the uaccess ACL a moment after the trigger, so poll briefly
+    // before deciding — otherwise we'd falsely claim it isn't ready.
+    let mut ok = false;
+    for _ in 0..20 {
+        if writable() {
+            ok = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if ok {
+        println!("\n\u{2713} Native input configured — /dev/uinput is accessible now.");
+        println!("  Apply it to the running host:  rmdd restart");
+    } else {
+        println!("\n\u{2713} udev rule installed; it takes effect on your next login or reboot.");
+        println!("  Try now:  rmdd restart  (the host will use native input if it can open /dev/uinput,");
+        println!("  otherwise it falls back to X11 XTest). If it stays on the fallback, log out and back in.");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_setup_input() -> anyhow::Result<()> {
+    println!("setup-input is only needed on Linux.");
+    Ok(())
+}
+
 /// Video codec from `RMD_CODEC` (`h264` default, or `av1`). AV1 is the pure-Rust
 /// rav1e encoder for browser viewers and requires the host built with
 /// `--features av1`; otherwise encoder init fails with a clear message.
@@ -354,6 +431,12 @@ fn main() -> anyhow::Result<()> {
     ) {
         return service::run_command(&args);
     }
+    // One-time privileged setup so native input (uinput) works on Wayland + X11.
+    // The daemon itself runs unprivileged; this verb installs a udev rule via sudo
+    // (prompts for the password once), the only step that needs root.
+    if matches!(args.first().map(String::as_str), Some("setup-input")) {
+        return run_setup_input();
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -443,6 +526,16 @@ fn main() -> anyhow::Result<()> {
             .and_then(|s| s.get(sset::KEY_SCREENCAST_RESTORE_TOKEN))
             .filter(|t| !t.is_empty())
             .map(str::to_string),
+        // Wayland capture source: `virtual` for headless boxes, else `monitor`
+        // (dual-use, the default). `rmdd set capture_source virtual|monitor`.
+        capture_source: match sref
+            .and_then(|s| s.get(sset::KEY_CAPTURE_SOURCE))
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("virtual") => rmd_capture::CaptureSource::Virtual,
+            _ => rmd_capture::CaptureSource::Monitor,
+        },
     };
 
     // Fail closed on an open relay. An internet-reachable host (connected to a

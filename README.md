@@ -36,9 +36,11 @@ traversal (host + STUN server-reflexive candidates), and **GCC** adaptive bitrat
 reliable data channel. The rendezvous/TURN servers only ever see **ciphertext** (proven by an automated
 test). Direct LAN connections work even when the rendezvous is unreachable.
 
-Platform backends: macOS (ScreenCaptureKit + CGEvent), Linux X11 (XGetImage + XTest) and Linux
-Wayland (PipeWire + xdg-desktop-portal ScreenCast), selected at runtime. Software H.264
-(openh264) today; VideoToolbox/NVENC/etc. behind the same trait next.
+Platform backends, selected at runtime. **Capture:** macOS ScreenCaptureKit; Linux X11 XGetImage;
+GNOME Wayland via mutter's direct ScreenCast (no consent prompt, clean teardown); other Wayland
+(KDE, wlroots) via PipeWire + xdg-desktop-portal. **Input:** macOS CGEvent; Linux `uinput` (a kernel
+virtual device — native on X11 and every Wayland compositor; run `rmdd setup-input` once), falling
+back to X11 XTest. Software H.264 (openh264) today; VideoToolbox/NVENC/etc. behind the same trait next.
 
 ## Security
 

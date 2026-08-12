@@ -329,6 +329,22 @@ for b in $installed; do
 done
 [ "$ok" = 1 ] || die "validation failed — the binaries did not run"
 
+# --- Linux: native input setup (uinput) ------------------------------------
+# rmdd injects remote keyboard/mouse through a uinput virtual device — native on
+# X11 AND every Wayland compositor (reaches native-Wayland windows, no per-app
+# consent prompt). That needs one-time access to /dev/uinput, which requires root,
+# so `rmdd setup-input` installs a udev rule via sudo (prompts for the password
+# once). It's idempotent and non-fatal here: skip with RMD_NO_INPUT_SETUP=1, and
+# if it's skipped/declined, input falls back to X11 XTest (which can't reach
+# native-Wayland windows).
+if [ "$PLAT" = linux ] && [ -z "${RMD_NO_INPUT_SETUP:-}" ]; then
+  case " $installed " in
+    *" rmdd "*)
+      say "Configuring native input (uinput) — sudo will prompt once"
+      "$BINDIR/rmdd" setup-input || warn "Native input setup skipped; run  rmdd setup-input  later (until then input uses X11 XTest)." ;;
+  esac
+fi
+
 # --- Auto-start rmdd as a background service -------------------------------
 # FRESH install: offer to set up the platform unit (systemd --user on Linux,
 # launchd agent on macOS) via `rmdd enable`; the service runs bare rmdd, which

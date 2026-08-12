@@ -15,6 +15,8 @@ use rmd_protocol::input_event::Event as InputEvent;
 pub mod keymap;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+pub mod uinput;
 #[cfg(target_os = "macos")]
 pub mod mac;
 
@@ -45,7 +47,25 @@ pub fn new_injector() -> anyhow::Result<Box<dyn Injector>> {
     }
     #[cfg(target_os = "linux")]
     {
-        Ok(Box::new(linux::X11Injector::new()?))
+        // Prefer uinput (native on X11 + every Wayland compositor; reaches native
+        // Wayland windows). Fall back to XTEST if /dev/uinput isn't accessible.
+        // `RMD_INPUT=xtest` forces the X11 path; `RMD_INPUT=uinput` disables the
+        // fallback (surfaces the permission error instead).
+        let want = std::env::var("RMD_INPUT").unwrap_or_default();
+        if want == "xtest" {
+            return Ok(Box::new(linux::X11Injector::new()?));
+        }
+        match uinput::UinputInjector::new() {
+            Ok(inj) => {
+                tracing::info!("input backend: uinput (native, all compositors)");
+                Ok(Box::new(inj))
+            }
+            Err(e) if want == "uinput" => Err(e),
+            Err(e) => {
+                tracing::warn!(error = %e, "uinput unavailable; falling back to X11 XTEST (native-Wayland windows may not receive input)");
+                Ok(Box::new(linux::X11Injector::new()?))
+            }
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {

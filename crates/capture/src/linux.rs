@@ -181,6 +181,62 @@ fn current_root_size<C: Connection>(conn: &C, root: x11rb::protocol::xproto::Win
     Some((geom.width, geom.height))
 }
 
+/// Target size that fits `src` inside the `cap` box, preserving aspect ratio and
+/// never upscaling. A zero cap dimension (or zero source) means "no cap" — returns
+/// the source size unchanged.
+fn fit_within(src_w: u16, src_h: u16, cap_w: u32, cap_h: u32) -> (u16, u16) {
+    if cap_w == 0 || cap_h == 0 || src_w == 0 || src_h == 0 {
+        return (src_w, src_h);
+    }
+    let factor = (cap_w as f64 / src_w as f64)
+        .min(cap_h as f64 / src_h as f64)
+        .min(1.0);
+    let w = ((src_w as f64 * factor).round() as u16).max(1);
+    let h = ((src_h as f64 * factor).round() as u16).max(1);
+    (w, h)
+}
+
+/// Area-average downscale of a BGRA image (`src_stride` bytes per row, which may
+/// exceed `src_w*4` due to scanline padding) to a tightly-packed `dst_w`x`dst_h`
+/// BGRA buffer. `dst` must be `<=` `src` in both dimensions. Averaging (not
+/// nearest-neighbour) keeps downscaled text legible. O(src_pixels).
+fn downscale_bgra(
+    src: &[u8],
+    src_w: usize,
+    src_h: usize,
+    src_stride: usize,
+    dst_w: usize,
+    dst_h: usize,
+) -> Vec<u8> {
+    let mut acc = vec![0u32; dst_w * dst_h * 4];
+    let mut cnt = vec![0u32; dst_w * dst_h];
+    for sy in 0..src_h {
+        let dy = sy * dst_h / src_h;
+        let row = &src[sy * src_stride..sy * src_stride + src_w * 4];
+        for sx in 0..src_w {
+            let dx = sx * dst_w / src_w;
+            let di = dy * dst_w + dx;
+            let s = &row[sx * 4..sx * 4 + 4];
+            let a = di * 4;
+            acc[a] += s[0] as u32;
+            acc[a + 1] += s[1] as u32;
+            acc[a + 2] += s[2] as u32;
+            acc[a + 3] += s[3] as u32;
+            cnt[di] += 1;
+        }
+    }
+    let mut out = vec![0u8; dst_w * dst_h * 4];
+    for i in 0..dst_w * dst_h {
+        let c = cnt[i].max(1);
+        let a = i * 4;
+        out[a] = (acc[a] / c) as u8;
+        out[a + 1] = (acc[a + 1] / c) as u8;
+        out[a + 2] = (acc[a + 2] / c) as u8;
+        out[a + 3] = (acc[a + 3] / c) as u8;
+    }
+    out
+}
+
 /// Running capture; dropping / [`stop`](CaptureSession::stop) ends the thread.
 pub struct LinuxCaptureSession {
     stop: Arc<AtomicBool>,
@@ -218,6 +274,12 @@ pub fn start_capture(
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let fps = config.fps.max(1);
+    // Encode-size cap (A1): honor the configured width/height by area-downscaling
+    // captured frames to fit, matching the macOS and Wayland backends (where the
+    // configured size already takes effect). A zero or >= native cap means "send
+    // native" — we never upscale.
+    let cap_w = config.width;
+    let cap_h = config.height;
 
     std::thread::Builder::new()
         .name("rmd-x11-capture".into())
@@ -289,13 +351,40 @@ pub fn start_capture(
                 let h = height as usize;
                 let bytes_per_row = if h > 0 { reply.data.len() / h } else { 0 };
 
-                let frame = Frame {
-                    width: width as u32,
-                    height: height as u32,
-                    bytes_per_row: bytes_per_row as u32,
-                    format: PixelFormat::Bgra,
-                    data: Bytes::from(reply.data),
-                    capture_ts_micros: monotonic_micros(),
+                // A1: honor the configured encode size by area-downscaling to fit
+                // (aspect-preserving, never upscaling), so `width`/`height` take
+                // effect on X11 like they do on macOS/Wayland. A no-op when the cap
+                // is 0 or >= the captured size.
+                let (dw, dh) = fit_within(width, height, cap_w, cap_h);
+                let frame = if (dw, dh) != (width, height)
+                    && bytes_per_row >= width as usize * 4
+                    && reply.data.len() >= bytes_per_row * h
+                {
+                    let scaled = downscale_bgra(
+                        &reply.data,
+                        width as usize,
+                        height as usize,
+                        bytes_per_row,
+                        dw as usize,
+                        dh as usize,
+                    );
+                    Frame {
+                        width: dw as u32,
+                        height: dh as u32,
+                        bytes_per_row: dw as u32 * 4,
+                        format: PixelFormat::Bgra,
+                        data: Bytes::from(scaled),
+                        capture_ts_micros: monotonic_micros(),
+                    }
+                } else {
+                    Frame {
+                        width: width as u32,
+                        height: height as u32,
+                        bytes_per_row: bytes_per_row as u32,
+                        format: PixelFormat::Bgra,
+                        data: Bytes::from(reply.data),
+                        capture_ts_micros: monotonic_micros(),
+                    }
                 };
                 if sink.send(frame).is_err() {
                     tracing::debug!("frame sink closed; stopping capture");
