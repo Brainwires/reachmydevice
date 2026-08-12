@@ -235,6 +235,59 @@ A broken one logs `width=4096 height=2160` followed by `Encoder max resolution�
 
 ---
 
+## Troubleshooting: "can't connect" that *isn't* the display
+
+Once the display is sorted, a headless host can still fail to connect for
+**networking** reasons that look identical from the viewer (it just never comes
+up). Rule these out before blaming the display again:
+
+### TURN relay missing after a reboot (boot-time DNS race)
+**Host log symptom:**
+```
+pingAllCandidates ... no candidate pairs. Connection is not possible yet.
+remote mDNS candidate added, but mDNS is disabled: (....local)
+```
+and, at startup:
+```
+could not fetch ICE servers from rendezvous; continuing without a relay
+error=... Dns Failed: resolve dns name '<host>:443': Temporary failure in name resolution
+```
+
+**Cause:** the host service started **before DNS was ready**, and (on older
+builds) the ICE/TURN fetch was one-shot — so it ran the whole session with **no
+relay**. A browser viewer only offers **mDNS `.local`** candidates, so with no
+relay there is nothing to pair with → "no candidate pairs." Note: `rmd-host` runs
+as a **user** service, and `network-online.target` is a **system** target, so
+`Wants/After=network-online.target` in the unit is effectively a **no-op** — it
+does not make a user service wait for DNS.
+
+**Fix:** run **rmdd 0.7.0+**, which **retries** the ICE fetch (and refreshes TURN
+credentials before they expire). On older builds, `rmdd restart` once DNS is up
+re-fetches the relay. Confirm a healthy start:
+```bash
+journalctl --user -u rmd-host.service | grep -E "TURN relay candidate|fetched ICE"
+```
+(If you must stay on an old build, a user drop-in with an `ExecStartPre` that polls
+`getent hosts <rendezvous-host>` until it resolves also works.)
+
+### Token rejected (401) after ~a day
+The rendezvous **device token has a TTL**; when it expires the server returns 401
+and the host goes unreachable — a *different* failure with the *same* "can't
+connect" symptom. **rmdd 0.7.0+** re-mints its token automatically by proving
+possession of its identity key to the server's `POST /api/token/refresh` endpoint
+(so **the rendezvous server must be on 0.7.0+ too**). Older builds need a manual
+`rmdd set token <fresh>`.
+
+### Connects, then drops after a while
+Usually **bandwidth** — the default target bitrate (~8 Mbps) is too high for a
+slow link, and congestion control eventually gives up. Lower it:
+```bash
+rmdd set bitrate 2000000   # 2 Mbps; then: rmdd restart
+```
+1440×900 looks fine at 2–3 Mbps.
+
+---
+
 ## Appendix: `ApplyMonitorsConfig` helper
 
 Applies a **mirror at 1440×900** (dongle primary) and persists it to
