@@ -26,7 +26,7 @@ use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Map the codec crate's `VideoCodec` to the transport's local mirror (the
 /// transport deliberately doesn't link the codec crate).
@@ -287,7 +287,19 @@ where
     )?;
 
     // Input injector (best effort; needs Accessibility permission).
-    let mut injector = match input::new_injector() {
+    // `monitor_rect` places the captured output within the desktop bounding box
+    // for multi-monitor absolute mapping; the capture backend fills it in when it
+    // knows the geometry (else `None` = whole-desktop, and the
+    // `RMD_INPUT_MONITOR_RECT` env override still applies).
+    let monitor_rect = capture::primary_monitor_rect().map(|r| input::MonitorRect {
+        ox: r.ox,
+        oy: r.oy,
+        mw: r.mw,
+        mh: r.mh,
+        dw: r.dw,
+        dh: r.dh,
+    });
+    let mut injector = match input::new_injector(monitor_rect) {
         Ok(i) => Some(i),
         Err(e) => {
             tracing::warn!(error=%e, "input injection unavailable (grant Accessibility?)");
@@ -360,6 +372,10 @@ where
     // when the viewer actually becomes authorized (not merely DTLS-connected).
     let mut was_authorized = false;
 
+    // Per-connection connection-password brute-force throttle; reset when the
+    // peer disconnects (a new connection is a fresh DTLS handshake).
+    let mut pw_throttle = PasswordThrottle::new();
+
     // Control / event loop: forward peer signaling in, react to transport events.
     loop {
         while let Some(msg) = signal.try_recv() {
@@ -409,6 +425,13 @@ where
                 connected.store(false, Ordering::Relaxed);
                 authorized.store(false, Ordering::Relaxed);
                 was_authorized = false;
+                // Release any keys/buttons the viewer left held, so nothing leaks
+                // stuck into the host (or the next session) after disconnect.
+                if let Some(inj) = injector.as_deref_mut() {
+                    inj.release_all();
+                }
+                // Fresh throttle state for the next connection.
+                pw_throttle.reset();
                 // Stop capturing so nothing is grabbed (and the OS screen-share
                 // indicator clears) while no viewer is connected.
                 capture_ctl.pause();
@@ -430,6 +453,7 @@ where
                     &cfg.device_name,
                     to_proto_codec(cfg.video_codec),
                     cfg.connect_password.as_deref(),
+                    &mut pw_throttle,
                     &zoom,
                 );
                 // The viewer just became authorized (accepted Hello) — surface the
@@ -507,6 +531,15 @@ impl CaptureController {
         self.config.restore_token = Some(token.clone());
         let Some(identity) = self.identity.clone() else { return };
         let path = crate::settings::SettingsStore::default_path();
+        // Hold the settings lock across load-modify-save so a concurrent
+        // `rmdd set` can't clobber this write (or vice versa).
+        let _lock = match crate::settings::lock(&path) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to lock settings to persist restore token");
+                return;
+            }
+        };
         match crate::settings::SettingsStore::load(&identity, &path) {
             Ok(mut store) => {
                 store.set(crate::settings::KEY_SCREENCAST_RESTORE_TOKEN, token);
@@ -731,6 +764,48 @@ fn verify_connect_password(configured: Option<&str>, supplied: &str) -> bool {
     }
 }
 
+/// Per-connection brute-force throttle for the connection password. In
+/// password-only mode the password is the sole gate, so an attacker who can
+/// complete DTLS could otherwise guess unlimited times on one connection (M5).
+/// After a few misses each further attempt is locked out for an escalating,
+/// capped window; a correct password resets it. (Re-connecting resets too, but
+/// each reconnect pays the DTLS-handshake cost.)
+struct PasswordThrottle {
+    failures: u32,
+    locked_until: Option<Instant>,
+}
+
+/// Misses before lockout kicks in.
+const THROTTLE_AFTER: u32 = 3;
+/// Maximum lockout window.
+const THROTTLE_MAX_SECS: u64 = 30;
+
+impl PasswordThrottle {
+    fn new() -> Self {
+        Self { failures: 0, locked_until: None }
+    }
+
+    /// True while a lockout window is active (reject without evaluating a guess).
+    fn locked(&self) -> bool {
+        self.locked_until.is_some_and(|t| Instant::now() < t)
+    }
+
+    /// Record a wrong guess and arm/extend the lockout once past the grace count.
+    fn record_failure(&mut self) {
+        self.failures = self.failures.saturating_add(1);
+        if self.failures >= THROTTLE_AFTER {
+            let steps = (self.failures - THROTTLE_AFTER + 1) as u64;
+            let secs = (steps * 2).min(THROTTLE_MAX_SECS);
+            self.locked_until = Some(Instant::now() + Duration::from_secs(secs));
+        }
+    }
+
+    fn reset(&mut self) {
+        self.failures = 0;
+        self.locked_until = None;
+    }
+}
+
 /// Constant-time byte comparison (length may leak; a password's length is not the
 /// secret). Avoids a timing oracle on the password compare.
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
@@ -763,6 +838,7 @@ fn handle_control(
     device_name: &str,
     host_codec: proto::VideoCodec,
     connect_password: Option<&str>,
+    pw_throttle: &mut PasswordThrottle,
     zoom: &Mutex<codec::CropRect>,
 ) {
     let env = match proto::decode(bytes) {
@@ -803,13 +879,35 @@ fn handle_control(
             // chain above so a missing/wrong password gets a *distinguishable* ack
             // (`password_required`), prompting the viewer to ask + retry — but only
             // once the device-identity checks passed, so we never prompt an
-            // otherwise-rejected peer.
-            if decision.is_ok() && !verify_connect_password(connect_password, &h.password) {
-                authorized.store(false, Ordering::Relaxed);
-                let ack = proto::hello_ack_password_required("connection password required");
-                transport.send_data(Bytes::from(proto::encode(&ack)));
-                tracing::warn!(viewer = %h.device_name, "viewer needs a connection password");
-                return;
+            // otherwise-rejected peer. Brute-force throttled per connection (M5).
+            if decision.is_ok() {
+                if pw_throttle.locked() {
+                    authorized.store(false, Ordering::Relaxed);
+                    let ack = proto::hello_ack_password_required(
+                        "too many password attempts; wait and retry",
+                    );
+                    transport.send_data(Bytes::from(proto::encode(&ack)));
+                    tracing::warn!(
+                        viewer = %h.device_name,
+                        failures = pw_throttle.failures,
+                        "connection-password attempts throttled"
+                    );
+                    return;
+                }
+                if !verify_connect_password(connect_password, &h.password) {
+                    pw_throttle.record_failure();
+                    authorized.store(false, Ordering::Relaxed);
+                    let ack = proto::hello_ack_password_required("connection password required");
+                    transport.send_data(Bytes::from(proto::encode(&ack)));
+                    tracing::warn!(
+                        viewer = %h.device_name,
+                        failures = pw_throttle.failures,
+                        "viewer supplied wrong/no connection password"
+                    );
+                    return;
+                }
+                // Correct password — clear any accumulated backoff.
+                pw_throttle.reset();
             }
             match decision {
                 Ok(()) => {
@@ -872,7 +970,7 @@ fn handle_control(
                     }
                 }
                 if let Err(e) = inj.inject(&ev) {
-                    tracing::trace!(error=%e, "inject failed");
+                    tracing::warn!(error=%e, "inject failed");
                 }
             }
         }

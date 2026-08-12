@@ -61,6 +61,9 @@ Options:
 
 Env: RMD_PREFIX (default ~/.local), RMD_VERSION, RMD_SRC, RMD_NO_PATH,
      RMD_PURGE (also remove ~/.config/rmd on uninstall), RMD_GH_REPO.
+Linux setup (host only): RMD_NO_INPUT_SETUP=1 skips native-input (uinput) setup;
+     RMD_SETUP_DISPLAY=1 also arms display persistence (edits the bootloader,
+     needs a reboot — off by default).
 
 Installs into \$RMD_PREFIX/bin (default ~/.local/bin) — no sudo. Re-running
 upgrades to the latest version, or reports that you're already up to date.
@@ -333,15 +336,27 @@ done
 # rmdd injects remote keyboard/mouse through a uinput virtual device — native on
 # X11 AND every Wayland compositor (reaches native-Wayland windows, no per-app
 # consent prompt). That needs one-time access to /dev/uinput, which requires root,
-# so `rmdd setup-input` installs a udev rule via sudo (prompts for the password
-# once). It's idempotent and non-fatal here: skip with RMD_NO_INPUT_SETUP=1, and
-# if it's skipped/declined, input falls back to X11 XTest (which can't reach
-# native-Wayland windows).
+# so `rmdd setup-linux input` installs a udev rule via sudo. It's idempotent (a
+# re-run detects the rule WITHOUT sudo and won't prompt) and non-fatal here: skip
+# with RMD_NO_INPUT_SETUP=1, and if skipped/declined input falls back to X11 XTest
+# (which can't reach native-Wayland windows).
 if [ "$PLAT" = linux ] && [ -z "${RMD_NO_INPUT_SETUP:-}" ]; then
   case " $installed " in
     *" rmdd "*)
-      say "Configuring native input (uinput) — sudo will prompt once"
-      "$BINDIR/rmdd" setup-input || warn "Native input setup skipped; run  rmdd setup-input  later (until then input uses X11 XTest)." ;;
+      say "Configuring native input (uinput) — sudo may prompt once (skipped if already configured)"
+      "$BINDIR/rmdd" setup-linux input || warn "Native input setup skipped; run  rmdd setup-linux input  later (until then input uses X11 XTest)." ;;
+  esac
+fi
+
+# --- Linux: display persistence (opt-in) -----------------------------------
+# Making the desktop survive a monitor unplug edits the bootloader (kernel params
+# to force the connector) and needs a REBOOT, so it never runs by default. Opt in
+# with RMD_SETUP_DISPLAY=1; you can always run `rmdd setup-linux display` later.
+if [ "$PLAT" = linux ] && [ "${RMD_SETUP_DISPLAY:-}" = 1 ]; then
+  case " $installed " in
+    *" rmdd "*)
+      say "Configuring display persistence (survive monitor unplug) — sudo may prompt; needs a reboot"
+      "$BINDIR/rmdd" setup-linux display || warn "Display persistence setup skipped; run  rmdd setup-linux display  later." ;;
   esac
 fi
 

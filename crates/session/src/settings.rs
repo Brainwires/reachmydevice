@@ -8,7 +8,7 @@
 //!
 //! On-disk format: `MAGIC ‖ nonce(24) ‖ XChaCha20-Poly1305(serde_json(map))`.
 
-use crate::identity::{DeviceIdentity, restrict_perms};
+use crate::identity::DeviceIdentity;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use std::collections::BTreeMap;
@@ -94,20 +94,51 @@ impl SettingsStore {
         self.map.is_empty()
     }
 
-    /// Encrypt and atomically write the store to `path` (dir created; file 0600).
+    /// Encrypt and atomically write the store to `path` (dir created; file 0600,
+    /// unique temp + fsync + rename via [`crate::identity::atomic_write_secret`]).
     pub fn save(&self, identity: &DeviceIdentity, path: &Path) -> anyhow::Result<()> {
+        let blob = encrypt(identity, &self.map)?;
+        crate::identity::atomic_write_secret(path, &blob)
+    }
+}
+
+/// Exclusive advisory lock over the settings file for the guard's lifetime.
+///
+/// Callers hold it across a whole load-modify-save so a concurrent writer (the
+/// host's automatic restore-token refresh vs. a `rmdd set`) can't interleave and
+/// silently drop one update (M4). The lock is released when the guard drops.
+#[must_use = "the lock is released as soon as the guard is dropped"]
+pub struct SettingsLock {
+    #[cfg(unix)]
+    _file: std::fs::File,
+}
+
+/// Acquire the settings lock, blocking until it's available. On non-unix targets
+/// this is a no-op guard (advisory locking is unix-only here).
+pub fn lock(path: &Path) -> anyhow::Result<SettingsLock> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let blob = encrypt(identity, &self.map)?;
-        // Write to a sibling temp file then rename, so a crash never leaves a
-        // half-written store.
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, &blob)?;
-        restrict_perms(&tmp)?;
-        std::fs::rename(&tmp, path)?;
-        restrict_perms(path)?;
-        Ok(())
+        let lock_path = path.with_extension("lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)?;
+        // SAFETY: valid fd from `file`; LOCK_EX blocks until we hold the lock.
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(SettingsLock { _file: file })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(SettingsLock {})
     }
 }
 

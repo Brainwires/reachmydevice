@@ -130,6 +130,34 @@ impl AccountClient {
         Ok(resp.into_json::<IceConfig>()?.ice_servers)
     }
 
+    /// Re-mint this device's signaling bearer token by proving possession of its
+    /// identity key (`POST /api/token/refresh`) — no account password. Lets a
+    /// long-running host recover on its own when its token expires or is rotated
+    /// server-side, instead of 401-looping until a human runs `rmdd set token`.
+    ///
+    /// `now_unix` is the current wall-clock time in seconds (the server bounds how
+    /// far it may be from its own clock, to limit replay).
+    pub fn refresh_token(
+        &self,
+        identity: &crate::identity::DeviceIdentity,
+        now_unix: i64,
+    ) -> anyhow::Result<String> {
+        let public_key = identity.public_key_bytes();
+        let signature = identity.sign(&crate::identity::token_refresh_message(&public_key, now_unix));
+        let url = format!("{}/api/token/refresh", self.base);
+        let resp = run(self.agent.post(&url).send_json(ureq::json!({
+            "device_id": identity.device_id(),
+            "public_key": hex::encode(public_key),
+            "timestamp": now_unix,
+            "signature": hex::encode(signature),
+        })))?;
+        #[derive(Deserialize)]
+        struct TokenResp {
+            token: String,
+        }
+        Ok(resp.into_json::<TokenResp>()?.token)
+    }
+
     /// List the user's registered devices (HTTP Basic auth).
     pub fn list_devices(&self, user: &str, pass: &str) -> anyhow::Result<Vec<DeviceInfo>> {
         let url = format!("{}/api/devices", self.base);

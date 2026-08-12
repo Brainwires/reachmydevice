@@ -28,6 +28,11 @@ use spa::pod::Pod;
 use std::os::fd::OwnedFd;
 use std::thread::JoinHandle;
 
+/// The portal handshake result handed from the portal thread to the PipeWire
+/// thread: the PipeWire remote fd, the stream's node id, and an optional restore
+/// token to persist for next time.
+type PortalReady = Result<(OwnedFd, u32, Option<String>), String>;
+
 /// Wayland can't enumerate monitors without user interaction (the portal picks
 /// the source via its dialog), so advertise a single logical display. The real
 /// resolution is discovered during PipeWire format negotiation.
@@ -55,7 +60,11 @@ impl CaptureSession for WaylandCaptureSession {
     }
 
     fn restore_token(&self) -> Option<String> {
-        self.restore_token.lock().unwrap().clone()
+        // Poison-tolerant: a panicked writer thread must not take this down.
+        self.restore_token
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -85,8 +94,7 @@ pub fn start_capture(
     _display_index: usize,
     sink: FrameSink,
 ) -> anyhow::Result<Box<dyn CaptureSession>> {
-    type Ready = Result<(OwnedFd, u32, Option<String>), String>;
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Ready>();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<PortalReady>();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let show_cursor = config.show_cursor;
     let restore_token_in = config.restore_token.clone();
@@ -123,7 +131,7 @@ pub fn start_capture(
                 Err(_) => return, // portal thread gone before handshake
             };
             if token.is_some() {
-                *restore_token_bg.lock().unwrap() = token;
+                *restore_token_bg.lock().unwrap_or_else(|e| e.into_inner()) = token;
             }
             tracing::info!(node_id, "Wayland PipeWire capture streaming");
             if let Err(e) = pw_run(PwConnect::Fd(fd), node_id, fps, width, height, sink, pw_quit_rx) {
@@ -148,7 +156,7 @@ fn portal_thread_main(
     show_cursor: bool,
     want_virtual: bool,
     restore_token_in: Option<String>,
-    ready_tx: std::sync::mpsc::Sender<Result<(OwnedFd, u32, Option<String>), String>>,
+    ready_tx: std::sync::mpsc::Sender<PortalReady>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -164,9 +172,26 @@ fn portal_thread_main(
         use ashpd::desktop::PersistMode;
         use ashpd::WindowIdentifier;
 
-        let handshake = async {
+        // Create the proxy + session up front so we hold a handle we can always
+        // Close on error. If `select_sources`/`start` fail *after* the session
+        // exists, letting it drop would leak a lit portal session — mutter doesn't
+        // forward the Closed signal (xdg-desktop-portal#508), so we must Close it
+        // ourselves on every path (H3).
+        let (proxy, session) = match async {
             let proxy = Screencast::new().await?;
             let session = proxy.create_session().await?;
+            anyhow::Ok((proxy, session))
+        }
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = ready_tx.send(Err(e.to_string()));
+                return;
+            }
+        };
+
+        let handshake = async {
             let cursor = if show_cursor { CursorMode::Embedded } else { CursorMode::Hidden };
             // Pick the source per config. `Monitor` (default) captures the real
             // display — shown locally and remotely (dual-use) — but dies if the
@@ -220,17 +245,17 @@ fn portal_thread_main(
                 .ok_or_else(|| anyhow::anyhow!("portal returned no streams"))?;
             let node_id = stream.pipe_wire_node_id();
             let fd = proxy.open_pipe_wire_remote(&session).await?;
-            anyhow::Ok((proxy, session, fd, node_id, restore_token_out))
+            anyhow::Ok((fd, node_id, restore_token_out))
         }
         .await;
 
         match handshake {
-            Ok((_proxy, session, fd, node_id, restore_token_out)) => {
+            Ok((fd, node_id, restore_token_out)) => {
                 if ready_tx.send(Ok((fd, node_id, restore_token_out))).is_err() {
                     let _ = session.close().await; // caller gave up — still close cleanly
                     return;
                 }
-                // Keep _proxy/session alive until shutdown, THEN explicitly Close the
+                // Keep proxy/session alive until shutdown, THEN explicitly Close the
                 // portal session. Dropping it does NOT close it: mutter keeps the
                 // ScreenCast/RemoteDesktop session (and the "screen is being shared"
                 // indicator) alive and can refuse new sessions — the Closed signal
@@ -240,9 +265,14 @@ fn portal_thread_main(
                 let _ = session.close().await;
             }
             Err(e) => {
+                // The session exists (created above) but select_sources/start
+                // failed — Close it so we don't leak a lit portal session.
+                let _ = session.close().await;
                 let _ = ready_tx.send(Err(e.to_string()));
             }
         }
+        // `proxy` is held to here so the session stays valid for Close.
+        drop(proxy);
     });
 }
 
@@ -295,10 +325,32 @@ pub(crate) fn pw_run(
 
     let data = StreamData { format: Default::default(), sink };
 
+    // Clones so the stream callbacks (which run on the loop thread) can stop the
+    // loop: on a fatal stream Error or a mid-session disconnect (B3), and when
+    // the frame sink is closed (M7cap).
+    let ml_state = mainloop.clone();
+    let ml_proc = mainloop.clone();
+    // Whether we've reached Streaming at least once, so a later `Unconnected`
+    // (node removed — e.g. monitor unplugged) is distinguished from the benign
+    // initial Unconnected before connect.
+    let streaming = std::rc::Rc::new(std::cell::Cell::new(false));
+
     let _listener = stream
         .add_local_listener_with_user_data(data)
-        .state_changed(|_, _, old, new| {
+        .state_changed(move |_, _, old, new| {
             tracing::debug!(?old, ?new, "PipeWire stream state changed");
+            match &new {
+                pw::stream::StreamState::Streaming => streaming.set(true),
+                pw::stream::StreamState::Error(e) => {
+                    tracing::warn!(error = %e, "PipeWire stream entered Error; stopping capture");
+                    ml_state.quit();
+                }
+                pw::stream::StreamState::Unconnected if streaming.get() => {
+                    tracing::warn!("PipeWire stream disconnected mid-session (source removed?); stopping capture");
+                    ml_state.quit();
+                }
+                _ => {}
+            }
         })
         .param_changed(|_, user, id, param| {
             let Some(param) = param else { return };
@@ -326,7 +378,7 @@ pub(crate) fn pw_run(
                 "PipeWire negotiated video format",
             );
         })
-        .process(|stream, user| {
+        .process(move |stream, user| {
             let Some(mut buffer) = stream.dequeue_buffer() else { return };
             let datas = buffer.datas_mut();
             let Some(data) = datas.first_mut() else { return };
@@ -347,8 +399,12 @@ pub(crate) fn pw_run(
             let Some(frame) = to_bgra_frame(bytes, offset, stride, width, height, vfmt) else {
                 return;
             };
-            // Lagging/closed receiver: drop the frame rather than block the loop.
-            let _ = user.sink.send(frame);
+            // Lagging receiver: drop the frame. Fully closed receiver (host tore
+            // down the session): stop the loop instead of spinning (M7cap).
+            if user.sink.send(frame).is_err() {
+                tracing::info!("frame sink closed; stopping PipeWire capture loop");
+                ml_proc.quit();
+            }
         })
         .register()?;
 

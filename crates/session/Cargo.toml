@@ -61,6 +61,11 @@ futures = { workspace = true }
 ureq = { version = "2", features = ["json", "tls"] }
 base64 = "0.22"
 
+# Advisory file locking (flock) for the settings load-modify-save critical
+# section, so the host's token refresh can't race a concurrent `rmdd set`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[example]]
 name = "audio_e2e"
 path = "examples/audio_e2e.rs"

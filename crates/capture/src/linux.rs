@@ -226,8 +226,8 @@ fn downscale_bgra(
         }
     }
     let mut out = vec![0u8; dst_w * dst_h * 4];
-    for i in 0..dst_w * dst_h {
-        let c = cnt[i].max(1);
+    for (i, &count) in cnt.iter().enumerate().take(dst_w * dst_h) {
+        let c = count.max(1);
         let a = i * 4;
         out[a] = (acc[a] / c) as u8;
         out[a + 1] = (acc[a + 1] / c) as u8;
@@ -292,8 +292,17 @@ pub fn start_capture(
                     return;
                 }
             };
-            let screen = &conn.setup().roots[display_index];
+            let roots = &conn.setup().roots;
+            let Some(screen) = roots.get(display_index) else {
+                tracing::error!(
+                    display_index,
+                    screens = roots.len(),
+                    "X11 screen no longer present on the capture thread; aborting capture"
+                );
+                return;
+            };
             let root = screen.root;
+            let (screen_w, screen_h) = (screen.width_in_pixels, screen.height_in_pixels);
             let frame_interval = Duration::from_micros(1_000_000 / fps as u64);
 
             // The connection-setup dimensions (`screen.width_in_pixels`) are a
@@ -302,10 +311,16 @@ pub fn start_capture(
             // mid-session), so a GetImage rectangle sized from the setup can exceed
             // the live root and fail `BadMatch` on every frame. Query the current
             // root geometry instead, falling back to the setup dims if that fails.
-            let (mut width, mut height) = current_root_size(&conn, root)
-                .unwrap_or((screen.width_in_pixels, screen.height_in_pixels));
+            let (mut width, mut height) =
+                current_root_size(&conn, root).unwrap_or((screen_w, screen_h));
 
             tracing::info!(display_index, width, height, fps, "X11 capture started");
+
+            // Bound a persistently failing connection: if the X server dies (or
+            // keeps rejecting GetImage) we exit instead of spinning a warn-loop
+            // forever (M6). Reset on every good frame.
+            let mut consec_err: u32 = 0;
+            const MAX_CONSEC_ERR: u32 = 300; // ~10s at 30 fps
 
             while !stop_thread.load(Ordering::Relaxed) {
                 let t0 = Instant::now();
@@ -316,6 +331,11 @@ pub fn start_capture(
                     match conn.get_image(ImageFormat::Z_PIXMAP, root, 0, 0, width, height, !0) {
                         Ok(c) => c,
                         Err(e) => {
+                            consec_err += 1;
+                            if consec_err >= MAX_CONSEC_ERR {
+                                tracing::error!(error = %e, consec_err, "XGetImage request failing persistently (X server gone?); stopping capture");
+                                break;
+                            }
                             tracing::warn!(error = %e, "XGetImage request failed; dropping frame");
                             std::thread::sleep(frame_interval);
                             continue;
@@ -340,12 +360,19 @@ pub fn start_capture(
                                 height = h;
                             }
                         }
+                        consec_err += 1;
+                        if consec_err >= MAX_CONSEC_ERR {
+                            tracing::error!(error = %e, consec_err, "XGetImage reply failing persistently (X server gone?); stopping capture");
+                            break;
+                        }
                         tracing::warn!(error = %e, width, height,
                             "XGetImage reply failed; dropping frame");
                         std::thread::sleep(frame_interval);
                         continue;
                     }
                 };
+                // Good frame — reset the failure counter.
+                consec_err = 0;
 
                 // Robust stride: rows are padded to the scanline unit by the server.
                 let h = height as usize;

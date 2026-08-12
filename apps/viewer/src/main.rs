@@ -816,6 +816,7 @@ impl App {
             &token,
             Some(host.device_id.clone()),
             None,
+            None,
         ) {
             Ok(client) => self.start_session(Box::new(client)),
             Err(e) => {
@@ -1551,7 +1552,7 @@ fn quick_connect_signaling() -> Option<anyhow::Result<Box<dyn Signaling>>> {
             .unwrap_or_else(|_| "wss://app.reachmy.dev/ws".into());
         tracing::info!(%ws, %peer, "quick-connect via rendezvous");
         return Some(
-            RendezvousClient::connect(&ws, &token, Some(peer), None)
+            RendezvousClient::connect(&ws, &token, Some(peer), None, None)
                 .map(|c| Box::new(c) as Box<dyn Signaling>),
         );
     }

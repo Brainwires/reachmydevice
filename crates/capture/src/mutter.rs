@@ -30,6 +30,11 @@ const SC_IFACE: &str = "org.gnome.Mutter.ScreenCast";
 const SESSION_IFACE: &str = "org.gnome.Mutter.ScreenCast.Session";
 const STREAM_IFACE: &str = "org.gnome.Mutter.ScreenCast.Stream";
 
+/// Upper bound on the mutter ScreenCast handshake (CreateSession → Start →
+/// first `PipeWireStreamAdded`). If it's exceeded the attempt is abandoned and
+/// torn down, rather than blocking the D-Bus thread — and the indicator — forever.
+const HANDSHAKE_TIMEOUT_SECS: u64 = 10;
+
 /// Wayland can't enumerate monitors without interaction; the mutter session picks
 /// the source. Advertise a single logical display (real size comes from PipeWire
 /// format negotiation).
@@ -131,6 +136,7 @@ fn dbus_thread_main(
     };
 
     rt.block_on(async move {
+        let mut shutdown_rx = shutdown_rx;
         let handshake = async {
             let conn = zbus::Connection::session().await?;
 
@@ -152,9 +158,15 @@ fn dbus_thread_main(
                     .body()
                     .deserialize()?
             } else {
-                let connector = primary_connector(&conn)
-                    .await
-                    .ok_or_else(|| anyhow::anyhow!("could not determine a monitor connector"))?;
+                let connector = primary_connector(&conn).await.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no monitor connector available to capture — the desktop has no \
+                         active display (monitor unplugged / headless boot). Attach a \
+                         display, run `rmdd setup-linux --display` to make a connector \
+                         survive unplug, or `rmdd set capture_source virtual` to capture a \
+                         headless virtual monitor instead."
+                    )
+                })?;
                 conn.call_method(
                     Some(DEST),
                     sess.as_str(),
@@ -184,8 +196,30 @@ fn dbus_thread_main(
                 .deserialize()?;
 
             anyhow::Ok((conn, sess, node_id))
-        }
-        .await;
+        };
+
+        // Race the handshake against a timeout AND an early shutdown. Without the
+        // timeout, a stream that never emits `PipeWireStreamAdded` would block
+        // this thread forever — so `Session.Stop` never runs and the "screen is
+        // being shared" indicator stays lit after the peer is gone (B2). On
+        // either non-completion path the handshake future is dropped, which drops
+        // its D-Bus connection; the mutter session is bound to that connection, so
+        // dropping it tears the (partial) session down.
+        let handshake = tokio::select! {
+            biased;
+            _ = &mut shutdown_rx => {
+                tracing::debug!("mutter: shutdown requested during handshake");
+                return;
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(HANDSHAKE_TIMEOUT_SECS)) => {
+                let _ = ready_tx.send(Err(format!(
+                    "mutter ScreenCast handshake timed out after {HANDSHAKE_TIMEOUT_SECS}s \
+                     (no PipeWireStreamAdded)"
+                )));
+                return;
+            }
+            r = handshake => r,
+        };
 
         match handshake {
             Ok((conn, sess, node_id)) => {
@@ -206,6 +240,39 @@ fn dbus_thread_main(
     });
 }
 
+/// Whether mutter's private ScreenCast bus name currently has an owner.
+///
+/// Cheap synchronous pre-flight so the caller can fall back to the
+/// xdg-desktop-portal backend when the private API is unavailable (e.g. a
+/// non-GNOME session mis-detected as GNOME, or `org.gnome.Mutter.ScreenCast`
+/// disabled) instead of starting a capture that can never hand back a stream.
+pub(crate) fn screencast_available() -> bool {
+    std::thread::spawn(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        rt.block_on(async {
+            let conn = zbus::Connection::session().await.ok()?;
+            let reply = conn
+                .call_method(
+                    Some("org.freedesktop.DBus"),
+                    "/org/freedesktop/DBus",
+                    Some("org.freedesktop.DBus"),
+                    "NameHasOwner",
+                    &(DEST,),
+                )
+                .await
+                .ok()?;
+            reply.body().deserialize::<bool>().ok()
+        })
+    })
+    .join()
+    .ok()
+    .flatten()
+    .unwrap_or(false)
+}
+
 async fn stop_session(conn: &zbus::Connection, sess: &str) {
     if let Err(e) = conn
         .call_method(Some(DEST), sess, Some(SESSION_IFACE), "Stop", &())
@@ -219,24 +286,15 @@ fn empty_props() -> HashMap<&'static str, Value<'static>> {
     HashMap::new()
 }
 
-/// The primary monitor's mutter connector name (e.g. `HDMI-2`), for
-/// `RecordMonitor`. Honors `RMD_MONITOR_CONNECTOR` as an override/escape hatch;
-/// otherwise reads `org.gnome.Mutter.DisplayConfig.GetCurrentState`.
-async fn primary_connector(conn: &zbus::Connection) -> Option<String> {
-    if let Ok(c) = std::env::var("RMD_MONITOR_CONNECTOR") {
-        if !c.is_empty() {
-            return Some(c);
-        }
-    }
+// `org.gnome.Mutter.DisplayConfig.GetCurrentState` reply signature:
+//   (u  a((ssss)a(siiddada{sv})a{sv})  a(iiduba(ssss)a{sv})  a{sv})
+type MonId = (String, String, String, String);
+type Mode = (String, i32, i32, f64, f64, Vec<f64>, HashMap<String, OwnedValue>);
+type Monitor = (MonId, Vec<Mode>, HashMap<String, OwnedValue>);
+type Logical = (i32, i32, f64, u32, bool, Vec<MonId>, HashMap<String, OwnedValue>);
+type DisplayState = (u32, Vec<Monitor>, Vec<Logical>, HashMap<String, OwnedValue>);
 
-    // GetCurrentState signature:
-    //   (u  a((ssss)a(siiddada{sv})a{sv})  a(iiduba(ssss)a{sv})  a{sv})
-    type MonId = (String, String, String, String);
-    type Mode = (String, i32, i32, f64, f64, Vec<f64>, HashMap<String, OwnedValue>);
-    type Monitor = (MonId, Vec<Mode>, HashMap<String, OwnedValue>);
-    type Logical = (i32, i32, f64, u32, bool, Vec<MonId>, HashMap<String, OwnedValue>);
-    type State = (u32, Vec<Monitor>, Vec<Logical>, HashMap<String, OwnedValue>);
-
+async fn get_current_state(conn: &zbus::Connection) -> Option<DisplayState> {
     let reply = conn
         .call_method(
             Some("org.gnome.Mutter.DisplayConfig"),
@@ -247,7 +305,20 @@ async fn primary_connector(conn: &zbus::Connection) -> Option<String> {
         )
         .await
         .ok()?;
-    let state: State = reply.body().deserialize().ok()?;
+    reply.body().deserialize().ok()
+}
+
+/// The primary monitor's mutter connector name (e.g. `HDMI-2`), for
+/// `RecordMonitor`. Honors `RMD_MONITOR_CONNECTOR` as an override/escape hatch;
+/// otherwise reads `org.gnome.Mutter.DisplayConfig.GetCurrentState`.
+async fn primary_connector(conn: &zbus::Connection) -> Option<String> {
+    if let Ok(c) = std::env::var("RMD_MONITOR_CONNECTOR") {
+        if !c.is_empty() {
+            return Some(c);
+        }
+    }
+
+    let state = get_current_state(conn).await?;
 
     // Prefer the connector of the primary logical monitor; else the first monitor.
     if let Some(primary) = state.2.iter().find(|l| l.4) {
@@ -256,4 +327,105 @@ async fn primary_connector(conn: &zbus::Connection) -> Option<String> {
         }
     }
     state.1.first().map(|m| (m.0).0.clone())
+}
+
+/// The captured output's rect within the desktop bounding box (logical pixels),
+/// for multi-monitor absolute-pointer mapping. Blocking wrapper for the sync
+/// host thread: runs a one-shot D-Bus query on a throwaway current-thread
+/// runtime (its own thread, so it never nests inside an existing runtime).
+pub(crate) fn primary_monitor_rect_blocking() -> Option<crate::MonitorRect> {
+    std::thread::spawn(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        rt.block_on(async {
+            let conn = zbus::Connection::session().await.ok()?;
+            compute_monitor_rect(&conn).await
+        })
+    })
+    .join()
+    .ok()
+    .flatten()
+}
+
+/// Compute the captured output's rect within the desktop bounding box from
+/// `GetCurrentState`. All geometry is in **logical** coordinates (post-scaling),
+/// matching the space libinput uses to map an absolute device across the desktop.
+async fn compute_monitor_rect(conn: &zbus::Connection) -> Option<crate::MonitorRect> {
+    let state = get_current_state(conn).await?;
+    if state.2.is_empty() {
+        return None;
+    }
+
+    // Pixel size of a monitor's current mode (the mode flagged `is-current`,
+    // else its first/preferred mode).
+    let mode_px = |mon_id: &MonId| -> Option<(f64, f64)> {
+        let m = state.1.iter().find(|mm| &mm.0 == mon_id)?;
+        let cur = m
+            .1
+            .iter()
+            .find(|md| {
+                md.6.get("is-current")
+                    .and_then(|v| bool::try_from(v).ok())
+                    .unwrap_or(false)
+            })
+            .or_else(|| m.1.first())?;
+        Some((cur.1 as f64, cur.2 as f64))
+    };
+
+    // Logical rect (x, y, w, h) + primary flag + connector for each logical monitor.
+    struct LRect {
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        primary: bool,
+        connector: Option<String>,
+    }
+    let mut rects: Vec<LRect> = Vec::with_capacity(state.2.len());
+    for l in &state.2 {
+        let (x, y, scale, transform, primary) = (l.0 as f64, l.1 as f64, l.2, l.3, l.4);
+        let mon_id = l.5.first();
+        let connector = mon_id.map(|id| id.0.clone());
+        let (pw, ph) = mon_id.and_then(mode_px).unwrap_or((0.0, 0.0));
+        // Logical size = pixels / scale; a 90/270° rotation swaps the axes.
+        let (mut w, mut h) = (pw / scale, ph / scale);
+        if matches!(transform, 1 | 3 | 5 | 7) {
+            std::mem::swap(&mut w, &mut h);
+        }
+        rects.push(LRect { x, y, w, h, primary, connector });
+    }
+
+    // Desktop bounding box (union of all logical monitor rects).
+    let min_x = rects.iter().map(|r| r.x).fold(f64::INFINITY, f64::min);
+    let min_y = rects.iter().map(|r| r.y).fold(f64::INFINITY, f64::min);
+    let max_x = rects.iter().map(|r| r.x + r.w).fold(f64::NEG_INFINITY, f64::max);
+    let max_y = rects.iter().map(|r| r.y + r.h).fold(f64::NEG_INFINITY, f64::max);
+    let dw = max_x - min_x;
+    let dh = max_y - min_y;
+    if !(dw.is_finite() && dh.is_finite() && dw > 0.0 && dh > 0.0) {
+        return None;
+    }
+
+    // Pick the captured output — same precedence as `primary_connector`:
+    // env override → primary logical monitor → first.
+    let want = std::env::var("RMD_MONITOR_CONNECTOR").ok().filter(|s| !s.is_empty());
+    let target = want
+        .as_deref()
+        .and_then(|w| rects.iter().find(|r| r.connector.as_deref() == Some(w)))
+        .or_else(|| rects.iter().find(|r| r.primary))
+        .or_else(|| rects.first())?;
+    if !(target.w > 0.0 && target.h > 0.0) {
+        return None;
+    }
+
+    Some(crate::MonitorRect {
+        ox: target.x - min_x,
+        oy: target.y - min_y,
+        mw: target.w,
+        mh: target.h,
+        dw,
+        dh,
+    })
 }

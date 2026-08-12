@@ -23,6 +23,7 @@ fn build_signaling() -> anyhow::Result<Box<dyn Signaling>> {
             &token,
             Some(peer),
             None,
+            None,
         )?))
     } else {
         let addr = std::env::var("RMD_SIGNAL_ADDR").unwrap_or_else(|_| "127.0.0.1:9000".into());

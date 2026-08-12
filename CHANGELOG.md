@@ -2,7 +2,7 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
-## [Unreleased]
+## [0.7.0] - 2026-08-12
 
 ### Added
 - **Native GNOME Wayland capture with no consent prompt.** A new capture backend
@@ -21,18 +21,102 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
   reaches **native-Wayland windows** (the XTEST/XWayland path could not) and works
   identically on X11, GNOME, KDE, and wlroots. It's preferred automatically, with
   XTEST as the fallback (`RMD_INPUT=uinput|xtest` overrides). `/dev/uinput` needs
-  one-time access, granted by the new **`rmdd setup-input`** verb (installs a udev
-  rule via sudo — the only step that needs root; the daemon stays unprivileged);
-  the Linux installer runs it automatically.
+  one-time access, granted by the new **`rmdd setup-linux input`** verb (installs a
+  udev rule via sudo — the only step that needs root; the daemon stays
+  unprivileged); the Linux installer runs it automatically.
+- **`rmdd setup-linux` — one-command machine setup for headless remote access.**
+  Folds in the old `setup-input` (kept as a hidden alias) and adds a **display**
+  half: `rmdd setup-linux display` makes the desktop survive a monitor unplug by
+  forcing the real connector — it captures the panel's EDID into `/lib/firmware`
+  and adds `drm.edid_firmware=…` + `video=<conn>:<mode>e` kernel parameters to the
+  bootloader (idempotent, with a timestamped backup; refreshes the initramfs when
+  the DRM driver is early-KMS). On a truly headless box (no connectors) it arms a
+  VKMS virtual display instead. It never reboots — it prints a "verify remote
+  access first, then reboot" notice, since the app (not a human) owns the machine
+  config but the operator owns the timing. `rmdd setup-linux` with no target does
+  both halves; the installer runs `input` automatically and `display` only when
+  `RMD_SETUP_DISPLAY=1` (it needs a reboot).
+- **Multi-monitor absolute input mapping.** On a multi-head host, injected pointer
+  coordinates are now mapped through the captured output's rectangle within the
+  desktop bounding box (read from mutter's `DisplayConfig`), so clicks land on the
+  right monitor instead of being stretched across the whole desktop.
+  `RMD_INPUT_MONITOR_RECT=ox,oy,mw,mh,dw,dh` overrides the auto-detected geometry.
 - **Configurable Wayland capture source** — `rmdd set capture_source monitor|virtual`:
   `monitor` (default) mirrors the real display; `virtual` records a headless
   virtual monitor that survives with no physical display.
 
+### Added (continued)
+- **Device tokens refresh themselves — no more daily "can't connect" from an
+  expired token.** A long-running host whose rendezvous bearer token expires (or
+  is rotated) previously 401'd forever until someone ran `rmdd set token` by hand;
+  it had no way to re-mint one (that needed the account password, which the daemon
+  doesn't hold). rmdd now re-mints its token by proving possession of its device
+  **identity key** to a new `POST /api/token/refresh` endpoint (signs
+  `tag ‖ public_key ‖ timestamp`; the server verifies against the key the device
+  registered under), then persists the fresh token to the encrypted settings
+  store. It kicks in automatically on a 401 from either the signaling WebSocket or
+  the ICE fetch, so the host recovers on its own. Backward-compatible: against a
+  rendezvous that lacks the endpoint the refresh simply no-ops (falls back to
+  today's manual reset). **Requires deploying the updated rendezvous server** for
+  auto-refresh to take effect.
+
+### Security
+- **`identity.key` is now written atomically** (unique temp + fsync + rename) and
+  created `0600` from the first byte via `O_EXCL`, so a crash or power loss can no
+  longer corrupt or truncate the device identity, and the key is never briefly
+  world-readable — including on the legacy-plaintext → encrypted upgrade path. The
+  encrypted settings store uses the same path.
+- **Argon2id parameters for the wrapped identity key are pinned explicitly**
+  (matching the values shipped with the `ORK1` format) instead of tracking the
+  crate default, so a future dependency bump can never lock an existing encrypted
+  key out.
+- **Connection-password brute force is throttled per connection** — after a few
+  wrong passwords a viewer is locked out for an escalating, capped window (reset on
+  the correct password). In password-only mode the password is the sole gate, so
+  this closes unlimited on-connection guessing.
+- **`key.env` parsing hardened** — tolerates a leading `export ` and single/double
+  quotes, and preserves whitespace inside a quoted passphrase verbatim instead of
+  trimming it; the passphrase is now held in zeroizing buffers. A concurrent
+  `rmdd set` and the host's automatic restore-token refresh are serialized with an
+  advisory lock so neither silently clobbers the other.
+
 ### Fixed
+- **No more stuck keys/buttons across sessions.** A key or mouse button held down
+  when the viewer disconnects is now released on the host (uinput and XTEST track
+  what's down and release it on disconnect), so nothing leaks — stuck — into the
+  desktop or the next session.
+- **Capture teardown can't wedge the "screen is being shared" indicator.** The
+  mutter ScreenCast handshake is now bounded by a timeout and races an early
+  shutdown, so a stream that never starts can't block the D-Bus thread forever
+  (leaving the session — and the indicator — lit after the peer is gone); teardown
+  is guaranteed on every exit path.
+- **Headless capture fails with an actionable error instead of a bare message.**
+  When no monitor connector is available (unplugged / headless boot) the host now
+  points at `rmdd setup-linux display` and `rmdd set capture_source virtual`
+  instead of "could not determine a monitor connector"; the daemon stays healthy
+  and reconnects once a display returns.
+- **Mid-session source loss no longer freezes the stream.** The PipeWire capture
+  loop now exits on a stream error or a mid-session disconnect (e.g. the monitor
+  unplugged), and when the frame sink closes — instead of spinning idle. The X11
+  backend now bounds a persistently failing connection rather than warn-looping
+  forever, and can no longer panic if its screen index vanishes on reconnect.
+- **Portal ScreenCast sessions are always closed on error** (KDE/wlroots path): a
+  `select_sources`/`start` failure after the session exists now closes it, so a
+  failed handshake can't leak a lit portal session (xdg-desktop-portal#508).
+- **mutter → portal capture fallback.** If a session is detected as GNOME but the
+  private `org.gnome.Mutter.ScreenCast` API isn't actually available, capture now
+  falls back to the xdg-desktop-portal backend instead of failing outright.
+- **Scroll and drag fixed.** Wheel events now carry real magnitude plus a
+  high-resolution companion (proportional, smooth fast-scroll) instead of one
+  notch per event; a button release no longer teleports the pointer to the
+  top-left corner when the viewer sends zero coordinates, so drag-and-drop and
+  drag-select work.
 - **X11 capture honors the configured `width`/`height`** — the X11 backend now
   area-downscales to the configured encode size (aspect-preserving, never
   upscaling), matching the macOS and Wayland backends; previously `RMD_WIDTH`/
   `RMD_HEIGHT` were silently ignored on X11 (streamed at native resolution).
+- **Unknown `rmdd` subcommands now error** with a usage hint instead of silently
+  starting the daemon.
 - **Wayland portal backend hardened** (used for KDE/wlroots): capture start is
   non-blocking so a slow/interactive portal can't wedge the session or break
   reconnects; the ScreenCast session is explicitly closed on disconnect; and the

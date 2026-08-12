@@ -10,6 +10,7 @@
 use crate::Injector;
 use crate::keymap;
 use rmd_protocol::input_event::Event as InputEvent;
+use std::collections::HashSet;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::Window;
 use x11rb::protocol::xtest::ConnectionExt as XtestExt;
@@ -28,6 +29,10 @@ pub struct X11Injector {
     root: Window,
     width: f64,
     height: f64,
+    /// X keycodes currently held down (so a disconnect can release them).
+    pressed_keys: HashSet<u8>,
+    /// X button numbers currently held down.
+    pressed_buttons: HashSet<u8>,
 }
 
 impl X11Injector {
@@ -46,6 +51,8 @@ impl X11Injector {
             width: screen.width_in_pixels as f64,
             height: screen.height_in_pixels as f64,
             conn,
+            pressed_keys: HashSet::new(),
+            pressed_buttons: HashSet::new(),
         })
     }
 
@@ -84,8 +91,10 @@ impl Injector for X11Injector {
                 let y = (b.y * self.height) as i16;
                 self.fake(MOTION_NOTIFY, 0, x, y)?;
                 let ty = if b.pressed {
+                    self.pressed_buttons.insert(x_button);
                     BUTTON_PRESS
                 } else {
+                    self.pressed_buttons.remove(&x_button);
                     BUTTON_RELEASE
                 };
                 self.fake(ty, x_button, 0, 0)?;
@@ -108,10 +117,39 @@ impl Injector for X11Injector {
                     tracing::trace!(hid = k.hid_usage, "unmapped key usage; dropped");
                     return Ok(());
                 };
-                let ty = if k.pressed { KEY_PRESS } else { KEY_RELEASE };
+                let ty = if k.pressed {
+                    self.pressed_keys.insert(keycode);
+                    KEY_PRESS
+                } else {
+                    self.pressed_keys.remove(&keycode);
+                    KEY_RELEASE
+                };
                 self.fake(ty, keycode, 0, 0)?;
             }
         }
         Ok(())
+    }
+
+    fn release_all(&mut self) {
+        let keys: Vec<u8> = self.pressed_keys.drain().collect();
+        let buttons: Vec<u8> = self.pressed_buttons.drain().collect();
+        if keys.is_empty() && buttons.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            keys = keys.len(),
+            buttons = buttons.len(),
+            "XTEST: releasing held keys/buttons"
+        );
+        for kc in keys {
+            if let Err(e) = self.fake(KEY_RELEASE, kc, 0, 0) {
+                tracing::warn!(error = %e, keycode = kc, "XTEST: key release failed");
+            }
+        }
+        for btn in buttons {
+            if let Err(e) = self.fake(BUTTON_RELEASE, btn, 0, 0) {
+                tracing::warn!(error = %e, button = btn, "XTEST: button release failed");
+            }
+        }
     }
 }

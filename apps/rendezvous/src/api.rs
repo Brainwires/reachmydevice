@@ -257,8 +257,19 @@ pub async fn register_device(
     };
 
     // Rotate on re-registration: invalidate the device's prior tokens so they
-    // can't accumulate or linger after a leak (M2). Then issue a fresh token
-    // (store only its hash) with an optional expiry from config.
+    // can't accumulate or linger after a leak (M2). Then issue a fresh token.
+    let token = issue_device_token(&state, device_pk).await?;
+
+    Ok(Json(DeviceToken {
+        token,
+        device_id: body.device_id,
+    }))
+}
+
+/// Issue a fresh bearer token for `device_pk`: invalidate the device's prior
+/// tokens, then store the SHA-256 hash of a new random token with an optional
+/// expiry from config, and return the token (the only time it exists in clear).
+async fn issue_device_token(state: &AppState, device_pk: i64) -> AppResult<String> {
     sqlx::query("DELETE FROM device_tokens WHERE device_pk = ?")
         .bind(device_pk)
         .execute(&state.pool)
@@ -278,11 +289,139 @@ pub async fn register_device(
     .bind(expires_at)
     .execute(&state.pool)
     .await?;
+    Ok(token)
+}
 
+/// Body of `POST /api/token/refresh`: a device proves possession of its identity
+/// private key (no account password) to re-mint an expired/rotated bearer token.
+#[derive(Deserialize)]
+pub struct RefreshToken {
+    /// Device id (public-key fingerprint prefix, hex) — must equal the SHA-256
+    /// fingerprint of `public_key`.
+    device_id: String,
+    /// The device identity public key, hex-encoded (32 raw ed25519 bytes).
+    public_key: String,
+    /// Unix seconds when the request was signed (replay window is small).
+    timestamp: i64,
+    /// ed25519 signature (hex, 64 bytes) over the refresh proof message.
+    signature: String,
+}
+
+/// Domain-separation tag for the token-refresh proof. Must match the client
+/// (`rmd_session::identity::TOKEN_REFRESH_TAG`).
+const TOKEN_REFRESH_TAG: &[u8] = b"rmd-token-refresh-v1";
+/// How far the signed timestamp may be from the server clock (each way).
+const TOKEN_REFRESH_SKEW_SECS: i64 = 120;
+
+/// `POST /api/token/refresh` — re-mint a device's bearer token, authenticated by
+/// a signature from the device's identity key (not the account password), so a
+/// long-running host can recover on its own when its token expires or is rotated.
+///
+/// Verifies: the `public_key` hashes to the claimed `device_id`; that device is
+/// registered; the signed `timestamp` is fresh; and the signature is valid over
+/// `TOKEN_REFRESH_TAG ‖ public_key ‖ timestamp` under that key. Since `device_id`
+/// is a collision-resistant hash of the key, only the holder of the matching
+/// private key can produce a passing request for a registered device.
+pub async fn refresh_token(
+    State(state): State<AppState>,
+    Json(body): Json<RefreshToken>,
+) -> AppResult<Json<DeviceToken>> {
+    // Decode the presented public key (32 raw bytes).
+    let pub_bytes: [u8; 32] = hex::decode(&body.public_key)
+        .ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or(AppError::Unauthorized)?;
+
+    // The device_id MUST be the fingerprint of this key, binding the two so an
+    // attacker can't refresh some other device's token with their own key.
+    if device_id_from_public_key(&pub_bytes) != body.device_id {
+        return Err(AppError::Unauthorized);
+    }
+
+    // Reject stale/future timestamps (replay window). Over TLS this bounds replay
+    // to a couple of minutes; a replay only re-mints the legit device's own token.
+    let now = now_unix();
+    if (now - body.timestamp).abs() > TOKEN_REFRESH_SKEW_SECS {
+        return Err(AppError::Unauthorized);
+    }
+
+    // Verify the signature over TAG ‖ public_key ‖ timestamp.
+    let sig_bytes: [u8; 64] = hex::decode(&body.signature)
+        .ok()
+        .and_then(|v| v.try_into().ok())
+        .ok_or(AppError::Unauthorized)?;
+    if !refresh_signature_valid(&pub_bytes, body.timestamp, &sig_bytes) {
+        return Err(AppError::Unauthorized);
+    }
+
+    // The device must be registered; look up its row to issue against.
+    let device_pk: Option<i64> = sqlx::query_scalar("SELECT id FROM devices WHERE device_id = ?")
+        .bind(&body.device_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let device_pk = device_pk.ok_or(AppError::Unauthorized)?;
+
+    let token = issue_device_token(&state, device_pk).await?;
+    tracing::info!(device_id = %body.device_id, "device re-minted its bearer token (key-authenticated refresh)");
     Ok(Json(DeviceToken {
         token,
         device_id: body.device_id,
     }))
+}
+
+/// Derive the stable device id (SHA-256 fingerprint prefix, 32 hex chars) from
+/// raw public-key bytes. Mirrors `rmd_session::identity::device_id_from_public_key`.
+fn device_id_from_public_key(public_key: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(public_key);
+    hex::encode(h.finalize())[..32].to_string()
+}
+
+/// Verify an ed25519 signature over the token-refresh proof message
+/// `TOKEN_REFRESH_TAG ‖ public_key ‖ timestamp_be` under `pub_bytes`. This byte
+/// layout MUST match the client's `rmd_session::identity::token_refresh_message`.
+fn refresh_signature_valid(pub_bytes: &[u8; 32], timestamp: i64, sig_bytes: &[u8; 64]) -> bool {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let Ok(vk) = VerifyingKey::from_bytes(pub_bytes) else {
+        return false;
+    };
+    let sig = Signature::from_bytes(sig_bytes);
+    let mut msg = Vec::with_capacity(TOKEN_REFRESH_TAG.len() + 32 + 8);
+    msg.extend_from_slice(TOKEN_REFRESH_TAG);
+    msg.extend_from_slice(pub_bytes);
+    msg.extend_from_slice(&timestamp.to_be_bytes());
+    vk.verify(&msg, &sig).is_ok()
+}
+
+#[cfg(test)]
+mod token_refresh_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    // Build the client's proof message + signature, then check the server accepts
+    // it and rejects tampering. Guards the client/server message-format contract.
+    #[test]
+    fn refresh_signature_roundtrip() {
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pub_bytes = sk.verifying_key().to_bytes();
+        let ts = 1_700_000_000i64;
+
+        let mut msg = Vec::new();
+        msg.extend_from_slice(TOKEN_REFRESH_TAG);
+        msg.extend_from_slice(&pub_bytes);
+        msg.extend_from_slice(&ts.to_be_bytes());
+        let sig = sk.sign(&msg).to_bytes();
+
+        assert!(refresh_signature_valid(&pub_bytes, ts, &sig));
+        // Wrong timestamp / tampered signature must fail.
+        assert!(!refresh_signature_valid(&pub_bytes, ts + 1, &sig));
+        let mut bad = sig;
+        bad[0] ^= 0x01;
+        assert!(!refresh_signature_valid(&pub_bytes, ts, &bad));
+        // device_id binding: the id derived from the key is stable/collision-bound.
+        assert_eq!(device_id_from_public_key(&pub_bytes).len(), 32);
+    }
 }
 
 /// `GET /api/devices` — list the authenticated user's devices (Basic auth).

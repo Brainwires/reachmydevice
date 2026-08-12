@@ -53,7 +53,11 @@ fn setting_or_env_or<T: std::str::FromStr>(
 /// STUN/TURN servers the rendezvous mints for this device (`/api/ice`) when in
 /// rendezvous mode. A fetch failure is logged and skipped — the session still
 /// runs, just without a relay (so cross-NAT viewers may not connect).
-fn ice_servers(rendezvous_url: Option<&str>, token: Option<&str>) -> Vec<IceServer> {
+fn ice_servers(
+    rendezvous_url: Option<&str>,
+    token: Option<&str>,
+    refresher: Option<&rmd_session::rendezvous::TokenRefresher>,
+) -> (Vec<IceServer>, Option<String>) {
     let mut servers: Vec<IceServer> = std::env::var("RMD_ICE")
         .map(|s| {
             s.split(',')
@@ -64,12 +68,24 @@ fn ice_servers(rendezvous_url: Option<&str>, token: Option<&str>) -> Vec<IceServ
         })
         .unwrap_or_default();
 
+    let mut refreshed_token = None;
     if let (Some(url), Some(tok)) = (rendezvous_url, token) {
         let base = rmd_session::account::rest_base_from_ws(url);
-        match rmd_session::AccountClient::new(&base).ice_servers(tok) {
-            Ok(mut fetched) if !fetched.is_empty() => {
-                tracing::info!(count = fetched.len(), "fetched ICE servers from rendezvous");
-                servers.append(&mut fetched);
+        let client = rmd_session::AccountClient::new(&base);
+        let mut fetched = client.ice_servers(tok);
+        // If the token was rejected (401), re-mint it via the identity key and
+        // retry once so the relay works even when the token expired before boot.
+        if is_http_unauthorized(&fetched) {
+            if let Some(new_token) = refresher.and_then(|r| r()) {
+                tracing::info!("ICE fetch got 401; refreshed token and retrying");
+                fetched = client.ice_servers(&new_token);
+                refreshed_token = Some(new_token);
+            }
+        }
+        match fetched {
+            Ok(mut list) if !list.is_empty() => {
+                tracing::info!(count = list.len(), "fetched ICE servers from rendezvous");
+                servers.append(&mut list);
             }
             Ok(_) => {}
             Err(e) => tracing::warn!(
@@ -78,7 +94,60 @@ fn ice_servers(rendezvous_url: Option<&str>, token: Option<&str>) -> Vec<IceServ
             ),
         }
     }
-    servers
+    (servers, refreshed_token)
+}
+
+/// Whether an account-client result is an HTTP 401 (token rejected). The client
+/// surfaces status codes in the error text (see `account::run`), so match on that.
+fn is_http_unauthorized<T>(result: &anyhow::Result<T>) -> bool {
+    result
+        .as_ref()
+        .err()
+        .is_some_and(|e| e.to_string().contains("HTTP 401"))
+}
+
+/// Current wall-clock time in unix seconds (for signing a token-refresh request).
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Re-mint the device bearer token via a key-authenticated refresh and persist it
+/// to the encrypted settings store (under the load-modify-save lock). Returns the
+/// fresh token, or `None` on failure. Used by both the ICE fetch and the
+/// rendezvous client's 401 hook.
+fn refresh_and_persist_token(
+    rest_base: &str,
+    identity: &rmd_session::DeviceIdentity,
+) -> Option<String> {
+    let new = match rmd_session::AccountClient::new(rest_base).refresh_token(identity, now_unix()) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "device token refresh failed");
+            return None;
+        }
+    };
+    // Persist to the encrypted settings store (best-effort) so restarts and the
+    // ICE fetch pick up the new token too.
+    let path = rmd_session::settings::SettingsStore::default_path();
+    match rmd_session::settings::lock(&path) {
+        Ok(_lock) => match rmd_session::settings::SettingsStore::load(identity, &path) {
+            Ok(mut store) => {
+                store.set(rmd_session::settings::KEY_TOKEN, new.clone());
+                if let Err(e) = store.save(identity, &path) {
+                    tracing::warn!(error = %e, "could not persist refreshed token");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not open settings to persist refreshed token")
+            }
+        },
+        Err(e) => tracing::warn!(error = %e, "could not lock settings to persist refreshed token"),
+    }
+    tracing::info!("re-minted device bearer token via identity-key refresh");
+    Some(new)
 }
 
 /// Load authorized viewer `device_id`s for unattended access. Reads
@@ -204,6 +273,9 @@ fn run_settings_command(args: &[String]) -> anyhow::Result<()> {
     use rmd_session::settings::SettingsStore;
     let id = rmd_session::DeviceIdentity::load_or_create(&identity_path())?;
     let path = SettingsStore::default_path();
+    // Hold the settings lock across load-modify-save so this can't race the
+    // running host's automatic restore-token refresh (M4).
+    let _lock = rmd_session::settings::lock(&path)?;
     let mut store = SettingsStore::load(&id, &path)?;
     match args[0].as_str() {
         "set" => {
@@ -302,6 +374,17 @@ fn run_setup_input() -> anyhow::Result<()> {
     };
     sudo(&["modprobe", "uinput"])?;
     sudo(&["sh", "-c", "echo uinput > /etc/modules-load.d/rmd-uinput.conf"])?;
+    // Add the user to the `input` group too, so /dev/uinput is openable even on a
+    // headless/no-seat boot where logind's `uaccess` ACL grants no active session
+    // (audit B5). Best-effort; takes effect on next login. The udev `uaccess` tag
+    // covers the normal graphical-session case.
+    if let Ok(user) = std::env::var("USER") {
+        if !user.is_empty() && user != "root" {
+            if let Err(e) = sudo(&["usermod", "-aG", "input", &user]) {
+                tracing::warn!(error = %e, %user, "could not add user to `input` group (headless input may need it)");
+            }
+        }
+    }
     sudo(&["udevadm", "control", "--reload-rules"])?;
     sudo(&["udevadm", "trigger", "/dev/uinput"])?;
 
@@ -334,6 +417,359 @@ fn run_setup_input() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `rmdd setup-linux [input|display]`: one-time machine setup for headless remote
+/// access. With no target it does both. `input` arms native uinput input;
+/// `display` makes a monitor connector survive an unplug (or arms a headless
+/// virtual display when nothing is attached). Root steps go through `sudo` so the
+/// daemon stays unprivileged. The old `setup-input` verb maps here (input only).
+#[cfg(target_os = "linux")]
+fn run_setup_linux(args: &[String]) -> anyhow::Result<()> {
+    let verb = args.first().map(String::as_str).unwrap_or("setup-linux");
+    let sub = args.get(1).map(String::as_str);
+    let (do_input, do_display) = match (verb, sub) {
+        // Hidden back-compat alias: `setup-input` == input only.
+        ("setup-input", _) => (true, false),
+        (_, None) | (_, Some("both") | Some("all")) => (true, true),
+        (_, Some("input")) => (true, false),
+        (_, Some("display")) => (false, true),
+        (_, Some(other)) => anyhow::bail!(
+            "unknown setup-linux target '{other}' (expected: input | display, or omit for both)"
+        ),
+    };
+    if do_input {
+        run_setup_input()?;
+    }
+    if do_display {
+        if do_input {
+            println!();
+        }
+        run_setup_display()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_setup_linux(_args: &[String]) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// A connected physical display connector discovered under `/sys/class/drm`.
+#[cfg(target_os = "linux")]
+struct DrmConnector {
+    /// sysfs entry name, e.g. `card1-HDMI-A-2`.
+    sysfs: String,
+    /// kernel connector name for `video=`/`drm.edid_firmware=`, e.g. `HDMI-A-2`.
+    name: String,
+}
+
+/// Run a command via sudo, bailing with a clear message if it fails.
+#[cfg(target_os = "linux")]
+fn sudo_run(args: &[&str]) -> anyhow::Result<()> {
+    use std::process::Command;
+    if !Command::new("sudo").args(args).status()?.success() {
+        anyhow::bail!("`sudo {}` failed", args.join(" "));
+    }
+    Ok(())
+}
+
+/// Write `contents` to a root-owned `dest` via `sudo tee` (dir created first).
+#[cfg(target_os = "linux")]
+fn sudo_write_file(dest: &str, contents: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    if let Some(parent) = std::path::Path::new(dest).parent() {
+        sudo_run(&["mkdir", "-p", &parent.to_string_lossy()])?;
+    }
+    let mut tee = Command::new("sudo")
+        .args(["tee", dest])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("run sudo (is it installed?): {e}"))?;
+    tee.stdin.take().expect("piped stdin").write_all(contents)?;
+    if !tee.wait()?.success() {
+        anyhow::bail!("failed to write {dest}");
+    }
+    Ok(())
+}
+
+/// `rmdd setup-linux display`: make the desktop survive a monitor unplug.
+///
+/// Mechanism (validated live; see the project memory): force the real connector
+/// to always report connected with its captured EDID, so the compositor keeps
+/// allocating a framebuffer at the native mode whether or not the panel is
+/// physically attached. That means: capture the connector's EDID into
+/// `/lib/firmware/edid/`, and add `drm.edid_firmware=<conn>:…` + `video=<conn>:…e`
+/// kernel parameters (persisted in the bootloader). With no display attached at
+/// all, arm a VKMS virtual display instead. Never reboots — prints instructions.
+#[cfg(target_os = "linux")]
+fn run_setup_display() -> anyhow::Result<()> {
+    use std::path::Path;
+    println!("Setting up display persistence (keep the desktop alive across a monitor unplug).");
+
+    // 1. Enumerate DRM connectors; classify connected physical outputs.
+    let drm = Path::new("/sys/class/drm");
+    let mut connected: Vec<DrmConnector> = Vec::new();
+    let mut saw_any = false;
+    if let Ok(rd) = std::fs::read_dir(drm) {
+        for entry in rd.flatten() {
+            let sysfs = entry.file_name().to_string_lossy().to_string();
+            // Entries look like `card1-HDMI-A-2`; skip the card device nodes and
+            // render nodes (`card1`, `renderD128`).
+            let Some((card, conn)) = sysfs.split_once('-') else { continue };
+            if !card.starts_with("card") {
+                continue;
+            }
+            // Only real, forceable output types (skip Virtual/Writeback/etc.).
+            let is_physical = ["HDMI", "DP", "eDP", "DVI", "VGA", "LVDS", "DSI"]
+                .iter()
+                .any(|p| conn.starts_with(p));
+            if !is_physical {
+                continue;
+            }
+            saw_any = true;
+            let status = std::fs::read_to_string(entry.path().join("status")).unwrap_or_default();
+            if status.trim() == "connected" {
+                connected.push(DrmConnector { sysfs: sysfs.clone(), name: conn.to_string() });
+            }
+        }
+    }
+
+    if connected.is_empty() {
+        if saw_any {
+            println!("No physical display is currently connected.");
+        } else {
+            println!("No physical display connectors found (headless machine).");
+        }
+        println!("Arming a headless virtual display (VKMS) instead.\n");
+        return setup_headless_vkms();
+    }
+
+    // Prefer an external output over a laptop panel (eDP/LVDS/DSI) when both are up.
+    connected.sort_by_key(|c| {
+        ["eDP", "LVDS", "DSI"].iter().any(|p| c.name.starts_with(p)) as u8
+    });
+    let target = &connected[0];
+    println!("Target connector: {} ({})", target.name, target.sysfs);
+
+    // 2. Native mode from the connector's `modes` file (first line = preferred).
+    let modes = std::fs::read_to_string(drm.join(&target.sysfs).join("modes")).unwrap_or_default();
+    let mode = modes
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("1920x1080")
+        .to_string();
+    // 3. Read the live EDID (world-readable in sysfs); it must be non-empty.
+    let edid = std::fs::read(drm.join(&target.sysfs).join("edid")).unwrap_or_default();
+    if edid.is_empty() {
+        anyhow::bail!(
+            "the connected display exposes no EDID ({}/edid is empty); can't persist it. \
+             Try a different cable/port, or arm a virtual display: rmdd setup-linux display \
+             with no monitor attached.",
+            target.sysfs
+        );
+    }
+
+    // 4. Install the EDID blob under /lib/firmware/edid (root-owned).
+    let blob_rel = format!("edid/rmd-{}.bin", target.name.to_ascii_lowercase());
+    let blob_abs = format!("/lib/firmware/{blob_rel}");
+    println!("Capturing EDID ({} bytes) -> {blob_abs}", edid.len());
+    sudo_write_file(&blob_abs, &edid)?;
+
+    // 5. Kernel params: force the connector connected at its native mode, always
+    //    reporting the captured EDID (`e` forces enabled regardless of hotplug).
+    let params = vec![
+        format!("drm.edid_firmware={}:{}", target.name, blob_rel),
+        format!("video={}:{}@60e", target.name, mode),
+    ];
+
+    // 6. Persist to the bootloader (GRUB), or print the params for others.
+    persist_kernel_params(&params)?;
+
+    // 7. Early-KMS: if the DRM driver loads from the initramfs, the EDID blob must
+    //    be inside it too — refresh the initramfs (best-effort).
+    maybe_refresh_initramfs(&target.sysfs);
+
+    println!("\n\u{2713} Display persistence armed for {}.", target.name);
+    println!("  Params added: {}", params.join("  "));
+    println!(
+        "\n  IMPORTANT: this only takes effect after a REBOOT, and a bad display\n  \
+         parameter can leave you without a local console. VERIFY REMOTE ACCESS WORKS\n  \
+         FIRST (connect once, confirm you can get back in), THEN reboot on your own\n  \
+         schedule. This tool never reboots for you."
+    );
+    Ok(())
+}
+
+/// Add `params` to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`
+/// (idempotent; timestamped backup) and regenerate the grub config. If GRUB
+/// isn't in use, print the exact parameters for the operator to add manually.
+#[cfg(target_os = "linux")]
+fn persist_kernel_params(params: &[String]) -> anyhow::Result<()> {
+    use std::path::Path;
+    const GRUB: &str = "/etc/default/grub";
+    if !Path::new(GRUB).exists() {
+        println!("\n{GRUB} not found — this machine doesn't use GRUB.");
+        println!("Add these kernel parameters with your bootloader, then reboot:");
+        for p in params {
+            println!("    {p}");
+        }
+        return Ok(());
+    }
+
+    let original = std::fs::read_to_string(GRUB)?;
+    // Which params are missing from the file already (idempotency)?
+    let missing: Vec<&String> = params.iter().filter(|p| !original.contains(p.as_str())).collect();
+    if missing.is_empty() {
+        println!("GRUB already carries the display parameters — no changes needed.");
+        return Ok(());
+    }
+
+    // Splice the missing params into GRUB_CMDLINE_LINUX_DEFAULT="…".
+    let key = "GRUB_CMDLINE_LINUX_DEFAULT=";
+    let mut edited = String::with_capacity(original.len() + 128);
+    let mut spliced = false;
+    for line in original.lines() {
+        let trimmed = line.trim_start();
+        if !spliced && trimmed.starts_with(key) {
+            if let Some(updated) = splice_cmdline(trimmed, key, &missing) {
+                edited.push_str(&updated);
+                edited.push('\n');
+                spliced = true;
+                continue;
+            }
+        }
+        edited.push_str(line);
+        edited.push('\n');
+    }
+    if !spliced {
+        // No such line — append one.
+        let added: Vec<String> = missing.iter().map(|s| s.to_string()).collect();
+        edited.push_str(&format!("{key}\"{}\"\n", added.join(" ")));
+    }
+
+    // Timestamped backup, then write + regenerate.
+    println!("Backing up {GRUB} and adding: {}", missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("  "));
+    sudo_run(&["sh", "-c", &format!("cp -n {GRUB} {GRUB}.rmd-bak.$(date +%Y%m%d%H%M%S)")])?;
+    sudo_write_file(GRUB, edited.as_bytes())?;
+    regenerate_grub()?;
+    Ok(())
+}
+
+/// Insert `missing` params into a `GRUB_CMDLINE_LINUX_DEFAULT="…"` line, keeping
+/// the existing contents. Returns `None` if the line isn't quoted as expected.
+#[cfg(target_os = "linux")]
+fn splice_cmdline(line: &str, key: &str, missing: &[&String]) -> Option<String> {
+    let rest = line.strip_prefix(key)?;
+    let inner = rest.strip_prefix('"')?.strip_suffix('"')?;
+    let mut items: Vec<String> = inner.split_whitespace().map(str::to_string).collect();
+    for m in missing {
+        if !items.iter().any(|i| i == *m) {
+            items.push((*m).clone());
+        }
+    }
+    Some(format!("{key}\"{}\"", items.join(" ")))
+}
+
+/// Regenerate the GRUB config using whichever tool this distro ships.
+#[cfg(target_os = "linux")]
+fn regenerate_grub() -> anyhow::Result<()> {
+    use std::path::Path;
+    if which("update-grub") {
+        return sudo_run(&["update-grub"]);
+    }
+    if which("grub2-mkconfig") {
+        let cfg = ["/boot/grub2/grub.cfg", "/boot/efi/EFI/fedora/grub.cfg"]
+            .into_iter()
+            .find(|p| Path::new(p).exists())
+            .unwrap_or("/boot/grub2/grub.cfg");
+        return sudo_run(&["grub2-mkconfig", "-o", cfg]);
+    }
+    if which("grub-mkconfig") {
+        return sudo_run(&["grub-mkconfig", "-o", "/boot/grub/grub.cfg"]);
+    }
+    println!(
+        "  (couldn't find update-grub/grub2-mkconfig — regenerate your grub config manually.)"
+    );
+    Ok(())
+}
+
+/// If the connector's DRM driver is loaded from the initramfs (early-KMS), the
+/// EDID firmware must be embedded there too — refresh it. Best-effort/no-op if
+/// the tooling or driver name can't be determined.
+#[cfg(target_os = "linux")]
+fn maybe_refresh_initramfs(sysfs: &str) {
+    use std::path::Path;
+    // Driver name via /sys/class/drm/<card>/device/driver symlink basename.
+    let card = sysfs.split('-').next().unwrap_or("");
+    let driver_link = Path::new("/sys/class/drm").join(card).join("device/driver");
+    let driver = std::fs::read_link(&driver_link)
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
+    let Some(driver) = driver else { return };
+
+    // Debian/Ubuntu: is the module inside the current initramfs?
+    let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    let initrd = format!("/boot/initrd.img-{}", release.trim());
+    if which("lsinitramfs") && Path::new(&initrd).exists() {
+        let listed = std::process::Command::new("lsinitramfs")
+            .arg(&initrd)
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&format!("{driver}.ko")))
+            .unwrap_or(false);
+        if listed {
+            println!("Driver `{driver}` loads from the initramfs (early-KMS); refreshing it so the EDID blob is included.");
+            if let Err(e) = sudo_run(&["update-initramfs", "-u"]) {
+                tracing::warn!(error = %e, "update-initramfs failed; you may need to rebuild the initramfs manually");
+            }
+        }
+    }
+    // Other distros (dracut/mkinitcpio): the EDID blob under /lib/firmware is
+    // usually picked up on the next scheduled initramfs build; we don't force it.
+}
+
+/// Arm a VKMS (virtual kernel modesetting) display for a truly headless box (no
+/// physical connectors). Loads `vkms` at boot so the compositor always has an
+/// output to render to. Reserved for the no-outputs case — on a machine with a
+/// real GPU, VKMS can enumerate ahead of it and blank the real console.
+#[cfg(target_os = "linux")]
+fn setup_headless_vkms() -> anyhow::Result<()> {
+    const CONF: &str = "/etc/modules-load.d/rmd-vkms.conf";
+    if std::path::Path::new(CONF).exists() {
+        println!("VKMS already armed ({CONF}) — no changes needed.");
+    } else {
+        sudo_write_file(
+            CONF,
+            b"# Installed by `rmdd setup-linux display`. Loads a virtual display\n\
+              # (VKMS) at boot so a headless host always has a framebuffer to capture.\n\
+              vkms\n",
+        )?;
+        // Load it now too, so it's usable without a reboot where possible.
+        if let Err(e) = sudo_run(&["modprobe", "vkms"]) {
+            tracing::warn!(error = %e, "modprobe vkms failed now; it will load on next boot");
+        }
+    }
+    println!("\n\u{2713} Headless virtual display (VKMS) armed.");
+    println!(
+        "  Note: a compositor enumerates outputs at session start, so if it was\n  \
+         already running you must reboot (or restart the display manager) for the\n  \
+         virtual output to appear. VERIFY REMOTE ACCESS before relying on it."
+    );
+    Ok(())
+}
+
+/// Whether an executable is found on `PATH`.
+#[cfg(target_os = "linux")]
+fn which(bin: &str) -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", &format!("command -v {bin} >/dev/null 2>&1")])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Video codec from `RMD_CODEC` (`h264` default, or `av1`). AV1 is the pure-Rust
 /// rav1e encoder for browser viewers and requires the host built with
 /// `--features av1`; otherwise encoder init fails with a clear message.
@@ -355,6 +791,7 @@ fn build_signaling(
     rendezvous_url: Option<&str>,
     token: Option<&str>,
     session_active: Arc<AtomicBool>,
+    refresh_token: Option<rmd_session::rendezvous::TokenRefresher>,
 ) -> anyhow::Result<Box<dyn Signaling>> {
     if let Some(url) = rendezvous_url {
         let token =
@@ -362,12 +799,14 @@ fn build_signaling(
         tracing::info!(%url, "signaling via rendezvous");
         // Pass the session-active flag so the rendezvous client's watchdog can
         // safely restart the (host) process if its DNS resolver wedges, without
-        // tearing down a live peer-to-peer session.
+        // tearing down a live peer-to-peer session. The refresh hook lets the
+        // client re-mint an expired token (401) on its own.
         Ok(Box::new(RendezvousClient::connect(
             url,
             token,
             peer,
             Some(session_active),
+            refresh_token,
         )?))
     } else {
         let addr =
@@ -389,8 +828,10 @@ fn main() -> anyhow::Result<()> {
                 // Documented on Linux only (native input needs a one-time
                 // /dev/uinput grant); silent no-op / omitted elsewhere.
                 #[cfg(target_os = "linux")]
-                let setup_help =
-                    "  rmdd setup-input     enable native input (installs a udev rule via sudo, once)\n\n";
+                let setup_help = "  rmdd setup-linux [input|display]\n                       \
+                     one-time machine setup (sudo). input: native uinput; display:\n                       \
+                     survive a monitor unplug / arm a headless virtual display.\n                       \
+                     Omit the target to do both.\n\n";
                 #[cfg(not(target_os = "linux"))]
                 let setup_help = "";
                 println!(
@@ -412,7 +853,10 @@ fn main() -> anyhow::Result<()> {
                      Settings (via `rmdd set`):\n  \
                      rendezvous_url  wss://<host>/ws — enables rendezvous mode\n  \
                      token           device bearer token (rendezvous mode)\n  \
-                     password        connection password a viewer must enter\n\n\
+                     password        connection password a viewer must enter\n  \
+                     capture_source  monitor (default) | virtual (headless)\n  \
+                     fps             capture frame-rate cap (default 30)\n  \
+                     width, height   encode size cap in px (backend downscales to fit)\n\n\
                      Env (override the store):\n  \
                      RMD_RENDEZVOUS_URL  wss://<host>/ws (rendezvous signaling)\n  \
                      RMD_NAME            device name (default: hostname)\n  \
@@ -452,11 +896,22 @@ fn main() -> anyhow::Result<()> {
     ) {
         return service::run_command(&args);
     }
-    // One-time privileged setup so native input (uinput) works on Wayland + X11.
-    // The daemon itself runs unprivileged; this verb installs a udev rule via sudo
-    // (prompts for the password once), the only step that needs root.
-    if matches!(args.first().map(String::as_str), Some("setup-input")) {
-        return run_setup_input();
+    // One-time privileged machine setup so remote access works headless: native
+    // input (uinput) and display persistence across monitor unplug. The daemon
+    // itself runs unprivileged; this verb shells out via sudo for the root steps.
+    // `setup-input` is kept as a hidden back-compat alias (input only).
+    if matches!(
+        args.first().map(String::as_str),
+        Some("setup-linux") | Some("setup-input")
+    ) {
+        return run_setup_linux(&args);
+    }
+
+    // Any other unrecognized first argument is a mistake, not a request to start
+    // the daemon — bail rather than silently serving (M15). A bare `rmdd` (no
+    // args) still starts the host; `--version`/`--help` returned above.
+    if let Some(first) = args.first() {
+        anyhow::bail!("unknown command '{first}' — run `rmdd --help` for usage");
     }
 
     tracing_subscriber::fmt()
@@ -497,7 +952,7 @@ fn main() -> anyhow::Result<()> {
     // waits to be stopped. Configured = a rendezvous URL + a readable token, OR an
     // explicit LAN relay (`RMD_SIGNAL_ADDR`) for the dev flow.
     let lan_dev = std::env::var("RMD_SIGNAL_ADDR").is_ok();
-    let token = match &rendezvous_url {
+    let mut token = match &rendezvous_url {
         Some(_) => match read_token(settings.as_ref()) {
             Ok(t) => Some(t),
             Err(_) => park_unconfigured("a rendezvous URL is set but no device token"),
@@ -505,6 +960,34 @@ fn main() -> anyhow::Result<()> {
         None if lan_dev => None,
         None => park_unconfigured("no rendezvous URL or device token configured"),
     };
+
+    // A hook the rendezvous client (and the ICE fetch below) call on a 401 to
+    // re-mint an expired/rotated bearer token by proving possession of the device
+    // identity key — so a long-running host recovers on its own. Needs both a
+    // rendezvous URL and an identity; `None` (LAN/dev, or no identity) disables it.
+    let token_refresher: Option<rmd_session::rendezvous::TokenRefresher> =
+        match (rendezvous_url.as_deref(), identity.as_ref()) {
+            (Some(url), Some(id)) => {
+                let rest_base = rmd_session::account::rest_base_from_ws(url);
+                let id = id.clone();
+                Some(std::sync::Arc::new(move || {
+                    refresh_and_persist_token(&rest_base, &id)
+                }))
+            }
+            _ => None,
+        };
+
+    // Fetch ICE servers now (before building the config). If the token is already
+    // expired the fetch 401s and triggers a refresh; use the refreshed token for
+    // the rest of startup (and signaling), not just the persisted copy.
+    let (ice, refreshed) = ice_servers(
+        rendezvous_url.as_deref(),
+        token.as_deref().map(|z| z.as_str()),
+        token_refresher.as_ref(),
+    );
+    if let Some(new_token) = refreshed {
+        token = Some(zeroize::Zeroizing::new(new_token));
+    }
     let token_str = token.as_deref().map(|z| z.as_str());
 
     // Optional connection password (RealVNC-style). From the settings store only.
@@ -528,7 +1011,7 @@ fn main() -> anyhow::Result<()> {
         device_name: std::env::var("RMD_NAME").unwrap_or_else(|_| {
             std::env::var("HOSTNAME").unwrap_or_else(|_| "rmd-host".to_string())
         }),
-        ice_servers: ice_servers(rendezvous_url.as_deref(), token_str),
+        ice_servers: ice,
         bind_addr: std::env::var("RMD_BIND").unwrap_or_else(|_| "0.0.0.0:0".to_string()),
         enable_audio: std::env::var("RMD_AUDIO").is_ok(),
         video_codec: video_codec_from_env(),
@@ -590,6 +1073,7 @@ fn main() -> anyhow::Result<()> {
         rendezvous_url.as_deref(),
         token_str,
         session_active.clone(),
+        token_refresher,
     )?;
 
     // Desktop tray companion when built with `--features tray` and requested via
@@ -603,4 +1087,38 @@ fn main() -> anyhow::Result<()> {
     run_host_reporting(cfg, signaling, move |s| {
         session_active.store(matches!(s, HostStatus::Active), Ordering::Relaxed);
     })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splice_cmdline_appends_and_is_idempotent() {
+        let key = "GRUB_CMDLINE_LINUX_DEFAULT=";
+        let p1 = "video=HDMI-A-2:1680x1050@60e".to_string();
+        let p2 = "drm.edid_firmware=HDMI-A-2:edid/rmd-hdmi-a-2.bin".to_string();
+        let missing: Vec<&String> = vec![&p1, &p2];
+
+        // Appends into the existing quoted value, preserving what's there.
+        let line = "GRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash\"";
+        let out = splice_cmdline(line, key, &missing).unwrap();
+        assert_eq!(
+            out,
+            "GRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash video=HDMI-A-2:1680x1050@60e drm.edid_firmware=HDMI-A-2:edid/rmd-hdmi-a-2.bin\""
+        );
+
+        // Re-splicing an already-updated line adds nothing (idempotent).
+        assert_eq!(splice_cmdline(&out, key, &missing).unwrap(), out);
+
+        // An empty existing value yields just the new params (no leading space).
+        let empty = splice_cmdline("GRUB_CMDLINE_LINUX_DEFAULT=\"\"", key, &missing).unwrap();
+        assert_eq!(
+            empty,
+            "GRUB_CMDLINE_LINUX_DEFAULT=\"video=HDMI-A-2:1680x1050@60e drm.edid_firmware=HDMI-A-2:edid/rmd-hdmi-a-2.bin\""
+        );
+
+        // A malformed (unquoted) line is rejected so the caller can append instead.
+        assert!(splice_cmdline("GRUB_CMDLINE_LINUX_DEFAULT=quiet", key, &missing).is_none());
+    }
 }

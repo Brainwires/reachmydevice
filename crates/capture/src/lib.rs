@@ -82,6 +82,47 @@ pub struct DisplayInfo {
     pub height: u32,
 }
 
+/// The captured output's rectangle within the desktop bounding box (logical
+/// pixels), for multi-monitor absolute-pointer mapping in the input crate.
+///
+/// An absolute pointer device is mapped by the compositor across the *whole*
+/// desktop bounding box, so to land a click on the captured output the input
+/// backend translates the viewer's normalized `[0,1]` coordinates (relative to
+/// that one output) into a fraction of the full desktop using this rect.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MonitorRect {
+    /// Captured output origin X within the desktop bounding box.
+    pub ox: f64,
+    /// Captured output origin Y within the desktop bounding box.
+    pub oy: f64,
+    /// Captured output width.
+    pub mw: f64,
+    /// Captured output height.
+    pub mh: f64,
+    /// Full desktop bounding-box width.
+    pub dw: f64,
+    /// Full desktop bounding-box height.
+    pub dh: f64,
+}
+
+/// The captured output's placement within the desktop bounding box, if it can be
+/// determined. Currently only the GNOME/mutter backend reports geometry (via
+/// `DisplayConfig.GetCurrentState`); other backends return `None`, which the
+/// input crate treats as "single output spanning the whole desktop".
+pub fn primary_monitor_rect() -> Option<MonitorRect> {
+    #[cfg(target_os = "linux")]
+    {
+        if session_kind() == SessionKind::GnomeWayland {
+            return mutter::primary_monitor_rect_blocking();
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// How to capture. Width/height are the encoded output size (the backend scales
 /// the display to fit); `fps` caps the delivered frame rate.
 /// Which Wayland desktop-portal source to capture. Ignored by the X11/macOS
@@ -225,7 +266,20 @@ pub fn start_capture(
     {
         match session_kind() {
             SessionKind::X11 => linux::start_capture(config, display_index, sink),
-            SessionKind::GnomeWayland => mutter::start_capture(config, display_index, sink),
+            SessionKind::GnomeWayland => {
+                // Prefer mutter-direct (no prompt, clean teardown), but fall back
+                // to the portal if the private ScreenCast API isn't actually there
+                // — e.g. a session mis-detected as GNOME (M5cap).
+                if mutter::screencast_available() {
+                    mutter::start_capture(config, display_index, sink)
+                } else {
+                    tracing::warn!(
+                        "org.gnome.Mutter.ScreenCast unavailable; falling back to \
+                         xdg-desktop-portal capture (a consent prompt may appear)"
+                    );
+                    wayland::start_capture(config, display_index, sink)
+                }
+            }
             SessionKind::OtherWayland => wayland::start_capture(config, display_index, sink),
         }
     }

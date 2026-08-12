@@ -23,7 +23,18 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc as tok_mpsc;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
+
+/// Re-mints the device bearer token (proving identity-key possession to the
+/// rendezvous) and returns the fresh token, or `None` if it couldn't. Invoked
+/// when the server rejects the current token with 401 so a long-running host can
+/// recover on its own instead of looping unreachable.
+pub type TokenRefresher = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+/// Whether a tungstenite connect error is an HTTP 401 (token rejected).
+fn is_unauthorized(e: &WsError) -> bool {
+    matches!(e, WsError::Http(resp) if resp.status().as_u16() == 401)
+}
 
 /// The opaque `payload` we relay through the server.
 #[derive(Serialize, Deserialize)]
@@ -66,8 +77,10 @@ impl RendezvousClient {
         token: &str,
         peer_device_id: Option<String>,
         session_active: Option<Arc<AtomicBool>>,
+        refresh_token: Option<TokenRefresher>,
     ) -> anyhow::Result<Self> {
-        let url = format!("{ws_url}?token={token}");
+        let ws_url = ws_url.to_string();
+        let token = token.to_string();
         let (out_tx, out_rx) = tok_mpsc::unbounded_channel::<SignalMsg>();
         let (in_tx, in_rx) = std_mpsc::channel::<SignalMsg>();
         let peer_switched = Arc::new(AtomicBool::new(false));
@@ -87,7 +100,9 @@ impl RendezvousClient {
                     }
                 };
                 if let Err(e) = rt.block_on(run(
-                    url,
+                    ws_url,
+                    token,
+                    refresh_token,
                     peer_device_id,
                     out_rx,
                     in_tx,
@@ -146,8 +161,11 @@ fn restart_for_fresh_resolver() -> ! {
 /// (still running, but unreachable — no new viewer can signal it). Relay state
 /// (the host's offer + candidates, the learned peer) is preserved across
 /// reconnects so a (re)announcing viewer still completes the handshake.
+#[allow(clippy::too_many_arguments)]
 async fn run(
-    url: String,
+    ws_url: String,
+    mut token: String,
+    refresh_token: Option<TokenRefresher>,
     mut peer: Option<String>,
     mut out_rx: tok_mpsc::UnboundedReceiver<SignalMsg>,
     in_tx: std_mpsc::Sender<SignalMsg>,
@@ -195,23 +213,44 @@ async fn run(
 
     loop {
         // (Re)connect + re-authenticate (registers this device's socket again).
-        // `connect_async` is wrapped in a timeout so a wedged resolver can't hang the
-        // loop indefinitely (see CONNECT_TIMEOUT); a timeout is treated as a connect
-        // failure so it counts toward the watchdog like any other unreachable state.
+        // The token is in the URL, so rebuild it each attempt — a 401 refresh below
+        // may have replaced it. `connect_async` is wrapped in a timeout so a wedged
+        // resolver can't hang the loop indefinitely (see CONNECT_TIMEOUT); a timeout
+        // is treated as a connect failure so it counts toward the watchdog.
+        let url = format!("{ws_url}?token={token}");
         let attempt =
             tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&url)).await;
         let ws = match attempt {
             Ok(Ok((ws, _resp))) => ws,
             failed => {
-                match &failed {
-                    Ok(Err(e)) => {
-                        tracing::warn!(error = %e, "rendezvous connect failed; retrying in {backoff:?}")
+                // A 401 means the server rejected our bearer token (expired or
+                // rotated). Try a key-authenticated refresh and, if it works, retry
+                // immediately with the new token instead of looping forever
+                // unreachable (the whole point of the refresh path).
+                if let Ok(Err(e)) = &failed {
+                    if is_unauthorized(e) {
+                        match refresh_token.as_ref().and_then(|r| r()) {
+                            Some(new_token) => {
+                                tracing::info!(
+                                    "rendezvous rejected token (401); re-minted it via identity key, retrying"
+                                );
+                                token = new_token;
+                                first_fail = None;
+                                continue; // rebuild url with the fresh token, no backoff
+                            }
+                            None => tracing::warn!(
+                                "rendezvous rejected token (401) but refresh is unavailable/failed; \
+                                 set a fresh token with `rmdd set token` — retrying in {backoff:?}"
+                            ),
+                        }
+                    } else {
+                        tracing::warn!(error = %e, "rendezvous connect failed; retrying in {backoff:?}");
                     }
-                    Err(_elapsed) => tracing::warn!(
+                } else {
+                    tracing::warn!(
                         "rendezvous connect timed out after {CONNECT_TIMEOUT:?} \
                          (possibly a wedged DNS resolver); retrying in {backoff:?}"
-                    ),
-                    Ok(Ok(_)) => unreachable!("Ok(Ok(_)) is the success arm above"),
+                    );
                 }
                 let since = first_fail.get_or_insert_with(Instant::now);
                 if let Some(active) = &session_active {

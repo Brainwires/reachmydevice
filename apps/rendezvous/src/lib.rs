@@ -112,6 +112,10 @@ pub fn router_with(state: AppState, extra: Router) -> Router {
             "/api/devices",
             post(api::register_device).get(api::list_devices),
         )
+        // Re-mint an expired/rotated device token, authenticated by a signature
+        // from the device identity key (no account password) so a long-running
+        // host can recover on its own.
+        .route("/api/token/refresh", post(api::refresh_token))
         .route(
             "/api/devices/{device_id}",
             delete(api::delete_device).patch(api::rename_device),

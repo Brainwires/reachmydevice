@@ -9,7 +9,7 @@
 //! The private key never leaves the device and is not shared with the rendezvous
 //! server — the server only stores the public key for display.
 
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -36,24 +36,64 @@ const WRAP_NONCE_LEN: usize = 24;
 /// an encrypted key from a plain shell — `rmdd set/list` would fail "identity is
 /// encrypted" while the service worked. `config_dir` is the directory holding
 /// `identity.key` (i.e. `~/.config/rmd`).
-fn key_passphrase(config_dir: Option<&Path>) -> Option<String> {
+fn key_passphrase(config_dir: Option<&Path>) -> Option<Zeroizing<String>> {
     if let Ok(v) = std::env::var(KEY_PASSPHRASE_ENV) {
         if !v.is_empty() {
-            return Some(v);
+            return Some(Zeroizing::new(v));
         }
     }
-    let content = std::fs::read_to_string(config_dir?.join("key.env")).ok()?;
-    content.lines().find_map(|line| {
-        let val = line.trim().strip_prefix(KEY_PASSPHRASE_ENV)?.trim_start().strip_prefix('=')?;
-        let val = val.trim().trim_matches('"');
-        (!val.is_empty()).then(|| val.to_string())
-    })
+    let content = Zeroizing::new(std::fs::read_to_string(config_dir?.join("key.env")).ok()?);
+    content
+        .lines()
+        .find_map(parse_key_env_line)
+        .map(Zeroizing::new)
+}
+
+/// Parse one `key.env` line into the passphrase value, tolerating a leading
+/// `export ` and single- or double-quoted values. Only the surrounding quote
+/// pair is stripped — whitespace or quotes *inside* a quoted value are preserved
+/// verbatim, so a passphrase like `"  spaces  "` survives intact (M10).
+fn parse_key_env_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let line = line.strip_prefix("export ").map(str::trim_start).unwrap_or(line);
+    let rest = line.strip_prefix(KEY_PASSPHRASE_ENV)?;
+    // Require the key to be followed immediately by `=` (so `RMD_KEY_PASSPHRASE_X`
+    // doesn't match `RMD_KEY_PASSPHRASE`).
+    let val = rest.strip_prefix('=')?;
+    // A quoted value keeps its interior exactly; an unquoted value is trimmed.
+    let val = if (val.starts_with('"') && val.ends_with('"') && val.len() >= 2)
+        || (val.starts_with('\'') && val.ends_with('\'') && val.len() >= 2)
+    {
+        &val[1..val.len() - 1]
+    } else {
+        val.trim()
+    };
+    (!val.is_empty()).then(|| val.to_string())
+}
+
+// Argon2id parameters for wrapping the identity key, PINNED explicitly. They
+// match the `argon2` 0.5 crate defaults in force when the `ORK1` format shipped,
+// so existing wrapped files still open — but pinning them means a future bump of
+// the crate's *default* params can never lock an already-wrapped key out (M3).
+// Change these only alongside a format-version bump + migration.
+const ARGON2_M_COST: u32 = 19 * 1024; // 19 MiB
+const ARGON2_T_COST: u32 = 2;
+const ARGON2_P_COST: u32 = 1;
+
+/// Argon2id configured with our pinned parameters (see the constants above).
+fn wrap_argon2() -> anyhow::Result<Argon2<'static>> {
+    let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(32))
+        .map_err(|e| anyhow::anyhow!("argon2 params: {e}"))?;
+    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
 }
 
 /// Derive a 32-byte wrapping key from a passphrase + salt via Argon2id.
 fn derive_wrap_key(passphrase: &[u8], salt: &[u8]) -> anyhow::Result<Zeroizing<[u8; 32]>> {
     let mut key = Zeroizing::new([0u8; 32]);
-    Argon2::default()
+    wrap_argon2()?
         .hash_password_into(passphrase, salt, key.as_mut())
         .map_err(|e| anyhow::anyhow!("argon2 kdf: {e}"))?;
     Ok(key)
@@ -100,6 +140,61 @@ fn unwrap_seed(blob: &[u8], passphrase: &[u8]) -> anyhow::Result<Zeroizing<[u8; 
     Ok(Zeroizing::new(seed))
 }
 
+/// Atomically write a secret file: unique temp sibling created `O_EXCL` at mode
+/// `0600`, fully written + fsync'd, then renamed over `path` (dir fsync'd for
+/// durability). This guarantees the file is never half-written after a crash
+/// (B6/M1) and never momentarily world-readable before perms are tightened (M2),
+/// and the unique temp name lets concurrent writers not collide (M4). Reused by
+/// the settings store, which holds the same class of at-rest secret.
+pub(crate) fn atomic_write_secret(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Unique per-process, per-call temp name so two writers never share a temp.
+    static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let ext = format!("tmp.{}.{n}", std::process::id());
+    let tmp = path.with_extension(ext);
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600); // 0600 from creation — never a wider window (M2).
+    }
+    let write = (|| -> std::io::Result<()> {
+        let mut f = opts.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?; // durable before the rename
+        Ok(())
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    // Tighten perms on the temp before the rename so the final file is born
+    // restricted. On unix this re-asserts the 0600 the create-mode already set
+    // (belt-and-suspenders); on Windows (no create-mode) it's how the ACL gets
+    // applied at all.
+    restrict_perms(&tmp)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    // Best-effort: fsync the directory so the rename itself survives a crash.
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Restrict a file to the current user (unix `0600`; Windows ACL). Reused by the
 /// settings store, which holds the same class of at-rest secrets.
 pub(crate) fn restrict_perms(path: &Path) -> anyhow::Result<()> {
@@ -111,12 +206,27 @@ pub(crate) fn restrict_perms(path: &Path) -> anyhow::Result<()> {
     #[cfg(windows)]
     {
         // Break ACL inheritance and grant only the current user full control.
-        if let Ok(user) = std::env::var("USERNAME") {
-            let _ = std::process::Command::new("icacls")
+        // Surface failures loudly — silently leaving a secret world-readable is
+        // worse than a warning the operator can act on.
+        match std::env::var("USERNAME") {
+            Ok(user) => match std::process::Command::new("icacls")
                 .arg(path)
                 .args(["/inheritance:r", "/grant:r"])
                 .arg(format!("{user}:F"))
-                .output();
+                .output()
+            {
+                Ok(out) if !out.status.success() => tracing::warn!(
+                    path = %path.display(),
+                    stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                    "icacls could not restrict permissions on a secret file"
+                ),
+                Err(e) => tracing::warn!(error = %e, path = %path.display(), "failed to run icacls to restrict a secret file"),
+                _ => {}
+            },
+            Err(_) => tracing::warn!(
+                path = %path.display(),
+                "USERNAME unset; cannot restrict permissions on a secret file"
+            ),
         }
     }
     Ok(())
@@ -139,6 +249,22 @@ pub fn access_proof_message(public_key: &[u8], binding: &[u8]) -> Vec<u8> {
     m.extend_from_slice(public_key);
     m.push(0); // separator so key/binding can't be shifted into each other
     m.extend_from_slice(binding);
+    m
+}
+
+/// Domain-separation tag for the token-refresh proof (`POST /api/token/refresh`).
+/// A device signs `TAG || public_key || timestamp_be` with its identity key to
+/// prove possession and re-mint an expired bearer token without the account
+/// password. Must match the server's constant of the same name.
+pub const TOKEN_REFRESH_TAG: &[u8] = b"rmd-token-refresh-v1";
+
+/// The message a device signs to prove key possession for a token refresh, bound
+/// to `timestamp` (unix seconds) so the server can bound replay.
+pub fn token_refresh_message(public_key: &[u8], timestamp: i64) -> Vec<u8> {
+    let mut m = Vec::with_capacity(TOKEN_REFRESH_TAG.len() + public_key.len() + 8);
+    m.extend_from_slice(TOKEN_REFRESH_TAG);
+    m.extend_from_slice(public_key);
+    m.extend_from_slice(&timestamp.to_be_bytes());
     m
 }
 
@@ -329,22 +455,19 @@ impl DeviceIdentity {
     /// encrypted (Argon2id + XChaCha20-Poly1305) when a passphrase is set, else
     /// plaintext hex with a warning.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let seed = Zeroizing::new(self.signing.to_bytes());
         let bytes = match key_passphrase(path.parent()) {
-            Some(pass) => wrap_seed(&seed, pass.as_bytes())?,
+            Some(pass) => Zeroizing::new(wrap_seed(&seed, pass.as_bytes())?),
             None => {
                 tracing::warn!(
                     "writing identity key in PLAINTEXT — set {KEY_PASSPHRASE_ENV} to encrypt at rest"
                 );
-                hex::encode(seed.as_ref()).into_bytes()
+                Zeroizing::new(hex::encode(seed.as_ref()).into_bytes())
             }
         };
-        std::fs::write(path, &bytes)?;
-        restrict_perms(path)?;
-        Ok(())
+        // Atomic + 0600-from-creation, so a crash can't corrupt the identity and
+        // the (possibly plaintext) key is never briefly world-readable.
+        atomic_write_secret(path, &bytes)
     }
 }
 
@@ -402,6 +525,44 @@ pub mod known_peers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_refresh_proof_verifies_and_binds_timestamp() {
+        let id = DeviceIdentity::generate().unwrap();
+        let pk = id.public_key_bytes();
+        let ts = 1_700_000_000i64;
+        let msg = token_refresh_message(&pk, ts);
+        // The message layout is TAG ‖ public_key ‖ timestamp_be (the server rebuilds
+        // it identically); check the prefix + length so a client/server drift trips.
+        assert!(msg.starts_with(TOKEN_REFRESH_TAG));
+        assert_eq!(msg.len(), TOKEN_REFRESH_TAG.len() + 32 + 8);
+        // A signature over it verifies under the device's own key…
+        let sig = ed25519_dalek::Signature::from_bytes(&id.sign(&msg));
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).unwrap();
+        assert!(vk.verify(&msg, &sig).is_ok());
+        // …but not over a message with a different timestamp (replay binding).
+        assert!(vk.verify(&token_refresh_message(&pk, ts + 1), &sig).is_err());
+    }
+
+    #[test]
+    fn key_env_line_parsing() {
+        let p = KEY_PASSPHRASE_ENV;
+        // Plain, export-prefixed, and quoted forms.
+        assert_eq!(parse_key_env_line(&format!("{p}=hunter2")).as_deref(), Some("hunter2"));
+        assert_eq!(parse_key_env_line(&format!("export {p}=hunter2")).as_deref(), Some("hunter2"));
+        assert_eq!(parse_key_env_line(&format!("{p}=\"hunter2\"")).as_deref(), Some("hunter2"));
+        assert_eq!(parse_key_env_line(&format!("{p}='hunter2'")).as_deref(), Some("hunter2"));
+        // Interior whitespace/quotes preserved inside a quoted value.
+        assert_eq!(parse_key_env_line(&format!("{p}=\"  a b  \"")).as_deref(), Some("  a b  "));
+        // Unquoted value is trimmed.
+        assert_eq!(parse_key_env_line(&format!("{p}=  spaced  ")).as_deref(), Some("spaced"));
+        // Comments, blanks, other keys, empty values, and near-miss keys are ignored.
+        assert_eq!(parse_key_env_line(&format!("# {p}=x")), None);
+        assert_eq!(parse_key_env_line(""), None);
+        assert_eq!(parse_key_env_line(&format!("{p}=")), None);
+        assert_eq!(parse_key_env_line(&format!("{p}_OTHER=x")), None);
+        assert_eq!(parse_key_env_line("SOMETHING_ELSE=x"), None);
+    }
 
     #[test]
     fn identity_is_stable_and_ids_derive() {

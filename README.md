@@ -38,9 +38,16 @@ test). Direct LAN connections work even when the rendezvous is unreachable.
 
 Platform backends, selected at runtime. **Capture:** macOS ScreenCaptureKit; Linux X11 XGetImage;
 GNOME Wayland via mutter's direct ScreenCast (no consent prompt, clean teardown); other Wayland
-(KDE, wlroots) via PipeWire + xdg-desktop-portal. **Input:** macOS CGEvent; Linux `uinput` (a kernel
-virtual device — native on X11 and every Wayland compositor; run `rmdd setup-input` once), falling
-back to X11 XTest. Software H.264 (openh264) today; VideoToolbox/NVENC/etc. behind the same trait next.
+(KDE, wlroots) via PipeWire + xdg-desktop-portal — capture is verified live on X11 and GNOME
+Wayland; the KDE Plasma / wlroots portal path is wired but not yet verified on hardware.
+**Input:** macOS CGEvent; Linux `uinput` (a kernel virtual device — native on X11 and every Wayland
+compositor; run `rmdd setup-linux input` once), falling back to X11 XTest. Software H.264 (openh264)
+today; VideoToolbox/NVENC/etc. behind the same trait next.
+
+On a headless host, `rmdd setup-linux display` keeps the desktop alive across a monitor unplug by
+forcing the real connector (captured EDID + `video=…e` kernel params), or arms a VKMS virtual display
+when no connector exists at all — a one-time bootloader change that needs a reboot (verify remote
+access first). `rmdd setup-linux` with no argument does both the input and display setup.
 
 ## Security
 
