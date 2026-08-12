@@ -215,7 +215,9 @@ cargo clippy --all-targets -- -D warnings
 Needs only the pinned Rust toolchain (`rust-toolchain.toml`) — the default build is **pure Rust**
 (no `protoc`, no CMake): the protobuf schema compiles with `protox`. Optional features pull extra
 tooling: `--features av1` (host AV1 encode via rav1e) and `nasm` for its SIMD, and `--features audio`
-(Opus) needs CMake. On Linux install the X11 dev packages (see `.github/workflows/ci.yml`). macOS hosts
+(Opus) needs CMake. On Linux install the X11 dev packages plus — for Wayland
+screen capture (PipeWire/portal) — `libpipewire-0.3-dev`, `libspa-0.2-dev`, and `clang`
+(full list in `.github/workflows/ci.yml`). macOS hosts
 require **Screen Recording** + **Accessibility** permissions ([`docs/macos-permissions.md`](docs/macos-permissions.md)).
 
 The **browser viewer** (`apps/web-viewer`, WASM) is built separately with

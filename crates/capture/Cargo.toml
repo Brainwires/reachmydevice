@@ -71,8 +71,16 @@ dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
 block2 = "0.6"
 
 # Linux X11 screen capture via XGetImage (x11rb). XShm is a future optimization.
+# Wayland capture goes through the xdg-desktop-portal ScreenCast interface
+# (`ashpd`, tokio backend, no GTK) to obtain a PipeWire remote, then reads frames
+# off a PipeWire stream (`pipewire`/`libspa`). The portal shows a one-time
+# "share your screen" consent dialog on first use.
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13"
+ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
+pipewire = "0.8"
+libspa = "0.8"
+tokio = { workspace = true }
 
 [[example]]
 name = "capture_smoke"

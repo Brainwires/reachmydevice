@@ -168,6 +168,15 @@ pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
         .collect())
 }
 
+/// The root window's *current* width/height via `GetGeometry`, or `None` if the
+/// query fails. Unlike `conn.setup().roots[..].width_in_pixels` (a snapshot taken
+/// when the client connected), this reflects live resizes — essential under
+/// XWayland, where mutter resizes the root after connect and on every RandR change.
+fn current_root_size<C: Connection>(conn: &C, root: x11rb::protocol::xproto::Window) -> Option<(u16, u16)> {
+    let geom = conn.get_geometry(root).ok()?.reply().ok()?;
+    Some((geom.width, geom.height))
+}
+
 /// Running capture; dropping / [`stop`](CaptureSession::stop) ends the thread.
 pub struct LinuxCaptureSession {
     stop: Arc<AtomicBool>,
@@ -219,9 +228,16 @@ pub fn start_capture(
             };
             let screen = &conn.setup().roots[display_index];
             let root = screen.root;
-            let width = screen.width_in_pixels;
-            let height = screen.height_in_pixels;
             let frame_interval = Duration::from_micros(1_000_000 / fps as u64);
+
+            // The connection-setup dimensions (`screen.width_in_pixels`) are a
+            // snapshot from connect time. Under XWayland/mutter the root window is
+            // resized *after* the client connects (and any RandR change resizes it
+            // mid-session), so a GetImage rectangle sized from the setup can exceed
+            // the live root and fail `BadMatch` on every frame. Query the current
+            // root geometry instead, falling back to the setup dims if that fails.
+            let (mut width, mut height) = current_root_size(&conn, root)
+                .unwrap_or((screen.width_in_pixels, screen.height_in_pixels));
 
             tracing::info!(display_index, width, height, fps, "X11 capture started");
 
@@ -242,7 +258,24 @@ pub fn start_capture(
                 let reply = match cookie.reply() {
                     Ok(r) => r,
                     Err(e) => {
-                        tracing::warn!(error = %e, "XGetImage reply failed; dropping frame");
+                        // A `BadMatch` here almost always means the root was resized
+                        // out from under us (common right after connect on XWayland,
+                        // or on any live resolution/output change). Re-query the
+                        // geometry so capture self-heals instead of dropping every
+                        // subsequent frame with a stale size.
+                        if let Some((w, h)) = current_root_size(&conn, root) {
+                            if (w, h) != (width, height) {
+                                tracing::info!(
+                                    old_width = width, old_height = height,
+                                    new_width = w, new_height = h,
+                                    "root geometry changed; updating capture size"
+                                );
+                                width = w;
+                                height = h;
+                            }
+                        }
+                        tracing::warn!(error = %e, width, height,
+                            "XGetImage reply failed; dropping frame");
                         std::thread::sleep(frame_interval);
                         continue;
                     }

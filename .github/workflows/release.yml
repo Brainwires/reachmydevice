@@ -43,9 +43,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y nasm pkg-config \
+          sudo apt-get install -y nasm pkg-config clang \
             libx11-dev libxext-dev libxtst-dev libxdamage-dev libxcb1-dev \
-            libxkbcommon-dev libwayland-dev
+            libxkbcommon-dev libwayland-dev \
+            libpipewire-0.3-dev libspa-0.2-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:

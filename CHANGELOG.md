@@ -4,7 +4,29 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-11
+
+### Added
+- **Native Wayland screen capture (PipeWire + xdg-desktop-portal).** On a real
+  Wayland session the X11 backend can't see the desktop: GNOME runs XWayland
+  rootless, so the root window has no backing pixmap and `XGetImage` on it fails
+  `BadMatch` on *every* frame (even a 1×1 grab) — viewers connected to a blank
+  screen. `rmdd` now captures through the `org.freedesktop.portal.ScreenCast`
+  interface (`ashpd`), negotiating a PipeWire stream and reading CPU-mapped
+  BGRA/BGRx/RGBA/RGBx frames (`pipewire`/`libspa`) into the existing codec path.
+  The backend is chosen automatically when `WAYLAND_DISPLAY` is set (force the old
+  path with `RMD_FORCE_X11=1`). The compositor shows a one-time "share your
+  screen" consent prompt per session (a saved restore-token to suppress the repeat
+  prompt is not yet wired up). **Building on Linux now also requires**
+  `libpipewire-0.3-dev`, `libspa-0.2-dev`, and `clang` (see `.github/workflows/ci.yml`).
+
 ### Fixed
+- **X11 capture survives a mid-session resolution change.** The X11 backend read
+  the root dimensions once from the connection-setup snapshot and never refreshed
+  them, so any RandR resize (or an XWayland root resized right after connect) left
+  every `XGetImage` requesting an out-of-bounds rectangle — `BadMatch` on every
+  frame, with no recovery. Capture now reads the live root geometry via
+  `GetGeometry` at start and re-queries it on error, self-healing on resize.
 - **Direct pairing no longer races on the first frame.** The `/pair` relay is a
   blind mailbox that only forwards between peers currently in the room, and it
   emits `{"peer":"joined"}` once both are present — but the pairing client sent its

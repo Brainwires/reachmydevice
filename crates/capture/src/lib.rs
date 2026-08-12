@@ -14,8 +14,21 @@ use std::sync::mpsc::Sender;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+pub mod wayland;
 #[cfg(target_os = "macos")]
 pub mod mac;
+
+/// True when running under a real Wayland session, where X11 `XGetImage` capture
+/// can't see the desktop (rootless XWayland) and we must use the PipeWire portal
+/// backend instead. Honors an `RMD_FORCE_X11=1` escape hatch for debugging.
+#[cfg(target_os = "linux")]
+fn use_wayland_backend() -> bool {
+    if std::env::var_os("RMD_FORCE_X11").is_some_and(|v| v == "1") {
+        return false;
+    }
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
 
 /// Pixel layout of a [`Frame`]. Only BGRA (8:8:8:8) in v1; the codec expects it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,7 +134,11 @@ pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
     }
     #[cfg(target_os = "linux")]
     {
-        linux::list_displays()
+        if use_wayland_backend() {
+            wayland::list_displays()
+        } else {
+            linux::list_displays()
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -141,7 +158,11 @@ pub fn start_capture(
     }
     #[cfg(target_os = "linux")]
     {
-        linux::start_capture(config, display_index, sink)
+        if use_wayland_backend() {
+            wayland::start_capture(config, display_index, sink)
+        } else {
+            linux::start_capture(config, display_index, sink)
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
