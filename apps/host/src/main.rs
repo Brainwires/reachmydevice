@@ -265,6 +265,16 @@ fn run_setup_input() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Already set up on a prior run/install? The udev rule is world-readable, so
+    // we detect this WITHOUT sudo — so repeat `setup-input` runs and installer
+    // upgrades never re-prompt for a password (the rule just isn't live in this
+    // session/boot yet).
+    if std::path::Path::new(RULE_PATH).exists() {
+        println!("Native input already set up (udev rule present) — no changes needed.");
+        println!("If input isn't native yet, log out and back in, then:  rmdd restart");
+        return Ok(());
+    }
+
     println!("Setting up native input (uinput). This needs root once; sudo will");
     println!("prompt for your password.\n");
 
@@ -316,9 +326,11 @@ fn run_setup_input() -> anyhow::Result<()> {
     Ok(())
 }
 
+// On non-Linux, `setup-input` is a silent no-op — native input needs no such
+// setup on macOS (CGEvent) or the future Windows backend, so the verb is
+// intentionally undocumented and produces no output there.
 #[cfg(not(target_os = "linux"))]
 fn run_setup_input() -> anyhow::Result<()> {
-    println!("setup-input is only needed on Linux.");
     Ok(())
 }
 
@@ -374,6 +386,13 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             "--help" | "-h" => {
+                // Documented on Linux only (native input needs a one-time
+                // /dev/uinput grant); silent no-op / omitted elsewhere.
+                #[cfg(target_os = "linux")]
+                let setup_help =
+                    "  rmdd setup-input     enable native input (installs a udev rule via sudo, once)\n\n";
+                #[cfg(not(target_os = "linux"))]
+                let setup_help = "";
                 println!(
                     "rmdd {} — ReachMyDevice host agent (daemon)\n\n\
                      Commands:\n  \
@@ -389,6 +408,7 @@ fn main() -> anyhow::Result<()> {
                      rmdd stop            stop the service\n  \
                      rmdd restart         restart the service\n  \
                      rmdd log [-f]        show the service log (-f to follow)\n\n\
+                     {}\
                      Settings (via `rmdd set`):\n  \
                      rendezvous_url  wss://<host>/ws — enables rendezvous mode\n  \
                      token           device bearer token (rendezvous mode)\n  \
@@ -400,7 +420,8 @@ fn main() -> anyhow::Result<()> {
                      RMD_ICE             STUN/TURN URL(s)\n\n\
                      Note: `set <k> <v>` takes the value inline, so it can appear in \
                      shell history; clear it or use a subshell if that matters.",
-                    env!("CARGO_PKG_VERSION")
+                    env!("CARGO_PKG_VERSION"),
+                    setup_help,
                 );
                 return Ok(());
             }
