@@ -103,6 +103,10 @@ pub struct HostConfig {
     /// is authorized; when `None`, no password is required. Independent of the
     /// device-identity allowlist — both can apply. Set via `rmdd set password`.
     pub connect_password: Option<String>,
+    /// Wayland portal ScreenCast restore token from a previous run (if any). Lets
+    /// the capture backend re-grant without re-prompting. The host persists a
+    /// refreshed token back to the settings store when the portal issues one.
+    pub screencast_restore_token: Option<String>,
 }
 
 impl Default for HostConfig {
@@ -125,6 +129,7 @@ impl Default for HostConfig {
             authorized_device_ids: Vec::new(),
             identity: None,
             connect_password: None,
+            screencast_restore_token: None,
         }
     }
 }
@@ -209,12 +214,14 @@ where
         height: cfg.height,
         fps: cfg.fps,
         show_cursor: true,
+        restore_token: cfg.screencast_restore_token.clone(),
     };
     let mut capture_ctl = CaptureController::start(
         capture_cfg,
         cfg.display_index,
         frame_tx,
         force_keyframe.clone(),
+        cfg.identity.clone(),
     )?;
     // Whether a viewer's DTLS session is up. Tracks connection lifecycle.
     let connected = Arc::new(AtomicBool::new(false));
@@ -238,9 +245,20 @@ where
         );
         (std::env::var("RMD_NO_KEEPAWAKE").is_err())
             .then(|| crate::power::prevent_sleep("ReachMyDevice unattended host"))
+    } else if cfg.connect_password.is_some() {
+        // Not open: the connection-password handshake still gates every session
+        // (no screen/input until it passes). Only the optional device-ID allowlist
+        // is off, so this is informational, not a warning.
+        tracing::info!(
+            "device-ID allowlist OFF; access is gated by the connection password. \
+             To also pin specific devices, add authorized device IDs or set RMD_REQUIRE_AUTH"
+        );
+        None
     } else {
         tracing::warn!(
-            "unattended access gate OFF: any viewer completing the handshake is accepted"
+            "no access control: no device allowlist AND no connection password — any viewer \
+             completing the handshake is accepted. Set a password (`rmdd set password …`), \
+             add authorized device IDs, or set RMD_REQUIRE_AUTH"
         );
         None
     };
@@ -442,6 +460,10 @@ struct CaptureController {
     /// "screen is being shared" indicator) when no one is controlling.
     handle: Option<Box<dyn capture::CaptureSession>>,
     force_keyframe: Arc<AtomicBool>,
+    /// Host identity, used to (re)open the encrypted settings store when
+    /// persisting a refreshed Wayland portal restore token. `None` disables
+    /// persistence (the token still works for the current process).
+    identity: Option<Arc<crate::identity::DeviceIdentity>>,
 }
 
 impl CaptureController {
@@ -453,6 +475,7 @@ impl CaptureController {
         display_index: usize,
         frame_tx: mpsc::Sender<capture::Frame>,
         force_keyframe: Arc<AtomicBool>,
+        identity: Option<Arc<crate::identity::DeviceIdentity>>,
     ) -> anyhow::Result<Self> {
         let displays = capture::list_displays().unwrap_or_default();
         Ok(Self {
@@ -462,7 +485,37 @@ impl CaptureController {
             current: display_index,
             handle: None,
             force_keyframe,
+            identity,
         })
+    }
+
+    /// Persist a portal restore token the capture backend just obtained, so the
+    /// next session (and next daemon start) re-grants without a consent prompt.
+    /// A no-op unless the token is new and we have an identity to encrypt the
+    /// settings store with. Also updates the in-memory config so later restarts
+    /// this session reuse it.
+    fn absorb_restore_token(&mut self, token: Option<String>) {
+        let Some(token) = token else { return };
+        if self.config.restore_token.as_deref() == Some(token.as_str()) {
+            return; // unchanged — nothing to persist
+        }
+        self.config.restore_token = Some(token.clone());
+        let Some(identity) = self.identity.clone() else { return };
+        let path = crate::settings::SettingsStore::default_path();
+        match crate::settings::SettingsStore::load(&identity, &path) {
+            Ok(mut store) => {
+                store.set(crate::settings::KEY_SCREENCAST_RESTORE_TOKEN, token);
+                match store.save(&identity, &path) {
+                    Ok(()) => tracing::info!(
+                        "saved Wayland screencast restore token (future sessions skip the consent prompt)"
+                    ),
+                    Err(e) => tracing::warn!(error = %e, "failed to save screencast restore token"),
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to open settings to persist restore token")
+            }
+        }
     }
 
     /// Start capturing the current display (viewer connected). Idempotent.
@@ -472,7 +525,9 @@ impl CaptureController {
         }
         match capture::start_capture(self.config.clone(), self.current, self.frame_tx.clone()) {
             Ok(h) => {
+                let token = h.restore_token();
                 self.handle = Some(h);
+                self.absorb_restore_token(token);
                 self.force_keyframe.store(true, Ordering::Relaxed);
                 tracing::info!(display = self.current, "capture started (viewer connected)");
             }
@@ -517,7 +572,9 @@ impl CaptureController {
         }
         match capture::start_capture(self.config.clone(), self.current, self.frame_tx.clone()) {
             Ok(handle) => {
+                let token = handle.restore_token();
                 self.handle = Some(handle); // dropping the old session stops it
+                self.absorb_restore_token(token);
                 self.force_keyframe.store(true, Ordering::Relaxed);
                 tracing::info!(show_cursor = show, "capture cursor visibility changed");
             }
@@ -543,7 +600,9 @@ impl CaptureController {
         }
         match capture::start_capture(self.config.clone(), idx, self.frame_tx.clone()) {
             Ok(handle) => {
+                let token = handle.restore_token();
                 self.handle = Some(handle); // dropping the old session stops it
+                self.absorb_restore_token(token);
                 self.force_keyframe.store(true, Ordering::Relaxed);
                 tracing::info!(display = idx, "switched captured display");
             }

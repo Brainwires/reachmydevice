@@ -56,6 +56,11 @@ pub struct CaptureConfig {
     pub height: u32,
     pub fps: u32,
     pub show_cursor: bool,
+    /// Opaque portal restore token from a previous session (Wayland only). When
+    /// present, the xdg-desktop-portal ScreenCast backend re-grants the same
+    /// source without re-prompting the user; `None` prompts (first run). Ignored
+    /// by the macOS/X11 backends.
+    pub restore_token: Option<String>,
 }
 
 impl Default for CaptureConfig {
@@ -65,6 +70,7 @@ impl Default for CaptureConfig {
             height: 1080,
             fps: 30,
             show_cursor: true,
+            restore_token: None,
         }
     }
 }
@@ -113,6 +119,13 @@ pub type AudioSink = Sender<Vec<i16>>;
 pub trait CaptureSession {
     /// Stop capture and release the stream.
     fn stop(self: Box<Self>);
+
+    /// The portal restore token issued for this session, if the backend obtained
+    /// a (possibly refreshed) one worth persisting for next time. Only the Wayland
+    /// backend returns a value; others use the default `None`.
+    fn restore_token(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Errors from capture setup.

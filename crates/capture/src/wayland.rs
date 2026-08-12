@@ -18,8 +18,9 @@
 //! shutdown signal (dropping the session closes the portal). A second "pw"
 //! thread owns the PipeWire main loop. Stopping the session signals both.
 
-use crate::{CaptureConfig, CaptureError, CaptureSession, DisplayInfo, Frame, FrameSink, PixelFormat};
+use crate::{CaptureConfig, CaptureSession, DisplayInfo, Frame, FrameSink, PixelFormat};
 use bytes::Bytes;
+use std::sync::{Arc, Mutex};
 use pipewire as pw;
 use pw::spa;
 use rmd_protocol::monotonic_micros;
@@ -43,83 +44,91 @@ pub struct WaylandCaptureSession {
     portal_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     pw_thread: Option<JoinHandle<()>>,
     portal_thread: Option<JoinHandle<()>>,
+    /// Restore token the portal issued for this grant; filled by the PipeWire
+    /// thread once the background handshake resolves, read back for persistence.
+    restore_token: Arc<Mutex<Option<String>>>,
 }
 
 impl CaptureSession for WaylandCaptureSession {
     fn stop(self: Box<Self>) {
         // Drop does the work (see below).
     }
+
+    fn restore_token(&self) -> Option<String> {
+        self.restore_token.lock().unwrap().clone()
+    }
 }
 
 impl Drop for WaylandCaptureSession {
     fn drop(&mut self) {
-        // Quit the PipeWire loop, then close the portal session.
+        // Signal both background threads to stop, but do NOT join them. This Drop
+        // runs on the session thread; joining a portal handshake still waiting on
+        // the compositor would block the session and wedge reconnects. Detach and
+        // let the threads exit on their own once the signals land.
         let _ = self.pw_quit.send(());
         if let Some(tx) = self.portal_shutdown.take() {
             let _ = tx.send(());
         }
-        if let Some(h) = self.pw_thread.take() {
-            let _ = h.join();
-        }
-        if let Some(h) = self.portal_thread.take() {
-            let _ = h.join();
-        }
+        self.pw_thread.take();
+        self.portal_thread.take();
     }
 }
 
-/// Start capturing the Wayland desktop. Blocks until the user answers the portal
-/// consent dialog (or it fails), because we can't stream before that resolves.
+/// Start capturing the Wayland desktop. Returns **immediately** — the portal
+/// handshake (which may show a one-time consent dialog, or re-grant silently from
+/// a stored token) and the PipeWire stream run on background threads. Making this
+/// non-blocking is the fix for reconnects hanging: a slow or interactive portal
+/// can no longer wedge the caller (the session handshake). Frames simply start
+/// flowing once the grant resolves.
 pub fn start_capture(
     config: CaptureConfig,
     _display_index: usize,
     sink: FrameSink,
 ) -> anyhow::Result<Box<dyn CaptureSession>> {
-    // Channel carrying the handshake result (fd + node id) back from the portal
-    // thread to here.
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(OwnedFd, u32), String>>();
+    type Ready = Result<(OwnedFd, u32, Option<String>), String>;
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Ready>();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let show_cursor = config.show_cursor;
+    let restore_token_in = config.restore_token.clone();
+    let fps = config.fps.max(1);
 
     let portal_thread = std::thread::Builder::new()
         .name("rmd-portal".into())
-        .spawn(move || portal_thread_main(show_cursor, ready_tx, shutdown_rx))?;
-
-    // Wait for the portal handshake (this is where the consent dialog is shown).
-    let (fd, node_id) = match ready_rx.recv() {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
-            let _ = portal_thread.join();
-            return Err(CaptureError::Backend(format!(
-                "Wayland ScreenCast portal failed: {e}. Is xdg-desktop-portal (and \
-                 the -gnome/-kde backend) running, and did you approve the screen-share prompt?"
-            ))
-            .into());
-        }
-        Err(_) => {
-            let _ = portal_thread.join();
-            return Err(CaptureError::Backend(
-                "Wayland ScreenCast portal thread exited before handshake".into(),
-            )
-            .into());
-        }
-    };
+        .spawn(move || portal_thread_main(show_cursor, restore_token_in, ready_tx, shutdown_rx))?;
 
     let (pw_quit, pw_quit_rx) = pw::channel::channel::<()>();
-    let fps = config.fps.max(1);
+    let restore_token: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let restore_token_bg = restore_token.clone();
+
+    // The PipeWire thread waits for the portal handshake result, THEN streams.
+    // Doing that wait here (off the caller's thread) is what keeps start_capture
+    // non-blocking.
     let pw_thread = std::thread::Builder::new()
         .name("rmd-pw-capture".into())
         .spawn(move || {
+            let (fd, node_id, token) = match ready_rx.recv() {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "Wayland ScreenCast portal failed");
+                    return;
+                }
+                Err(_) => return, // portal thread gone before handshake
+            };
+            if token.is_some() {
+                *restore_token_bg.lock().unwrap() = token;
+            }
+            tracing::info!(node_id, "Wayland PipeWire capture streaming");
             if let Err(e) = pw_run(fd, node_id, fps, sink, pw_quit_rx) {
                 tracing::error!(error = %e, "PipeWire capture loop ended with error");
             }
         })?;
 
-    tracing::info!(node_id, "Wayland PipeWire capture started");
     Ok(Box::new(WaylandCaptureSession {
         pw_quit,
         portal_shutdown: Some(shutdown_tx),
         pw_thread: Some(pw_thread),
         portal_thread: Some(portal_thread),
+        restore_token,
     }))
 }
 
@@ -129,7 +138,8 @@ pub fn start_capture(
 /// borrows the proxy, and dropping either closes the portal stream.
 fn portal_thread_main(
     show_cursor: bool,
-    ready_tx: std::sync::mpsc::Sender<Result<(OwnedFd, u32), String>>,
+    restore_token_in: Option<String>,
+    ready_tx: std::sync::mpsc::Sender<Result<(OwnedFd, u32, Option<String>), String>>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -154,28 +164,31 @@ fn portal_thread_main(
                     &session,
                     cursor,
                     SourceType::Monitor.into(),
-                    false, // single source
-                    None,  // no restore token (v1: prompt each session)
-                    PersistMode::DoNot,
+                    false,                        // single source
+                    restore_token_in.as_deref(), // reuse a prior grant if we have one
+                    PersistMode::ExplicitlyRevoked, // remember until the user revokes it
                 )
                 .await?;
             let streams = proxy
                 .start(&session, &WindowIdentifier::default())
                 .await?
                 .response()?;
+            // The portal may hand back a fresh restore token (rotated on each use)
+            // to persist for next time.
+            let restore_token_out = streams.restore_token().map(str::to_string);
             let stream = streams
                 .streams()
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("portal returned no streams"))?;
             let node_id = stream.pipe_wire_node_id();
             let fd = proxy.open_pipe_wire_remote(&session).await?;
-            anyhow::Ok((proxy, session, fd, node_id))
+            anyhow::Ok((proxy, session, fd, node_id, restore_token_out))
         }
         .await;
 
         match handshake {
-            Ok((_proxy, _session, fd, node_id)) => {
-                if ready_tx.send(Ok((fd, node_id))).is_err() {
+            Ok((_proxy, _session, fd, node_id, restore_token_out)) => {
+                if ready_tx.send(Ok((fd, node_id, restore_token_out))).is_err() {
                     return; // caller gave up
                 }
                 // Keep _proxy/_session alive until shutdown; dropping them ends

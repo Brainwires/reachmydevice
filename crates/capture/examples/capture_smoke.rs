@@ -31,6 +31,7 @@ fn main() -> anyhow::Result<()> {
         height: 720,
         fps: 30,
         show_cursor: true,
+        restore_token: None,
     };
     println!(
         "\nstarting capture of display 0 at {}x{}@{}...",

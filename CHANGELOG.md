@@ -4,6 +4,25 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+### Added
+- **Wayland capture reuses the portal grant (headless after first approval).** The
+  xdg-desktop-portal ScreenCast session now requests `PersistMode::ExplicitlyRevoked`
+  and stores/reuses the returned restore token (`screencast_restore_token`, kept in
+  the encrypted settings store), so after the one-time "share your screen" approval
+  the host re-grants screen capture on every later connect with no prompt.
+
+### Fixed
+- **Wayland capture no longer wedges the session or breaks reconnects.** Capture
+  start is now non-blocking: the host authorizes the viewer and sends its
+  `HelloAck` immediately, bringing the portal handshake + PipeWire stream up on
+  background threads, and session teardown no longer joins those threads. A slow or
+  interactive portal (or a prior grant that hadn't been released yet) can no longer
+  block the session handshake — previously the second connect after a refresh hung
+  at "awaiting authorization" until the service was restarted.
+- Clarified the unattended-access startup log: a password-gated host now reports
+  that access is gated by the connection password (info) instead of the misleading
+  "any viewer completing the handshake is accepted" (warn). Enforcement unchanged.
+
 ## [0.6.0] - 2026-08-11
 
 ### Added

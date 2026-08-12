@@ -437,6 +437,12 @@ fn main() -> anyhow::Result<()> {
         // authenticate this endpoint. Persisted under the config dir.
         identity,
         connect_password,
+        // Reuse a prior Wayland ScreenCast grant so capture doesn't re-prompt the
+        // user every session; the host refreshes this in the store as needed.
+        screencast_restore_token: sref
+            .and_then(|s| s.get(sset::KEY_SCREENCAST_RESTORE_TOKEN))
+            .filter(|t| !t.is_empty())
+            .map(str::to_string),
     };
 
     // Fail closed on an open relay. An internet-reachable host (connected to a

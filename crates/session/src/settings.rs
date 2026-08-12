@@ -36,6 +36,11 @@ pub const KEY_WIDTH: &str = "width";
 pub const KEY_HEIGHT: &str = "height";
 pub const KEY_BITRATE: &str = "bitrate";
 
+/// Wayland xdg-desktop-portal ScreenCast restore token. Persisted so the host
+/// re-grants screen capture without re-prompting the user each session. Written
+/// by the host at runtime (not via `rmdd set`); may be rotated by the portal.
+pub const KEY_SCREENCAST_RESTORE_TOKEN: &str = "screencast_restore_token";
+
 /// In-memory view of the settings, persisted as one encrypted blob.
 #[derive(Default)]
 pub struct SettingsStore {
