@@ -4,10 +4,12 @@
 //! frames to a [`FrameSink`] (an mpsc channel) on an internal thread; the codec
 //! crate consumes them. Handing frames across the crate boundary as plain bytes
 //! (rather than a platform image handle) keeps capture and codec decoupled and
-//! makes the Linux/Windows backends (Phase 3) drop-in.
+//! makes each platform backend drop-in.
 //!
-//! macOS backend: ScreenCaptureKit (see [`mac`]). Other platforms return
-//! [`CaptureError::Unsupported`] until Phase 3.
+//! Backends: macOS ScreenCaptureKit ([`mac`]); Linux X11/XGetImage ([`linux`])
+//! and Wayland via PipeWire + xdg-desktop-portal ([`wayland`]), chosen at runtime
+//! per `WAYLAND_DISPLAY`. Windows is not yet implemented and returns
+//! [`CaptureError::Unsupported`].
 
 use bytes::Bytes;
 use std::sync::mpsc::Sender;
@@ -131,7 +133,7 @@ pub trait CaptureSession {
 /// Errors from capture setup.
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
-    #[error("screen capture is not yet supported on this platform (Phase 3)")]
+    #[error("screen capture is not yet supported on this platform (Windows backend pending)")]
     Unsupported,
     #[error("no display at index {0}")]
     NoSuchDisplay(usize),

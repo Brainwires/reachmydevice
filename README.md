@@ -13,7 +13,8 @@ else, point both at your own rendezvous server on a cheap VPS, and get a low-lat
 > clipboard, resumable file transfer, audio (real desktop capture → speaker), and multi-monitor.
 > **A real cross-NAT session is proven** (host on a cloud box ↔ viewer behind home NAT, signaling through
 > a self-hosted rendezvous, media STUN-traversed and DTLS-SRTP encrypted — see
-> [`docs/validation.md`](docs/validation.md)). Windows/Wayland backends and hardware encode are next.
+> [`docs/validation.md`](docs/validation.md)). Linux hosts capture on both X11 and Wayland
+> (the latter via PipeWire + xdg-desktop-portal). The Windows backend and hardware encode are next.
 
 ## Components
 
@@ -35,7 +36,8 @@ traversal (host + STUN server-reflexive candidates), and **GCC** adaptive bitrat
 reliable data channel. The rendezvous/TURN servers only ever see **ciphertext** (proven by an automated
 test). Direct LAN connections work even when the rendezvous is unreachable.
 
-Platform backends: macOS (ScreenCaptureKit + CGEvent), Linux/X11 (XGetImage + XTest). Software H.264
+Platform backends: macOS (ScreenCaptureKit + CGEvent), Linux X11 (XGetImage + XTest) and Linux
+Wayland (PipeWire + xdg-desktop-portal ScreenCast), selected at runtime. Software H.264
 (openh264) today; VideoToolbox/NVENC/etc. behind the same trait next.
 
 ## Security
@@ -157,9 +159,12 @@ Debian/Ubuntu, and plain `.tar.gz` archives — each with a minisign `.minisig`.
 | `RMD_TRAY` | off | `=1` runs the desktop tray (needs `--features tray`) | — |
 | `RMD_SIGNAL_ADDR` | `127.0.0.1:9000` | LAN dev signaling relay (used when no rendezvous URL is set) | — |
 
-The connection password is store-only: `rmdd set password <pw>`. On Linux, X11
-capture/input use **`DISPLAY`** / **`XAUTHORITY`** — point them at the target server
-(e.g. `DISPLAY=:99` for a headless Xvfb).
+The connection password is store-only: `rmdd set password <pw>`. On Linux, the X11
+capture/input path uses **`DISPLAY`** / **`XAUTHORITY`** — point them at the target
+server (e.g. `DISPLAY=:99` for a headless Xvfb). On a Wayland session, screen capture
+instead goes through the xdg-desktop-portal ScreenCast interface: a one-time "share
+your screen" consent, after which a saved restore token re-grants headlessly (no
+prompt) on later connects and across reboots.
 
 **Run `rmdd` as a background service** (per-user; systemd `--user` on Linux, launchd
 on macOS):

@@ -109,10 +109,12 @@ fn x_help_error(underlying: &str) -> CaptureError {
          2. Enable auto-login so a session starts at boot — for GDM, in \
             /etc/gdm3/custom.conf set:\n       \
             [daemon]\n       AutomaticLoginEnable=true\n       AutomaticLogin={user}\n       \
-            WaylandEnable=false      # X11 session; required for capture\n     \
+            WaylandEnable=false\n     \
             then `sudo reboot`.\n\n  \
-         Notes: capture needs an Xorg (X11) session — a Wayland desktop is only \
-         partially visible (XWayland apps). Started over SSH? `rmdd` auto-detects \
+         Notes: this X11/XGetImage path needs an Xorg session (hence \
+         WaylandEnable=false above). On a normal Wayland session you don't need it — \
+         `rmdd` captures the full desktop through the PipeWire/xdg-desktop-portal \
+         backend automatically. Started over SSH? `rmdd` auto-detects \
          DISPLAY/XAUTHORITY once a session exists; otherwise set them, or run \
          `xhost +SI:localuser:{user}` in a desktop terminal."
     ))
@@ -137,15 +139,17 @@ fn collect_auth_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Warn honestly when running under Wayland: X11 capture works via XWayland but
-/// may miss native-Wayland windows/overlays; full Wayland needs the PipeWire
-/// portal backend (roadmap). Silent partial capture would be worse than a note.
+/// Warn when the X11 backend is used on a Wayland session. This only happens with
+/// `RMD_FORCE_X11=1`, since the default routes Wayland to the PipeWire/portal
+/// backend ([`crate::wayland`]) which captures the full desktop. XWayland-based
+/// X11 capture misses native-Wayland surfaces, so point the user back to it.
 fn warn_if_wayland() {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         tracing::warn!(
-            "WAYLAND_DISPLAY is set: capturing via XWayland (X11). Native-Wayland \
-             surfaces may not be captured; a PipeWire/xdg-desktop-portal backend is \
-             the roadmap for full Wayland support."
+            "WAYLAND_DISPLAY is set but the X11 (XWayland) capture backend is in use \
+             (RMD_FORCE_X11); native-Wayland surfaces won't be captured. Unset \
+             RMD_FORCE_X11 to use the PipeWire/xdg-desktop-portal backend, which \
+             captures the full Wayland desktop."
         );
     }
 }
