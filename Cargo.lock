@@ -5339,7 +5339,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-capture"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -5363,7 +5363,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-codec"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "audiopus",
@@ -5378,14 +5378,14 @@ dependencies = [
 
 [[package]]
 name = "rmd-entitlement"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "rmd-host"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "rmd-capture",
@@ -5404,7 +5404,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-input"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "core-foundation 0.10.1",
@@ -5417,7 +5417,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-protocol"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "bytes",
  "prost",
@@ -5428,7 +5428,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-rendezvous"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5457,7 +5457,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-session"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5492,7 +5492,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-signal-dev"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -5504,7 +5504,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-transport"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5522,7 +5522,7 @@ dependencies = [
 
 [[package]]
 name = "rmd-viewer"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "bytemuck",

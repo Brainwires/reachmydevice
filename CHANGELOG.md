@@ -4,6 +4,18 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-08-12
+
+### Fixed
+- **Wayland restore token now persists reliably — capture stays headless across
+  restarts/reboots.** With the non-blocking capture start (0.6.1) the portal grant
+  resolves *after* `resume()`, so the token wasn't available at the old save point
+  and the host re-prompted on every connect (requiring a monitor to approve). The
+  host now captures the token on disconnect (`pause()`), once the grant has
+  resolved, and writes it to the encrypted settings store. After the one-time
+  consent, every later connect — and every connect after a reboot — re-grants with
+  no prompt.
+
 ## [0.6.1] - 2026-08-12
 
 ### Added

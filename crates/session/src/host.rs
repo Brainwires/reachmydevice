@@ -538,7 +538,12 @@ impl CaptureController {
     /// Stop capturing (viewer disconnected) — drops the session, so the OS-level
     /// screen-capture indicator goes away while idle. Idempotent.
     fn pause(&mut self) {
-        if self.handle.take().is_some() {
+        if let Some(handle) = self.handle.take() {
+            // The portal grant resolves asynchronously (non-blocking start), so the
+            // restore token usually isn't available until well after resume(). Grab
+            // it now, as the session ends, and persist it — so the NEXT connect (and
+            // every connect after a restart) re-grants headlessly with no prompt.
+            self.absorb_restore_token(handle.restore_token());
             tracing::info!("capture stopped (no viewer connected)");
         }
     }
