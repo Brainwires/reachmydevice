@@ -364,6 +364,21 @@ fn park_open_relay() -> ! {
     }
 }
 
+/// Whether a host must fail closed (park) because it is an open relay: reachable
+/// through a rendezvous with no access control and no explicit opt-in. Kept as a
+/// pure predicate (env/IO resolved by the caller) so the exact fail-closed rule is
+/// pinned by a regression test — mirrors `session::host::authorization_permits` /
+/// `verify_connect_password`. `require_authorization` already folds in
+/// `RMD_REQUIRE_AUTH` and a non-empty authorized-keys list.
+fn should_park_open_relay(
+    has_rendezvous: bool,
+    require_authorization: bool,
+    has_connect_password: bool,
+    allow_open_relay: bool,
+) -> bool {
+    has_rendezvous && !require_authorization && !has_connect_password && !allow_open_relay
+}
+
 /// Handle the `rmdd set|unset|list` settings subcommands. These load (or
 /// first-run create) the device identity, open the encrypted settings store, and
 /// mutate it — then exit without starting a session. `list` prints keys only,
@@ -1149,11 +1164,12 @@ fn main() -> anyhow::Result<()> {
     // system does not treat as a secret. Refuse to serve unless the operator sets
     // a credential, or explicitly opts into an open relay. LAN/dev signaling
     // (no rendezvous URL) is unaffected.
-    if rendezvous_url.is_some()
-        && !cfg.require_authorization
-        && cfg.connect_password.is_none()
-        && std::env::var("RMD_ALLOW_OPEN_RELAY").is_err()
-    {
+    if should_park_open_relay(
+        rendezvous_url.is_some(),
+        cfg.require_authorization,
+        cfg.connect_password.is_some(),
+        std::env::var("RMD_ALLOW_OPEN_RELAY").is_ok(),
+    ) {
         park_open_relay();
     }
 
@@ -1234,6 +1250,22 @@ mod tests {
     fn earliest_turn_expiry_none_for_unparseable_username() {
         // A non-timestamp leading field must not yield a bogus (tiny) expiry.
         assert_eq!(earliest_turn_expiry(&[turn(Some("not-a-timestamp:x"))]), None);
+    }
+
+    #[test]
+    fn open_relay_parks_only_when_reachable_and_uncontrolled() {
+        // (has_rendezvous, require_authorization, has_connect_password, allow_open_relay)
+        // The one and only park case: internet-reachable with zero access control.
+        assert!(should_park_open_relay(true, false, false, false));
+
+        // Any single mitigation exempts it.
+        assert!(!should_park_open_relay(false, false, false, false)); // LAN/dev, no rendezvous
+        assert!(!should_park_open_relay(true, true, false, false)); // auth gate / authorized-keys
+        assert!(!should_park_open_relay(true, false, true, false)); // connect password set
+        assert!(!should_park_open_relay(true, false, false, true)); // explicit RMD_ALLOW_OPEN_RELAY
+
+        // A fully-configured, opted-in host never parks regardless of combination.
+        assert!(!should_park_open_relay(true, true, true, true));
     }
 
     #[cfg(target_os = "linux")]
