@@ -135,12 +135,14 @@ impl Signaling for RendezvousClient {
     }
 }
 
-/// Restart the process **in place** to shed a wedged system DNS resolver, without
-/// depending on a supervisor. On Unix we `exec` ourselves: same PID (so a launchd/
-/// systemd `KeepAlive` supervisor doesn't double-launch us) but a fresh process
-/// image + resolver connection. If `exec` fails (or non-Unix), fall back to `exit(1)`
-/// so a supervisor, if any, still relaunches us. Never returns.
-fn restart_for_fresh_resolver() -> ! {
+/// Restart the process **in place** for a clean slate — a fresh system DNS
+/// resolver (shedding a wedged `getaddrinfo`) and a fresh startup ICE fetch (so a
+/// host that came up relay-less, or whose TURN credential is expiring, re-acquires
+/// a working relay). On Unix we `exec` ourselves: same PID (so a launchd/systemd
+/// `KeepAlive` supervisor doesn't double-launch us) but a fresh process image. If
+/// `exec` fails (or non-Unix), fall back to `exit(1)` so a supervisor, if any,
+/// still relaunches us. Never returns — callers must ensure no session is active.
+pub fn restart_in_place() -> ! {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -260,7 +262,7 @@ async fn run(
                             "rendezvous unreachable for too long with no active session — \
                              restarting in place for a fresh DNS resolver"
                         );
-                        restart_for_fresh_resolver();
+                        restart_in_place();
                     }
                 }
                 tokio::time::sleep(backoff).await;
