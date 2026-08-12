@@ -4,6 +4,8 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-12
+
 ### Added
 - **Wayland capture reuses the portal grant (headless after first approval).** The
   xdg-desktop-portal ScreenCast session now requests `PersistMode::ExplicitlyRevoked`
