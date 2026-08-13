@@ -199,9 +199,13 @@ async fn broker_loop(
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock)
         .map_err(|e| anyhow::anyhow!("broker: bind {}: {e}", sock.display()))?;
-    // rmd-group members (the greeter + logged-in user, added by `setup-linux
-    // system`) may connect; others can't. Peer-cred below is defense in depth.
-    let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o660));
+    // World-connectable socket, gated by the SO_PEERCRED uid check below — NOT by
+    // file permissions. The display-manager greeter (e.g. GDM) launches with a
+    // stripped supplementary-group set, so it does NOT inherit the `rmd` group and
+    // a group-gated (0660) socket would lock the greeter agent out (EACCES). Peer
+    // credentials are the real gate: only root, regular users, and greeter accounts
+    // are accepted (see `AllowedUids`).
+    let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666));
     tracing::info!(socket = %sock.display(), "broker: listening for capture agents");
 
     let allowed = AllowedUids::detect();

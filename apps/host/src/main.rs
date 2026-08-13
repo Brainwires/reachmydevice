@@ -643,7 +643,7 @@ fn run_setup_system() -> anyhow::Result<()> {
          Restart=always\n\
          RestartSec=3\n\
          RuntimeDirectory=rmd\n\
-         RuntimeDirectoryMode=0750\n\
+         RuntimeDirectoryMode=0755\n\
          NoNewPrivileges=true\n\
          ProtectSystem=strict\n\
          ProtectHome=true\n\
@@ -667,7 +667,7 @@ fn run_setup_system() -> anyhow::Result<()> {
          [Service]\n\
          Type=simple\n\
          ExecStart={exe} agent\n\
-         Restart=on-failure\n\
+         Restart=always\n\
          RestartSec=3\n\n\
          [Install]\n\
          WantedBy=graphical-session.target\n"
