@@ -2,6 +2,25 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
+## [Unreleased]
+
+### Fixed
+- **Host service now starts in the graphical session, not at boot — fixes capture
+  falling back to a broken X11 path after a reboot.** `rmdd enable` generated a
+  systemd user unit `WantedBy=default.target`, so the daemon launched at boot,
+  *before* GNOME imports `WAYLAND_DISPLAY` / `XDG_CURRENT_DESKTOP` /
+  `XDG_SESSION_TYPE` into the user environment. Running with a stale env it failed
+  to detect GNOME/Wayland and fell back to the X11 capture backend, which then died
+  with "Authorization required" (no valid X cookie) — the viewer connected over
+  WebRTC but got no picture. The generated unit is now `WantedBy=graphical-session.target`
+  (+ `PartOf=`), so the daemon inherits the compositor's environment on every login
+  and picks the mutter backend. An explicit-X-server deployment (headless
+  `DISPLAY=:99` Xvfb) still gets a `default.target` unit. `rmdd enable` also now
+  disables the old unit first, so upgrading from a `default.target` install removes
+  the stale `WantedBy` symlink instead of double-starting at boot. The generated
+  unit also gains the `EnvironmentFile=-…/key.env` line the daemon documents relying
+  on. The `deploy/service/rmd-host.service` template got the same treatment.
+
 ## [0.7.0] - 2026-08-12
 
 ### Added
