@@ -194,47 +194,59 @@ pub fn run_host_reporting<F>(
 where
     F: Fn(HostStatus),
 {
+    let transport = spawn_host_transport(&cfg)?;
+    // Security boundary: no screen is encoded/streamed and no input injected until
+    // an accepted Hello sets this. Reset on every (re)connect.
+    let authorized = Arc::new(AtomicBool::new(false));
+    // Digital-zoom crop rect (viewer-driven, via `SetZoom`). Shared by the encode
+    // thread (crops+scales to it) and the input path (remaps pointer coords).
+    let zoom = Arc::new(Mutex::new(codec::CropRect::FULL));
+    // Local capture+encode plane: the default in-process video source.
+    let video: Box<dyn VideoPlane> = Box::new(LocalVideoPlane::start(
+        &cfg,
+        transport.sender(),
+        authorized.clone(),
+        zoom.clone(),
+    )?);
+    run_host_core(cfg, signal, on_status, transport, authorized, zoom, video)
+}
+
+/// Spawn the host's WebRTC transport (offerer role) from `cfg`. Shared by the
+/// single-process host and the system-mode broker.
+pub(crate) fn spawn_host_transport(cfg: &HostConfig) -> anyhow::Result<Transport> {
     let bind_addr = cfg
         .bind_addr
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid bind_addr {:?}: {e}", cfg.bind_addr))?;
-    let transport = Transport::spawn(TransportConfig {
+    Transport::spawn(TransportConfig {
         role: TransportRole::Host,
         ice_servers: cfg.ice_servers.clone(),
         bind_addr,
         video_bitrate_bps: cfg.bitrate_bps,
         video_codec: to_transport_codec(cfg.video_codec),
-    })?;
+    })
+}
 
-    // Force a keyframe on start and whenever a viewer (re)connects.
-    let force_keyframe = Arc::new(AtomicBool::new(true));
-
-    // Capture -> frame channel. The controller owns the capture session so it
-    // can restart on a different display (multi-monitor) without disturbing the
-    // encode thread, which keeps reading the same channel.
-    let (frame_tx, frame_rx) = mpsc::channel();
-    let capture_cfg = capture::CaptureConfig {
-        width: cfg.width,
-        height: cfg.height,
-        fps: cfg.fps,
-        show_cursor: true,
-        restore_token: cfg.screencast_restore_token.clone(),
-        capture_source: cfg.capture_source,
-    };
-    let mut capture_ctl = CaptureController::start(
-        capture_cfg,
-        cfg.display_index,
-        frame_tx,
-        force_keyframe.clone(),
-        cfg.identity.clone(),
-    )?;
+/// The video-source-agnostic host session core: access control, input injection,
+/// clipboard, file transfer, the authorization handshake, and the transport event
+/// loop. The `video` plane is either local capture+encode ([`LocalVideoPlane`],
+/// the default per-user service) or the broker's per-session agent stream
+/// ([`BrokerVideoPlane`]) — everything here is identical for both.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_host_core<F>(
+    cfg: HostConfig,
+    signal: Box<dyn Signaling>,
+    on_status: F,
+    transport: Transport,
+    authorized: Arc<AtomicBool>,
+    zoom: Arc<Mutex<codec::CropRect>>,
+    mut video: Box<dyn VideoPlane>,
+) -> anyhow::Result<()>
+where
+    F: Fn(HostStatus),
+{
     // Whether a viewer's DTLS session is up. Tracks connection lifecycle.
     let connected = Arc::new(AtomicBool::new(false));
-    // Whether the connected viewer has been AUTHORIZED (sent a Hello we accepted).
-    // This is the security boundary: no screen is encoded/streamed, no input is
-    // injected, and no file/clipboard/display action is applied until it's true.
-    // Reset to false on every (re)connect, so each session must re-authorize.
-    let authorized = Arc::new(AtomicBool::new(false));
 
     // Unattended-access policy.
     let access = AccessControl {
@@ -268,44 +280,19 @@ where
         None
     };
 
-    // Digital-zoom crop rect (viewer-driven, via `SetZoom`). Shared by the encode
-    // thread (which crops+scales the video to it) and the input path (which remaps
-    // pointer coords through it, so taps land inside the zoomed region). Default:
-    // no zoom (full screen).
-    let zoom = Arc::new(Mutex::new(codec::CropRect::FULL));
-
-    // Encode thread: frames -> H.264 -> transport, with GCC-driven bitrate.
-    // Gated on `authorized`, so screen content is never streamed to a peer that
-    // has completed DTLS but not been authorized.
-    spawn_encode_thread(
-        &cfg,
-        transport.sender(),
-        force_keyframe.clone(),
-        authorized.clone(),
-        frame_rx,
-        zoom.clone(),
-    )?;
-
     // Input injector (best effort; needs Accessibility permission).
-    // `monitor_rect` places the captured output within the desktop bounding box
-    // for multi-monitor absolute mapping; the capture backend fills it in when it
-    // knows the geometry (else `None` = whole-desktop, and the
-    // `RMD_INPUT_MONITOR_RECT` env override still applies).
-    let monitor_rect = capture::primary_monitor_rect().map(|r| input::MonitorRect {
-        ox: r.ox,
-        oy: r.oy,
-        mw: r.mw,
-        mh: r.mh,
-        dw: r.dw,
-        dh: r.dh,
-    });
-    let mut injector = match input::new_injector(monitor_rect) {
+    // The video plane reports the captured output's placement within the desktop
+    // bounding box for multi-monitor absolute mapping (`None` = whole-desktop, and
+    // the `RMD_INPUT_MONITOR_RECT` env override still applies). The broker plane
+    // can change this on handover to a new agent, so it's rebuildable.
+    let build_injector = |rect: Option<input::MonitorRect>| match input::new_injector(rect) {
         Ok(i) => Some(i),
         Err(e) => {
             tracing::warn!(error=%e, "input injection unavailable (grant Accessibility?)");
             None
         }
     };
+    let mut injector = build_injector(video.monitor_rect());
 
     // Clipboard sync: forward local clipboard changes to the viewer and apply
     // the viewer's. Sends before a viewer connects are dropped by the transport.
@@ -394,6 +381,13 @@ where
             tracing::info!("viewer switched device; rebuilding session with a fresh offer");
             transport.request_ice_restart();
         }
+        // The captured session's geometry changed (broker handover to a new agent
+        // — e.g. greeter -> user login): rebuild the input injector so absolute
+        // pointer mapping matches the new output. Local capture never fires this.
+        if let Some(new_rect) = video.poll_geometry_changed() {
+            tracing::info!("captured session changed; rebuilding input injector");
+            injector = build_injector(new_rect);
+        }
         while let Ok(ev) = file_ev_rx.try_recv() {
             log_file_event(ev);
         }
@@ -434,7 +428,7 @@ where
                 pw_throttle.reset();
                 // Stop capturing so nothing is grabbed (and the OS screen-share
                 // indicator clears) while no viewer is connected.
-                capture_ctl.pause();
+                video.pause();
                 on_status(HostStatus::Ended);
             }
             TransportEvent::Data(bytes) => {
@@ -444,7 +438,7 @@ where
                     &mut injector,
                     &clipboard,
                     &mut files,
-                    &mut capture_ctl,
+                    video.as_mut(),
                     &access,
                     &authorized,
                     remote_fingerprint.as_deref().unwrap_or_default().as_bytes(),
@@ -469,9 +463,118 @@ where
                 // The viewer's RTCP (PLI/FIR) asked for a fresh keyframe after loss.
                 // Force an IDR so it recovers now rather than waiting for the next
                 // periodic keyframe. Cheap and idempotent (a swap-once flag).
-                capture_ctl.force_keyframe.store(true, Ordering::Relaxed);
+                video.request_keyframe();
             }
         }
+    }
+}
+
+/// The video source and capture-control surface behind [`run_host_core`].
+///
+/// Two implementations: [`LocalVideoPlane`] captures+encodes the screen in-process
+/// (the default per-user host), and `BrokerVideoPlane` (system mode) receives
+/// encoded frames from a per-session agent over a Unix socket and relays capture
+/// control to it. The core loop drives either identically.
+///
+/// Not `Send`: the local plane owns a thread-affine capture session, and the plane
+/// only ever lives on the core loop's own thread.
+pub(crate) trait VideoPlane {
+    /// Displays available to offer the viewer.
+    fn descriptors(&self) -> Vec<proto::DisplayDescriptor>;
+    /// Start streaming (viewer authorized).
+    fn resume(&mut self);
+    /// Stop streaming (viewer gone / disconnected).
+    fn pause(&mut self);
+    /// Switch the captured display.
+    fn select(&mut self, id: u32);
+    /// Bake the OS cursor into the captured video, or not.
+    fn set_show_cursor(&mut self, show: bool);
+    /// Emit an IDR now (viewer join / decoder PLI).
+    fn request_keyframe(&mut self);
+    /// The captured output's rect for absolute-pointer mapping, if known.
+    fn monitor_rect(&self) -> Option<input::MonitorRect>;
+    /// Returns `Some(rect)` once when the captured session's geometry changed
+    /// (broker handover to a new agent), so the core rebuilds the input injector.
+    /// Local capture returns `None` — its geometry is fixed for the session.
+    fn poll_geometry_changed(&mut self) -> Option<Option<input::MonitorRect>> {
+        None
+    }
+}
+
+/// The default in-process video plane: local screen capture + H.264 encode feeding
+/// the WebRTC transport. Wraps the [`CaptureController`] (which owns the live
+/// capture session) and the encode thread; both share a `force_keyframe` flag.
+struct LocalVideoPlane {
+    ctl: CaptureController,
+}
+
+impl LocalVideoPlane {
+    /// Start capture (idle until [`resume`](VideoPlane::resume)) and the encode
+    /// thread. `zoom` is shared with the core's input-remap path.
+    fn start(
+        cfg: &HostConfig,
+        sender: TransportSender,
+        authorized: Arc<AtomicBool>,
+        zoom: Arc<Mutex<codec::CropRect>>,
+    ) -> anyhow::Result<Self> {
+        // Force a keyframe on start and whenever a viewer (re)connects. Shared by
+        // the capture controller (sets it on stream restart) and the encode thread.
+        let force_keyframe = Arc::new(AtomicBool::new(true));
+        // Capture -> frame channel. The controller owns the capture session so it
+        // can restart on a different display without disturbing the encode thread,
+        // which keeps reading the same channel.
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let capture_cfg = capture::CaptureConfig {
+            width: cfg.width,
+            height: cfg.height,
+            fps: cfg.fps,
+            show_cursor: true,
+            restore_token: cfg.screencast_restore_token.clone(),
+            capture_source: cfg.capture_source,
+        };
+        let ctl = CaptureController::start(
+            capture_cfg,
+            cfg.display_index,
+            frame_tx,
+            force_keyframe.clone(),
+            cfg.identity.clone(),
+        )?;
+        // Encode thread: frames -> H.264 -> transport, with GCC-driven bitrate.
+        // Gated on `authorized`, so screen content is never streamed to a peer that
+        // has completed DTLS but not been authorized.
+        spawn_encode_thread(cfg, sender, force_keyframe, authorized, frame_rx, zoom)?;
+        Ok(Self { ctl })
+    }
+}
+
+impl VideoPlane for LocalVideoPlane {
+    fn descriptors(&self) -> Vec<proto::DisplayDescriptor> {
+        self.ctl.descriptors()
+    }
+    fn resume(&mut self) {
+        self.ctl.resume();
+    }
+    fn pause(&mut self) {
+        self.ctl.pause();
+    }
+    fn select(&mut self, id: u32) {
+        self.ctl.select(id);
+    }
+    fn set_show_cursor(&mut self, show: bool) {
+        self.ctl.set_show_cursor(show);
+    }
+    fn request_keyframe(&mut self) {
+        self.ctl.force_keyframe.store(true, Ordering::Relaxed);
+    }
+    fn monitor_rect(&self) -> Option<input::MonitorRect> {
+        capture::primary_monitor_rect().map(|r| input::MonitorRect {
+            ox: r.ox,
+            oy: r.oy,
+            mw: r.mw,
+            mh: r.mh,
+            dw: r.dw,
+            dh: r.dh,
+        })
     }
 }
 
@@ -479,7 +582,10 @@ where
 /// (multi-monitor). The encode thread reads a stable frame channel, so switching
 /// displays only swaps the producer — the encoded output size is unchanged
 /// (the backend scales each display to the configured dimensions).
-struct CaptureController {
+///
+/// `pub(crate)` so the system-mode [agent](crate::agent) can reuse it as its
+/// capture source (driven by broker control messages instead of a local viewer).
+pub(crate) struct CaptureController {
     config: capture::CaptureConfig,
     frame_tx: mpsc::Sender<capture::Frame>,
     displays: Vec<capture::DisplayInfo>,
@@ -499,7 +605,7 @@ impl CaptureController {
     /// Prepare the controller **without** starting capture. Enumerates displays
     /// (metadata only — no capture stream, so no sharing indicator) and waits for
     /// [`resume`](Self::resume) when a viewer connects.
-    fn start(
+    pub(crate) fn start(
         config: capture::CaptureConfig,
         display_index: usize,
         frame_tx: mpsc::Sender<capture::Frame>,
@@ -557,7 +663,7 @@ impl CaptureController {
     }
 
     /// Start capturing the current display (viewer connected). Idempotent.
-    fn resume(&mut self) {
+    pub(crate) fn resume(&mut self) {
         if self.handle.is_some() {
             return;
         }
@@ -575,7 +681,7 @@ impl CaptureController {
 
     /// Stop capturing (viewer disconnected) — drops the session, so the OS-level
     /// screen-capture indicator goes away while idle. Idempotent.
-    fn pause(&mut self) {
+    pub(crate) fn pause(&mut self) {
         if let Some(handle) = self.handle.take() {
             // The portal grant resolves asynchronously (non-blocking start), so the
             // restore token usually isn't available until well after resume(). Grab
@@ -605,7 +711,7 @@ impl CaptureController {
     /// renders its own cursor asks for `false` so the pointer isn't subject to the
     /// video pipeline's latency (it draws the cursor locally instead). A no-op when
     /// unchanged, so re-Hellos on the same session don't churn the capture.
-    fn set_show_cursor(&mut self, show: bool) {
+    pub(crate) fn set_show_cursor(&mut self, show: bool) {
         if self.config.show_cursor == show {
             return;
         }
@@ -626,7 +732,7 @@ impl CaptureController {
     }
 
     /// Switch capture to display `id` (a no-op if already current or invalid).
-    fn select(&mut self, id: u32) {
+    pub(crate) fn select(&mut self, id: u32) {
         let idx = id as usize;
         if idx == self.current {
             return;
@@ -829,7 +935,7 @@ fn handle_control(
     injector: &mut Option<Box<dyn input::Injector>>,
     clipboard: &ClipboardSync,
     files: &mut FileTransfers,
-    capture_ctl: &mut CaptureController,
+    video: &mut dyn VideoPlane,
     access: &AccessControl,
     authorized: &AtomicBool,
     channel_binding: &[u8],
@@ -918,8 +1024,8 @@ fn handle_control(
                     // the capture (set before resume so the stream starts cursor-less)
                     // — the pointer is then lag-free client-side, not pipelined video.
                     let client_cursor = h.features & proto::FEATURE_CLIENT_CURSOR != 0;
-                    capture_ctl.set_show_cursor(!client_cursor);
-                    capture_ctl.resume();
+                    video.set_show_cursor(!client_cursor);
+                    video.resume();
                     // Prove the host's identity bound to this DTLS session so the
                     // viewer can authenticate the real endpoint (closes A2 MITM).
                     let ack = match host_identity {
@@ -934,7 +1040,7 @@ fn handle_control(
                     };
                     transport.send_data(Bytes::from(proto::encode(&ack)));
                     // Advertise the host's displays so the viewer can switch monitors.
-                    let list = proto::display_list(capture_ctl.descriptors());
+                    let list = proto::display_list(video.descriptors());
                     transport.send_data(Bytes::from(proto::encode(&list)));
                     tracing::info!(viewer = %h.device_name, "viewer accepted");
                 }
@@ -979,8 +1085,8 @@ fn handle_control(
             transport.send_data(Bytes::from(proto::encode(&pong)));
         }
         Payload::Clipboard(update) => clipboard.apply_remote(update),
-        Payload::RequestKeyframe(_) => capture_ctl.force_keyframe.store(true, Ordering::Relaxed),
-        Payload::SelectDisplay(sel) => capture_ctl.select(sel.id),
+        Payload::RequestKeyframe(_) => video.request_keyframe(),
+        Payload::SelectDisplay(sel) => video.select(sel.id),
         Payload::SetZoom(z) => {
             *zoom.lock().unwrap() = codec::CropRect {
                 x: z.x,

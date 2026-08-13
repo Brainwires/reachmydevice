@@ -117,8 +117,12 @@ pub enum AgentMsg {
 }
 
 /// Broker → agent.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrokerMsg {
+    /// Start (`true`) or stop (`false`) capturing. Gated on viewer authorization:
+    /// an agent MUST NOT capture until told to, so the screen isn't grabbed (nor
+    /// the OS screen-share indicator lit) while no authorized viewer is watching.
+    SetCapturing(bool),
     /// New target bitrate (bits/sec) from the transport's congestion controller.
     SetBitrate(u32),
     /// Emit an IDR now (viewer join / decoder PLI).

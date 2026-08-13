@@ -5621,6 +5621,7 @@ dependencies = [
  "rmd-capture",
  "rmd-codec",
  "rmd-input",
+ "rmd-ipc",
  "rmd-protocol",
  "rmd-rendezvous",
  "rmd-transport",

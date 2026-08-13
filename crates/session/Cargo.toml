@@ -18,6 +18,8 @@ rmd-transport.workspace = true
 rmd-capture.workspace = true
 rmd-codec.workspace = true
 rmd-input.workspace = true
+# Local broker<->agent IPC framing (system-mode broker/agent split).
+rmd-ipc.workspace = true
 bytes.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
