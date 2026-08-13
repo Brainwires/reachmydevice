@@ -178,7 +178,7 @@ async fn run_agent_async(cfg: AgentConfig) -> anyhow::Result<()> {
     };
     let fk_capture = force_keyframe.clone();
     let display_index = cfg.display_index;
-    std::thread::Builder::new()
+    let capture_thread = std::thread::Builder::new()
         .name("rmd-agent-capture".into())
         .spawn(move || {
             let mut ctl = match CaptureController::start(
@@ -224,25 +224,45 @@ async fn run_agent_async(cfg: AgentConfig) -> anyhow::Result<()> {
         let _ = tokio::io::AsyncWriteExt::shutdown(&mut wr).await;
     });
 
+    // SIGTERM arrives on logout/shutdown (the session's graphical-session.target
+    // stops us). Handle it so we tear capture down cleanly instead of being killed
+    // mid-stream — an abruptly-abandoned mutter ScreenCast session can stall GNOME
+    // session teardown (a ~minute-long "stop job" hang on shutdown).
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
     // Reader loop: broker control -> capture-control thread / atomics.
     loop {
-        match rmd_ipc::read_msg::<_, BrokerMsg>(&mut rd).await {
-            Ok(BrokerMsg::SetCapturing(on)) => {
-                let _ = ctrl_tx.send(CaptureCmd::SetCapturing(on));
+        tokio::select! {
+            _ = sigterm.recv() => {
+                tracing::info!("agent: SIGTERM; stopping capture and exiting");
+                break;
             }
-            Ok(BrokerMsg::SetBitrate(bps)) => bitrate.store(bps, Ordering::Relaxed),
-            Ok(BrokerMsg::ForceKeyframe) => force_keyframe.store(true, Ordering::Relaxed),
-            Ok(BrokerMsg::SelectDisplay(id)) => {
-                let _ = ctrl_tx.send(CaptureCmd::Select(id));
+            msg = rmd_ipc::read_msg::<_, BrokerMsg>(&mut rd) => {
+                match msg {
+                    Ok(BrokerMsg::SetCapturing(on)) => {
+                        let _ = ctrl_tx.send(CaptureCmd::SetCapturing(on));
+                    }
+                    Ok(BrokerMsg::SetBitrate(bps)) => bitrate.store(bps, Ordering::Relaxed),
+                    Ok(BrokerMsg::ForceKeyframe) => force_keyframe.store(true, Ordering::Relaxed),
+                    Ok(BrokerMsg::SelectDisplay(id)) => {
+                        let _ = ctrl_tx.send(CaptureCmd::Select(id));
+                    }
+                    Ok(BrokerMsg::SetShowCursor(show)) => {
+                        let _ = ctrl_tx.send(CaptureCmd::SetShowCursor(show));
+                    }
+                    Err(_) => break, // broker closed
+                }
             }
-            Ok(BrokerMsg::SetShowCursor(show)) => {
-                let _ = ctrl_tx.send(CaptureCmd::SetShowCursor(show));
-            }
-            Err(_) => break, // broker closed
         }
     }
-    tracing::info!("agent: broker connection closed; exiting");
+    // Clean teardown: stop capturing, then close the control channel and join the
+    // capture thread so the CaptureController is dropped (mutter Session.Stop runs)
+    // BEFORE the process exits — no dangling ScreenCast session for GNOME to wait on.
+    let _ = ctrl_tx.send(CaptureCmd::SetCapturing(false));
+    drop(ctrl_tx);
+    let _ = capture_thread.join();
     writer.abort();
+    tracing::info!("agent: exited cleanly");
     Ok(())
 }
 

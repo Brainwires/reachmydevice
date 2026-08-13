@@ -642,6 +642,7 @@ fn run_setup_system() -> anyhow::Result<()> {
          ExecStart={exe} broker\n\
          Restart=always\n\
          RestartSec=3\n\
+         TimeoutStopSec=5\n\
          RuntimeDirectory=rmd\n\
          RuntimeDirectoryMode=0755\n\
          NoNewPrivileges=true\n\
@@ -668,7 +669,8 @@ fn run_setup_system() -> anyhow::Result<()> {
          Type=simple\n\
          ExecStart={exe} agent\n\
          Restart=always\n\
-         RestartSec=3\n\n\
+         RestartSec=3\n\
+         TimeoutStopSec=5\n\n\
          [Install]\n\
          WantedBy=graphical-session.target\n"
     );

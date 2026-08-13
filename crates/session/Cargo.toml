@@ -54,7 +54,9 @@ arboard = "3"
 cpal = { version = "0.15", optional = true }
 
 # Rendezvous WebSocket signaling client (runs on its own current-thread runtime).
-tokio = { workspace = true }
+# `signal` lets the broker/agent handle SIGTERM for a clean shutdown (stop capture
+# before exit, so a dangling ScreenCast session can't stall GNOME session teardown).
+tokio = { workspace = true, features = ["signal"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 futures = { workspace = true }
 
