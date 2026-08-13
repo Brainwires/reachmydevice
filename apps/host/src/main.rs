@@ -255,10 +255,7 @@ fn spawn_turn_refresh(servers: &[IceServer], session_active: Arc<AtomicBool>) {
 fn authorized_device_ids() -> Vec<String> {
     let path = std::env::var("RMD_AUTHORIZED_KEYS")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            std::path::PathBuf::from(home).join(".config/rmd/authorized_keys")
-        });
+        .unwrap_or_else(|_| rmd_session::settings::config_dir().join("authorized_keys"));
     match std::fs::read_to_string(&path) {
         Ok(s) => s
             .lines()
@@ -273,8 +270,7 @@ fn authorized_device_ids() -> Vec<String> {
 /// host's identity to viewers (bound to the DTLS session). Encrypted at rest when
 /// `RMD_KEY_PASSPHRASE` is set.
 fn identity_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::path::PathBuf::from(home).join(".config/rmd/identity.key")
+    rmd_session::settings::config_dir().join("identity.key")
 }
 
 fn load_host_identity() -> Option<std::sync::Arc<rmd_session::DeviceIdentity>> {
@@ -305,10 +301,7 @@ fn read_token(
     }
     let path = std::env::var("RMD_TOKEN_FILE")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            std::path::PathBuf::from(home).join(".config/rmd/token")
-        });
+        .unwrap_or_else(|_| rmd_session::settings::config_dir().join("token"));
     if let Ok(s) = std::fs::read_to_string(&path) {
         return Ok(zeroize::Zeroizing::new(s.trim().to_string()));
     }

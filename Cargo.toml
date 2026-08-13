@@ -8,6 +8,7 @@ members = [
     "crates/capture",
     "crates/codec",
     "crates/input",
+    "crates/ipc",
     "crates/session",
     "crates/entitlement",
     "apps/host",
@@ -47,6 +48,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Compact binary serde codec for the local broker↔agent IPC (rmd-ipc). Pure Rust.
+postcard = { version = "1", features = ["use-std"] }
 prost = "0.13"
 prost-build = "0.13"
 # Pure-Rust protoc replacement (produces a FileDescriptorSet for prost-build).
@@ -57,6 +60,7 @@ rmd-transport = { path = "crates/transport" }
 rmd-capture = { path = "crates/capture" }
 rmd-codec = { path = "crates/codec" }
 rmd-input = { path = "crates/input" }
+rmd-ipc = { path = "crates/ipc" }
 rmd-session = { path = "crates/session" }
 # Relay-entitlement seam: the open-source default is `AllowAll`; a private plugin
 # can inject a paid policy when composing the server (see apps/rendezvous).

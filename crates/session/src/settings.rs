@@ -175,9 +175,25 @@ fn decrypt(identity: &DeviceIdentity, blob: &[u8]) -> anyhow::Result<BTreeMap<St
     Ok(serde_json::from_slice(&pt)?)
 }
 
-/// Config dir mirroring the host's identity/token location: `$XDG_CONFIG_HOME/rmd`
-/// if set, else `$HOME/.config/rmd`.
-fn config_dir() -> PathBuf {
+/// The directory holding this host's identity, settings, and token.
+///
+/// Resolution order:
+/// 1. `RMD_STATE_DIR` — used verbatim (no `rmd` suffix). The **system-mode
+///    broker** points this at `/var/lib/rmd`, a path owned by the dedicated `rmd`
+///    user rather than any human's home. This must be checked first so a broker
+///    running as `rmd` (which may still have a `$HOME`/`XDG_CONFIG_HOME`) reads
+///    the system store, not a stray per-user one.
+/// 2. `$XDG_CONFIG_HOME/rmd` if set.
+/// 3. `$HOME/.config/rmd`.
+///
+/// All four secret locations (settings.enc, identity.key, token, authorized_keys)
+/// derive from this, so the broker and CLI agree on where state lives.
+pub fn config_dir() -> PathBuf {
+    if let Ok(state) = std::env::var("RMD_STATE_DIR") {
+        if !state.is_empty() {
+            return PathBuf::from(state);
+        }
+    }
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
             return PathBuf::from(xdg).join("rmd");
