@@ -2,7 +2,7 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
-## [Unreleased]
+## [0.7.1] - 2026-08-13
 
 ### Fixed
 - **Host service now starts in the graphical session, not at boot — fixes capture
