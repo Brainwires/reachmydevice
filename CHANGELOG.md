@@ -5,19 +5,25 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 ## [Unreleased]
 
 ### Added
-- **System mode: remote login-screen access + seamless session handover (opt-in).**
+- **System mode: unattended remote login + seamless session handover (opt-in).**
   A new `rmdd setup-linux system` installs a **broker/agent split**: a broker system
   service (dedicated non-root `rmd` user) owns the network (WebRTC + rendezvous +
   identity/token) and input injection, while a per-session **agent** captures+encodes
   the screen and streams it to the broker over a local Unix socket (`rmd-ipc`, a new
-  crate). Because the same agent runs in the GDM greeter (as `gdm`) and in the
-  logged-in session, you can now **see and drive the login screen remotely** and the
-  video **hands over** to the user session on login without dropping the viewer's
-  connection. The agent auto-detects its capture backend from the session it's
-  launched into (GNOME/mutter, X11, Plasma/portal), so whichever session is selected
-  at the greeter is captured correctly. New daemon verbs `rmdd broker` and
-  `rmdd agent` (Linux). The existing single per-user service is unchanged and remains
-  the default; system mode is entirely opt-in.
+  crate). The broker keeps the viewer's connection alive as agents come and go, so
+  login is a **seamless handover**. The agent auto-detects its capture backend from
+  the session it runs in (GNOME/mutter, X11, Plasma/portal). New daemon verbs
+  `rmdd broker` and `rmdd agent` (Linux). The existing single per-user service is
+  unchanged and remains the default; system mode is entirely opt-in.
+- **Lock-gated auto-login (secure unattended access).** The GDM login screen can't be
+  captured (mutter inhibits ScreenCast behind the lock shield — it needs the privileged
+  RemoteDesktop handover API). Instead, system mode enables GDM **auto-login** but the
+  agent keeps the session **locked**: an authenticated remote viewer unlocks it
+  passwordlessly (via `loginctl`, as the session's own user) and it re-locks on
+  disconnect, while an idle-inhibitor prevents mid-session relock. Local/physical access
+  still always requires the account password (PAM). More secure than plain auto-login.
+  Caveats (see README-LINUX.md): a brief unlocked window at boot before the first lock
+  (use manual login if physically threatened); the auto-login keyring stays locked.
 - **`RMD_STATE_DIR`** overrides the state/secret directory (identity.key, settings.enc,
   token, authorized_keys), used by the broker to read from `/var/lib/rmd` instead of a
   per-user home. Unified the four secret paths onto one resolver.
