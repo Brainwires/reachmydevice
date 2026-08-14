@@ -100,6 +100,111 @@ fn detect_backend() -> BackendKind {
     }
 }
 
+/// Lock-gated capture. In the auto-login deployment the session boots logged-in
+/// but is kept **locked** for physical security; an authenticated remote viewer
+/// unlocks it (no password — logind lets a session's own user unlock it, the same
+/// path fingerprint readers use), and it re-locks on disconnect. Enabled by
+/// `RMD_SESSION_LOCK=1` (set by the agent unit); a no-op otherwise, so a normal
+/// interactive login is never touched.
+struct SessionGate {
+    enabled: bool,
+    session_id: Option<String>,
+    /// Held `systemd-inhibit --what=idle` child, so GNOME's idle timer can't
+    /// re-lock the screen mid-session while a viewer is connected.
+    idle_inhibit: Option<std::process::Child>,
+}
+
+impl SessionGate {
+    fn new() -> Self {
+        let enabled = matches!(std::env::var("RMD_SESSION_LOCK").as_deref(), Ok("1"));
+        let session_id = std::env::var("XDG_SESSION_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(detect_session_id);
+        if enabled && session_id.is_none() {
+            tracing::warn!("RMD_SESSION_LOCK set but no logind session id found; lock-gating disabled");
+        }
+        Self { enabled, session_id, idle_inhibit: None }
+    }
+
+    fn loginctl(&self, verb: &str) {
+        let Some(id) = &self.session_id else { return };
+        let ok = std::process::Command::new("loginctl")
+            .arg(verb)
+            .arg(id)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            tracing::info!(session = %id, "session {verb}");
+        } else {
+            tracing::warn!(session = %id, "loginctl {verb} failed");
+        }
+    }
+
+    /// Lock the session (physical security when no viewer is connected).
+    fn lock(&mut self) {
+        if self.enabled {
+            self.loginctl("lock-session");
+        }
+    }
+
+    /// Unlock the session (viewer connected) and inhibit the idle-lock. Returns
+    /// after a short delay so gnome-shell has dismissed the lock shield before
+    /// capture starts (mutter inhibits ScreenCast until then).
+    fn unlock(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        self.loginctl("unlock-session");
+        if self.idle_inhibit.is_none() {
+            match std::process::Command::new("systemd-inhibit")
+                .args([
+                    "--what=idle",
+                    "--who=rmdd",
+                    "--why=remote session active",
+                    "--mode=block",
+                    "sleep",
+                    "infinity",
+                ])
+                .spawn()
+            {
+                Ok(child) => self.idle_inhibit = Some(child),
+                Err(e) => tracing::warn!(error=%e, "could not inhibit idle-lock"),
+            }
+        }
+        // Let gnome-shell drop the lock shield before we try to capture.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    /// Release the idle inhibitor (viewer gone).
+    fn release_idle(&mut self) {
+        if let Some(mut child) = self.idle_inhibit.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Best-effort: find this user's graphical seat0 session via logind, when
+/// `XDG_SESSION_ID` isn't in the service environment.
+fn detect_session_id() -> Option<String> {
+    // SAFETY: getuid is always safe.
+    let uid = unsafe { libc::getuid() };
+    let out = std::process::Command::new("loginctl")
+        .args(["list-sessions", "--no-legend", "--no-pager"])
+        .output()
+        .ok()?;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        // Columns: SESSION UID USER SEAT ...
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() >= 4 && cols[1] == uid.to_string() && cols[3] == "seat0" {
+            return Some(cols[0].to_string());
+        }
+    }
+    None
+}
+
 /// Control commands the socket-reader forwards to the capture-control thread
 /// (which owns the non-`Send` [`CaptureController`]).
 enum CaptureCmd {
@@ -108,9 +213,42 @@ enum CaptureCmd {
     SetShowCursor(bool),
 }
 
+/// Is this a display-manager greeter (login screen) session? The greeter cannot be
+/// captured via ScreenCast (mutter inhibits it behind the lock shield — it needs
+/// the privileged RemoteDesktop handover API we don't implement yet), so the agent
+/// must not run there: it would only churn and, with lock-gating on, try to lock
+/// the greeter itself.
+fn is_greeter_session() -> bool {
+    // logind's session class is authoritative.
+    if let Ok(id) = std::env::var("XDG_SESSION_ID") {
+        if let Ok(out) = std::process::Command::new("loginctl")
+            .args(["show-session", &id, "-p", "Class", "--value"])
+            .output()
+        {
+            if String::from_utf8_lossy(&out.stdout).trim() == "greeter" {
+                return true;
+            }
+        }
+    }
+    if matches!(std::env::var("XDG_SESSION_CLASS").as_deref(), Ok("greeter")) {
+        return true;
+    }
+    // Heuristic fallback: GDM's greeter runs from an ephemeral gdm home.
+    matches!(std::env::var("HOME"), Ok(h) if h.starts_with("/run/gdm") || h.contains("gdm-greeter"))
+}
+
 /// Run the capture agent: connect to the broker, announce the session, then
 /// capture+encode and stream frames until the broker or session goes away.
 pub fn run_agent(cfg: AgentConfig) -> anyhow::Result<()> {
+    if is_greeter_session() {
+        // Exit cleanly with a distinct code; the unit's RestartPreventExitStatus=3
+        // stops systemd from restart-looping us in the greeter.
+        tracing::info!(
+            "agent: greeter/login-screen session — capture needs the RemoteDesktop \
+             handover API (unsupported); not running here"
+        );
+        std::process::exit(3);
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -194,14 +332,32 @@ async fn run_agent_async(cfg: AgentConfig) -> anyhow::Result<()> {
                     return;
                 }
             };
+            // Lock-gating (auto-login deployment): keep the auto-logged-in session
+            // locked at rest; unlock only while a viewer is connected.
+            let mut gate = SessionGate::new();
+            gate.lock();
             while let Ok(cmd) = ctrl_rx.recv() {
                 match cmd {
-                    CaptureCmd::SetCapturing(true) => ctl.resume(),
-                    CaptureCmd::SetCapturing(false) => ctl.pause(),
+                    CaptureCmd::SetCapturing(true) => {
+                        // Unlock (passwordless) + inhibit idle-lock BEFORE capture,
+                        // so mutter stops inhibiting ScreenCast.
+                        gate.unlock();
+                        ctl.resume();
+                    }
+                    CaptureCmd::SetCapturing(false) => {
+                        ctl.pause();
+                        gate.release_idle();
+                        gate.lock();
+                    }
                     CaptureCmd::Select(id) => ctl.select(id),
                     CaptureCmd::SetShowCursor(show) => ctl.set_show_cursor(show),
                 }
             }
+            // Thread ending (agent shutting down): drop capture and re-lock so we
+            // never leave the session unlocked behind us.
+            drop(ctl);
+            gate.release_idle();
+            gate.lock();
             tracing::info!("agent: capture-control thread ended");
         })?;
 

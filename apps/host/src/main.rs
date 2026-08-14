@@ -667,10 +667,16 @@ fn run_setup_system() -> anyhow::Result<()> {
          PartOf=graphical-session.target\n\n\
          [Service]\n\
          Type=simple\n\
+         # Lock-gating: keep the auto-login session locked at rest; an authenticated\n\
+         # remote viewer unlocks it (passwordless, via logind) and it re-locks on\n\
+         # disconnect. Physical hardware stays locked unless a remote session opened it.\n\
+         Environment=RMD_SESSION_LOCK=1\n\
          ExecStart={exe} agent\n\
          Restart=always\n\
          RestartSec=3\n\
-         TimeoutStopSec=5\n\n\
+         TimeoutStopSec=5\n\
+         # Exit 3 = 'greeter session, nothing to do' — don't restart-loop there.\n\
+         RestartPreventExitStatus=3\n\n\
          [Install]\n\
          WantedBy=graphical-session.target\n"
     );
@@ -687,20 +693,87 @@ fn run_setup_system() -> anyhow::Result<()> {
         sudo_run(&["usermod", "-aG", "rmd", &user])?;
     }
 
-    // 7. Reload + enable (do NOT start: starting now would race the still-running
-    //    per-user service for the same device token, and the group changes need a
-    //    fresh session anyway).
+    // 7. Enable GDM auto-login for this user. The login screen can't be captured
+    //    (mutter inhibits ScreenCast behind the lock shield), so instead the box
+    //    auto-logs-in and the agent keeps the session LOCKED at rest — an
+    //    authenticated remote viewer unlocks it (passwordless, via logind) and it
+    //    re-locks on disconnect. Physical hardware stays locked; more secure than
+    //    plain auto-login.
+    enable_gdm_autologin(&user)?;
+
+    // 8. Reload + enable (do NOT start: starting now would race the still-running
+    //    per-user service for the same device token, and auto-login + group changes
+    //    need a fresh boot anyway).
     sudo_run(&["systemctl", "daemon-reload"])?;
     sudo_run(&["systemctl", "enable", "rmd-broker.service"])?;
     sudo_run(&["systemctl", "--global", "enable", "rmd-agent.service"])?;
 
-    println!("\n✓ System mode installed (broker + agent units enabled, not started).");
+    println!("\n✓ System mode installed (broker + agent enabled; auto-login + lock-gating on).");
+    println!("Security model: the box auto-logs-in but the session stays LOCKED; only an");
+    println!("authenticated remote connection unlocks it, and it re-locks on disconnect.");
     println!("Next steps — verify remote access still works, THEN:");
     println!("  1. Stop the per-user host so it doesn't fight the broker for the device:");
     println!("       rmdd disable");
-    println!("  2. Reboot so the greeter + your session pick up the `rmd` group:");
+    println!("  2. Reboot:");
     println!("       sudo reboot");
-    println!("  After reboot the broker runs at boot and you can reach the LOGIN SCREEN remotely.");
+    println!("  After reboot: the box sits locked; connect remotely to unlock + control it.");
+    Ok(())
+}
+
+/// Enable GDM auto-login for `user` in `/etc/gdm3/custom.conf` (idempotent;
+/// timestamped backup). Auto-login only dodges the un-capturable greeter — the
+/// agent's lock-gating is what keeps the box secure. A no-op if GDM isn't present.
+#[cfg(target_os = "linux")]
+fn enable_gdm_autologin(user: &str) -> anyhow::Result<()> {
+    const CONF: &str = "/etc/gdm3/custom.conf";
+    if !std::path::Path::new(CONF).exists() {
+        println!("  (no {CONF}; enable auto-login manually for your display manager)");
+        return Ok(());
+    }
+    let content = match std::fs::read_to_string(CONF) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("  (could not read {CONF}: {e}; enable auto-login manually)");
+            return Ok(());
+        }
+    };
+    let want_enable = "AutomaticLoginEnable=true";
+    let want_user = format!("AutomaticLogin={user}");
+    if content.lines().any(|l| l.trim() == want_enable)
+        && content.lines().any(|l| l.trim() == want_user)
+    {
+        println!("  auto-login already enabled for {user}");
+        return Ok(());
+    }
+    // Rebuild: drop any prior uncommented AutomaticLogin* lines, inject fresh ones
+    // right after the [daemon] header (leave commented examples as-is).
+    let mut out = String::new();
+    let mut injected = false;
+    for line in content.lines() {
+        let t = line.trim_start();
+        if t.starts_with("AutomaticLoginEnable=") || t.starts_with("AutomaticLogin=") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+        if line.trim() == "[daemon]" && !injected {
+            out.push_str(want_enable);
+            out.push('\n');
+            out.push_str(&want_user);
+            out.push('\n');
+            injected = true;
+        }
+    }
+    if !injected {
+        out.push_str(&format!("\n[daemon]\n{want_enable}\n{want_user}\n"));
+    }
+    sudo_run(&[
+        "sh",
+        "-c",
+        &format!("cp -n {CONF} {CONF}.rmd-bak 2>/dev/null || true"),
+    ])?;
+    sudo_write_file(CONF, out.as_bytes())?;
+    println!("  enabled GDM auto-login for {user}");
     Ok(())
 }
 
