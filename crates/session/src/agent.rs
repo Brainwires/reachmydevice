@@ -142,11 +142,41 @@ impl SessionGate {
         }
     }
 
-    /// Lock the session (physical security when no viewer is connected).
+    /// Whether logind reports the session locked.
+    fn is_locked(&self) -> bool {
+        let Some(id) = &self.session_id else { return false };
+        std::process::Command::new("loginctl")
+            .args(["show-session", id, "-p", "LockedHint", "--value"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "yes")
+            .unwrap_or(false)
+    }
+
+    /// Lock the session and keep retrying until it actually takes. Right after
+    /// (auto-)login gnome-shell's screensaver may not be ready yet and silently
+    /// drops the lock request, leaving the box unlocked — so we re-issue the lock
+    /// and poll `LockedHint` until it sticks (bounded, ~18s).
     fn lock(&mut self) {
-        if self.enabled {
-            self.loginctl("lock-session");
+        if !self.enabled {
+            return;
         }
+        if self.is_locked() {
+            return;
+        }
+        for round in 0..6 {
+            self.loginctl("lock-session");
+            for _ in 0..6 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if self.is_locked() {
+                    if round > 0 {
+                        tracing::info!("session locked (took {} retr{})", round + 1, if round == 0 { "y" } else { "ies" });
+                    }
+                    return;
+                }
+            }
+        }
+        tracing::warn!("session did not lock after retries (gnome-shell not ready?)");
     }
 
     /// Unlock the session (viewer connected) and inhibit the idle-lock. Returns
