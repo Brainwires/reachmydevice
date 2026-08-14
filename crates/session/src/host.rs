@@ -665,6 +665,11 @@ impl CaptureController {
     }
 
     /// Start capturing the current display (viewer connected). Idempotent.
+    /// Whether a capture session is currently live.
+    pub(crate) fn is_capturing(&self) -> bool {
+        self.handle.is_some()
+    }
+
     pub(crate) fn resume(&mut self) {
         if self.handle.is_some() {
             return;
