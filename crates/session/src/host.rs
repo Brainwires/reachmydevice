@@ -665,7 +665,9 @@ impl CaptureController {
     }
 
     /// Start capturing the current display (viewer connected). Idempotent.
-    /// Whether a capture session is currently live.
+    /// Whether a capture session is currently live. Used by the system-mode agent
+    /// (Linux) to retry capture start after unlocking; unused elsewhere.
+    #[cfg(target_os = "linux")]
     pub(crate) fn is_capturing(&self) -> bool {
         self.handle.is_some()
     }
