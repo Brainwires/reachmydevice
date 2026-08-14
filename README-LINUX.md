@@ -11,6 +11,12 @@ disconnect/reconnect while headless), this is for you.
 > Tested on Ubuntu with GNOME Shell / mutter **50.1**, GDM **50.1**, Intel **i915**,
 > kernel driving two HDMI outputs. The concepts apply to any GNOME/Wayland host.
 
+> **New in 0.8.0 — System mode (`rmdd setup-linux system`).** An opt-in broker +
+> per-session agent split that survives logout, hands the session over seamlessly,
+> and makes an **auto-login box secure by keeping it locked** until an authenticated
+> remote connection unlocks it. See [System mode](#system-mode-08--unattended-remote-login)
+> below. The display/monitor guidance in this document still applies underneath it.
+
 ---
 
 ## TL;DR
@@ -342,3 +348,102 @@ busctl --user call org.gnome.Mutter.DisplayConfig /org/gnome/Mutter/DisplayConfi
 | User session     | `~/.config/monitors.xml`                 | mirror + dongle-only, 1440×900      |
 | rmdd capture     | mutter primary logical monitor           | captures the dongle @ 1440×900      |
 | H.264 encoder    | frame width/height                       | keep ≤ 3840 wide                     |
+
+---
+
+## System mode (0.8) — unattended remote login
+
+The default `rmdd` is **one per-user service** that only works once you're logged in.
+**System mode** is an opt-in split that makes the box reachable **from boot**, survives
+logout, and keeps an auto-login machine **physically secure**. Enable it with:
+
+```sh
+rmdd setup-linux system     # sudo; never auto-starts or reboots — prints next steps
+```
+
+### What it is (broker + agent)
+
+- **Broker** — a **system** service running as a dedicated **non-root `rmd` user**
+  (`/etc/systemd/system/rmd-broker.service`). It owns the network (WebRTC + rendezvous
+  + device identity/token) and **input injection** (uinput). Always on, from boot.
+- **Agent** — a **per-session** service (`/etc/systemd/user/rmd-agent.service`, a
+  *system-wide* user unit, so it runs in every graphical session). It captures + encodes
+  the screen and streams **encoded H.264** to the broker over a Unix socket
+  (`/run/rmd/agent.sock`). It holds **no secrets**.
+
+The broker keeps the viewer's connection alive while agents come and go, so a login is a
+**seamless handover**. The agent auto-detects its capture backend from the session it's
+in (GNOME/mutter, X11, Plasma/portal), so whichever session you pick is captured.
+
+### The security model — lock-gated auto-login
+
+The GDM **login screen cannot be captured** (see the limitation below), so system mode
+instead **enables GDM auto-login** and keeps the session **locked**:
+
+1. Boot → **auto-login** into your Wayland session (no greeter to capture).
+2. The agent **locks the session immediately** → the box sits at a normal password lock.
+3. An **authenticated** remote viewer (device token **+** connection password) connects →
+   the agent **unlocks the session with no password** (via `loginctl unlock-session`, the
+   same path fingerprint readers use — a session's own user may unlock it) and starts
+   capture. It also holds a `systemd-inhibit --what=idle` lock so GNOME can't idle-lock
+   mid-session.
+4. Remote disconnects → capture stops, session **re-locks**.
+
+**Result:** local/physical access **always requires your account password** (verified live
+by PAM — auto-login does not weaken this); remote access is software-gated by the
+connection's own authentication. This is **more secure than plain auto-login**.
+
+> Set a strong **connection password** first — it's what authorizes the remote unlock:
+> `rmdd set password <pw>`.
+
+### Caveats (read these)
+
+- **Brief unlocked window at boot.** Between auto-login and the agent's first successful
+  lock (~1–2 s, while gnome-shell's screensaver becomes ready) the session is momentarily
+  unlocked. A physical attacker with a **USB HID-injection tool** could act in that window.
+  It's small and self-closing, but real. **If your box faces a physical-attack threat, do
+  not use auto-login** — log in manually (lock-gating still works; there's just no boot
+  window). The agent locks *and verifies the lock took*, retrying until it sticks.
+- **Login keyring stays locked** (an inherent auto-login effect). The GNOME login keyring
+  is encrypted with your login password, which auto-login never enters, so apps may prompt
+  to unlock it. This is **independent of the screen lock** and of your account password.
+  To silence it, empty the *keyring* password (Seahorse → *Passwords and Keys* →
+  **Login** → *Change Password* → blank) — this only affects keyring-at-rest encryption,
+  **not** your account/login/sudo password or the screen lock.
+- **The login screen itself is not remotely viewable.** mutter refuses ScreenCast behind
+  the lock shield (`Session creation inhibited`); the greeter is the same state. Showing
+  the actual GDM greeter needs GNOME's privileged **RemoteDesktop handover** API (what
+  `gnome-remote-desktop`'s system "Remote Login" uses) — not implemented here. Lock-gated
+  auto-login is our answer instead. The agent detects a greeter session and exits (no
+  churn).
+
+### Operating it
+
+```sh
+# Broker (system service)
+systemctl status rmd-broker            # state
+sudo journalctl -u rmd-broker -b       # logs (viewer connects, handovers)
+
+# Agent (your session)
+systemctl --user status rmd-agent
+sudo journalctl _SYSTEMD_USER_UNIT=rmd-agent.service -b   # lock/unlock + capture
+
+# Is the session locked right now?
+loginctl show-session "$XDG_SESSION_ID" -p LockedHint
+```
+
+**Revert to the plain per-user service:** `sudo systemctl disable --now rmd-broker`,
+`systemctl --global disable rmd-agent`, remove auto-login from `/etc/gdm3/custom.conf`
+(a `.rmd-bak` backup was saved), then `rmdd enable`.
+
+### What `setup-linux system` creates
+
+| Path | Purpose |
+|------|---------|
+| user `rmd` + group `rmd`   | non-root identity the broker runs as (in `input` for uinput) |
+| `/var/lib/rmd/`            | device identity/token/settings (migrated from `~/.config/rmd`) |
+| `/etc/rmd/key.env`         | at-rest passphrase, read by the broker unit's `EnvironmentFile` |
+| `/etc/systemd/system/rmd-broker.service` | the broker (system) |
+| `/etc/systemd/user/rmd-agent.service`    | the agent (all graphical sessions; `RMD_SESSION_LOCK=1`) |
+| `/run/rmd/agent.sock`      | broker↔agent socket (peer-cred gated; `0666` because the greeter runs group-stripped) |
+| `/etc/gdm3/custom.conf`    | `AutomaticLogin=<user>` (backup at `.rmd-bak`) |

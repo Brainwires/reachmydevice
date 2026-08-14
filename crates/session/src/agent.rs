@@ -106,6 +106,14 @@ fn detect_backend() -> BackendKind {
 /// path fingerprint readers use), and it re-locks on disconnect. Enabled by
 /// `RMD_SESSION_LOCK=1` (set by the agent unit); a no-op otherwise, so a normal
 /// interactive login is never touched.
+///
+/// SECURITY CAVEAT: with auto-login there is a brief (~1–2s) window at boot between
+/// the session starting unlocked and the first lock taking effect (gnome-shell's
+/// screensaver must be ready first — see [`lock`](Self::lock)'s retry). A physical
+/// attacker with a USB HID-injection tool could act in that window. It's small and
+/// self-closing; a box facing a physical-attack threat should use manual login (no
+/// auto-login) instead, which removes the window entirely. Documented in
+/// README-LINUX.md.
 struct SessionGate {
     enabled: bool,
     session_id: Option<String>,
