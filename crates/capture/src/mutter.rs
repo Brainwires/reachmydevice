@@ -16,7 +16,7 @@
 //! session's default PipeWire socket and reuse [`crate::wayland::pw_run`] with
 //! that node id. GNOME-only; other compositors use the portal backend.
 
-use crate::wayland::{pw_run, PwConnect};
+use crate::wayland::{PwConnect, pw_run};
 use crate::{CaptureConfig, CaptureSession, CaptureSource, DisplayInfo, FrameSink};
 use futures_util::StreamExt;
 use pipewire as pw;
@@ -39,7 +39,11 @@ const HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 /// the source. Advertise a single logical display (real size comes from PipeWire
 /// format negotiation).
 pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
-    Ok(vec![DisplayInfo { index: 0, width: 0, height: 0 }])
+    Ok(vec![DisplayInfo {
+        index: 0,
+        width: 0,
+        height: 0,
+    }])
 }
 
 /// A running mutter-direct capture. Dropping (or [`stop`](CaptureSession::stop))
@@ -104,12 +108,23 @@ pub fn start_capture(
                 Err(_) => return, // dbus thread gone
             };
             tracing::info!(node_id, "mutter-direct capture streaming");
-            if let Err(e) = pw_run(PwConnect::Default, node_id, fps, width, height, sink, pw_quit_rx) {
+            if let Err(e) = pw_run(
+                PwConnect::Default,
+                node_id,
+                fps,
+                width,
+                height,
+                sink,
+                pw_quit_rx,
+            ) {
                 tracing::error!(error = %e, "PipeWire capture loop ended with error");
             }
         })?;
 
-    tracing::info!(virtual_source = want_virtual, "GNOME mutter-direct capture started");
+    tracing::info!(
+        virtual_source = want_virtual,
+        "GNOME mutter-direct capture started"
+    );
     Ok(Box::new(MutterCaptureSession {
         pw_quit,
         shutdown: Some(shutdown_tx),
@@ -127,7 +142,10 @@ fn dbus_thread_main(
     ready_tx: std::sync::mpsc::Sender<Result<u32, String>>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             let _ = ready_tx.send(Err(format!("tokio runtime: {e}")));
@@ -142,7 +160,13 @@ fn dbus_thread_main(
 
             // CreateSession -> session object path.
             let sess: zbus::zvariant::OwnedObjectPath = conn
-                .call_method(Some(DEST), SC_PATH, Some(SC_IFACE), "CreateSession", &(empty_props(),))
+                .call_method(
+                    Some(DEST),
+                    SC_PATH,
+                    Some(SC_IFACE),
+                    "CreateSession",
+                    &(empty_props(),),
+                )
                 .await?
                 .body()
                 .deserialize()?;
@@ -153,10 +177,16 @@ fn dbus_thread_main(
             let mut props = HashMap::<&str, Value>::new();
             props.insert("cursor-mode", Value::U32(if show_cursor { 1 } else { 0 }));
             let stream: zbus::zvariant::OwnedObjectPath = if want_virtual {
-                conn.call_method(Some(DEST), sess.as_str(), Some(SESSION_IFACE), "RecordVirtual", &(props,))
-                    .await?
-                    .body()
-                    .deserialize()?
+                conn.call_method(
+                    Some(DEST),
+                    sess.as_str(),
+                    Some(SESSION_IFACE),
+                    "RecordVirtual",
+                    &(props,),
+                )
+                .await?
+                .body()
+                .deserialize()?
             } else {
                 let connector = primary_connector(&conn).await.ok_or_else(|| {
                     anyhow::anyhow!(
@@ -181,8 +211,7 @@ fn dbus_thread_main(
             let stream = stream.as_str().to_owned();
 
             // Subscribe to PipeWireStreamAdded BEFORE Start so we don't miss it.
-            let stream_proxy =
-                zbus::Proxy::new(&conn, DEST, stream.as_str(), STREAM_IFACE).await?;
+            let stream_proxy = zbus::Proxy::new(&conn, DEST, stream.as_str(), STREAM_IFACE).await?;
             let mut added = stream_proxy.receive_signal("PipeWireStreamAdded").await?;
 
             conn.call_method(Some(DEST), sess.as_str(), Some(SESSION_IFACE), "Start", &())
@@ -289,9 +318,25 @@ fn empty_props() -> HashMap<&'static str, Value<'static>> {
 // `org.gnome.Mutter.DisplayConfig.GetCurrentState` reply signature:
 //   (u  a((ssss)a(siiddada{sv})a{sv})  a(iiduba(ssss)a{sv})  a{sv})
 type MonId = (String, String, String, String);
-type Mode = (String, i32, i32, f64, f64, Vec<f64>, HashMap<String, OwnedValue>);
+type Mode = (
+    String,
+    i32,
+    i32,
+    f64,
+    f64,
+    Vec<f64>,
+    HashMap<String, OwnedValue>,
+);
 type Monitor = (MonId, Vec<Mode>, HashMap<String, OwnedValue>);
-type Logical = (i32, i32, f64, u32, bool, Vec<MonId>, HashMap<String, OwnedValue>);
+type Logical = (
+    i32,
+    i32,
+    f64,
+    u32,
+    bool,
+    Vec<MonId>,
+    HashMap<String, OwnedValue>,
+);
 type DisplayState = (u32, Vec<Monitor>, Vec<Logical>, HashMap<String, OwnedValue>);
 
 async fn get_current_state(conn: &zbus::Connection) -> Option<DisplayState> {
@@ -362,15 +407,14 @@ async fn compute_monitor_rect(conn: &zbus::Connection) -> Option<crate::MonitorR
     // else its first/preferred mode).
     let mode_px = |mon_id: &MonId| -> Option<(f64, f64)> {
         let m = state.1.iter().find(|mm| &mm.0 == mon_id)?;
-        let cur = m
-            .1
-            .iter()
-            .find(|md| {
-                md.6.get("is-current")
-                    .and_then(|v| bool::try_from(v).ok())
-                    .unwrap_or(false)
-            })
-            .or_else(|| m.1.first())?;
+        let cur =
+            m.1.iter()
+                .find(|md| {
+                    md.6.get("is-current")
+                        .and_then(|v| bool::try_from(v).ok())
+                        .unwrap_or(false)
+                })
+                .or_else(|| m.1.first())?;
         Some((cur.1 as f64, cur.2 as f64))
     };
 
@@ -394,14 +438,27 @@ async fn compute_monitor_rect(conn: &zbus::Connection) -> Option<crate::MonitorR
         if matches!(transform, 1 | 3 | 5 | 7) {
             std::mem::swap(&mut w, &mut h);
         }
-        rects.push(LRect { x, y, w, h, primary, connector });
+        rects.push(LRect {
+            x,
+            y,
+            w,
+            h,
+            primary,
+            connector,
+        });
     }
 
     // Desktop bounding box (union of all logical monitor rects).
     let min_x = rects.iter().map(|r| r.x).fold(f64::INFINITY, f64::min);
     let min_y = rects.iter().map(|r| r.y).fold(f64::INFINITY, f64::min);
-    let max_x = rects.iter().map(|r| r.x + r.w).fold(f64::NEG_INFINITY, f64::max);
-    let max_y = rects.iter().map(|r| r.y + r.h).fold(f64::NEG_INFINITY, f64::max);
+    let max_x = rects
+        .iter()
+        .map(|r| r.x + r.w)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let max_y = rects
+        .iter()
+        .map(|r| r.y + r.h)
+        .fold(f64::NEG_INFINITY, f64::max);
     let dw = max_x - min_x;
     let dh = max_y - min_y;
     if !(dw.is_finite() && dh.is_finite() && dw > 0.0 && dh > 0.0) {
@@ -410,7 +467,9 @@ async fn compute_monitor_rect(conn: &zbus::Connection) -> Option<crate::MonitorR
 
     // Pick the captured output — same precedence as `primary_connector`:
     // env override → primary logical monitor → first.
-    let want = std::env::var("RMD_MONITOR_CONNECTOR").ok().filter(|s| !s.is_empty());
+    let want = std::env::var("RMD_MONITOR_CONNECTOR")
+        .ok()
+        .filter(|s| !s.is_empty());
     let target = want
         .as_deref()
         .and_then(|w| rects.iter().find(|r| r.connector.as_deref() == Some(w)))

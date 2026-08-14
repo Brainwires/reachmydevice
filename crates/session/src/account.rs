@@ -143,7 +143,10 @@ impl AccountClient {
         now_unix: i64,
     ) -> anyhow::Result<String> {
         let public_key = identity.public_key_bytes();
-        let signature = identity.sign(&crate::identity::token_refresh_message(&public_key, now_unix));
+        let signature = identity.sign(&crate::identity::token_refresh_message(
+            &public_key,
+            now_unix,
+        ));
         let url = format!("{}/api/token/refresh", self.base);
         let resp = run(self.agent.post(&url).send_json(ureq::json!({
             "device_id": identity.device_id(),

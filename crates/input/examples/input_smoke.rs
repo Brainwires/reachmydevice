@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::ConnectionExt;
 
-    let mut injector = new_injector()?;
+    let mut injector = new_injector(None)?;
 
     // Move the pointer to the centre (0.5, 0.5).
     injector.inject(&Event::MouseMove(MouseMove { x: 0.5, y: 0.5 }))?;

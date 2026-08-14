@@ -255,10 +255,7 @@ fn spawn_turn_refresh(servers: &[IceServer], session_active: Arc<AtomicBool>) {
 fn authorized_device_ids() -> Vec<String> {
     let path = std::env::var("RMD_AUTHORIZED_KEYS")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            std::path::PathBuf::from(home).join(".config/rmd/authorized_keys")
-        });
+        .unwrap_or_else(|_| rmd_session::settings::config_dir().join("authorized_keys"));
     match std::fs::read_to_string(&path) {
         Ok(s) => s
             .lines()
@@ -273,8 +270,7 @@ fn authorized_device_ids() -> Vec<String> {
 /// host's identity to viewers (bound to the DTLS session). Encrypted at rest when
 /// `RMD_KEY_PASSPHRASE` is set.
 fn identity_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::path::PathBuf::from(home).join(".config/rmd/identity.key")
+    rmd_session::settings::config_dir().join("identity.key")
 }
 
 fn load_host_identity() -> Option<std::sync::Arc<rmd_session::DeviceIdentity>> {
@@ -305,10 +301,7 @@ fn read_token(
     }
     let path = std::env::var("RMD_TOKEN_FILE")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            std::path::PathBuf::from(home).join(".config/rmd/token")
-        });
+        .unwrap_or_else(|_| rmd_session::settings::config_dir().join("token"));
     if let Ok(s) = std::fs::read_to_string(&path) {
         return Ok(zeroize::Zeroizing::new(s.trim().to_string()));
     }
@@ -445,7 +438,12 @@ fn run_setup_input() -> anyhow::Result<()> {
         # /dev/uinput so rmdd can inject remote keyboard/mouse (native, no prompt).\n\
         KERNEL==\"uinput\", SUBSYSTEM==\"misc\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\", OPTIONS+=\"static_node=uinput\"\n";
 
-    let writable = || std::fs::OpenOptions::new().write(true).open("/dev/uinput").is_ok();
+    let writable = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/uinput")
+            .is_ok()
+    };
     if writable() {
         println!("/dev/uinput is already accessible — native input is ready.");
         return Ok(());
@@ -487,7 +485,11 @@ fn run_setup_input() -> anyhow::Result<()> {
         Ok(())
     };
     sudo(&["modprobe", "uinput"])?;
-    sudo(&["sh", "-c", "echo uinput > /etc/modules-load.d/rmd-uinput.conf"])?;
+    sudo(&[
+        "sh",
+        "-c",
+        "echo uinput > /etc/modules-load.d/rmd-uinput.conf",
+    ])?;
     // Add the user to the `input` group too, so /dev/uinput is openable even on a
     // headless/no-seat boot where logind's `uaccess` ACL grants no active session
     // (audit B5). Best-effort; takes effect on next login. The udev `uaccess` tag
@@ -517,17 +519,13 @@ fn run_setup_input() -> anyhow::Result<()> {
         println!("  Apply it to the running host:  rmdd restart");
     } else {
         println!("\n\u{2713} udev rule installed; it takes effect on your next login or reboot.");
-        println!("  Try now:  rmdd restart  (the host will use native input if it can open /dev/uinput,");
-        println!("  otherwise it falls back to X11 XTest). If it stays on the fallback, log out and back in.");
+        println!(
+            "  Try now:  rmdd restart  (the host will use native input if it can open /dev/uinput,"
+        );
+        println!(
+            "  otherwise it falls back to X11 XTest). If it stays on the fallback, log out and back in."
+        );
     }
-    Ok(())
-}
-
-// On non-Linux, `setup-input` is a silent no-op — native input needs no such
-// setup on macOS (CGEvent) or the future Windows backend, so the verb is
-// intentionally undocumented and produces no output there.
-#[cfg(not(target_os = "linux"))]
-fn run_setup_input() -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -540,16 +538,26 @@ fn run_setup_input() -> anyhow::Result<()> {
 fn run_setup_linux(args: &[String]) -> anyhow::Result<()> {
     let verb = args.first().map(String::as_str).unwrap_or("setup-linux");
     let sub = args.get(1).map(String::as_str);
-    let (do_input, do_display) = match (verb, sub) {
+    let (do_input, do_display, do_system) = match (verb, sub) {
         // Hidden back-compat alias: `setup-input` == input only.
-        ("setup-input", _) => (true, false),
-        (_, None) | (_, Some("both") | Some("all")) => (true, true),
-        (_, Some("input")) => (true, false),
-        (_, Some("display")) => (false, true),
+        ("setup-input", _) => (true, false, false),
+        (_, None) | (_, Some("both") | Some("all")) => (true, true, false),
+        (_, Some("input")) => (true, false, false),
+        (_, Some("display")) => (false, true, false),
+        (_, Some("system")) => (false, false, true),
         (_, Some(other)) => anyhow::bail!(
-            "unknown setup-linux target '{other}' (expected: input | display, or omit for both)"
+            "unknown setup-linux target '{other}' \
+             (expected: input | display | system, or omit for input+display)"
         ),
     };
+    // System mode installs the broker/agent split (remote login-screen access). It
+    // needs the same machine-level uinput enablement as `input`, plus the system
+    // user, state dir, and units, so run the input half first.
+    if do_system {
+        run_setup_input()?;
+        println!();
+        return run_setup_system();
+    }
     if do_input {
         run_setup_input()?;
     }
@@ -564,6 +572,216 @@ fn run_setup_linux(args: &[String]) -> anyhow::Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 fn run_setup_linux(_args: &[String]) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// `setup-linux system`: install the broker/agent split for remote login-screen
+/// access + seamless greeter→user handover. Creates the dedicated non-root `rmd`
+/// user, the `/var/lib/rmd` state dir (migrating this user's device identity into
+/// it), and the broker (system) + agent (global user) units. Never auto-starts or
+/// reboots — prints next steps, matching `setup-linux display`.
+#[cfg(target_os = "linux")]
+fn run_setup_system() -> anyhow::Result<()> {
+    let exe =
+        std::env::current_exe().map_err(|e| anyhow::anyhow!("cannot resolve rmdd path: {e}"))?;
+    let exe = exe.to_string_lossy().to_string();
+    let user = std::env::var("USER").unwrap_or_default();
+
+    println!("Setting up ReachMyDevice system mode (broker + per-session agent)…\n");
+
+    // 1. Dedicated non-root system user + group; `input` group for /dev/uinput.
+    sudo_run(&[
+        "sh",
+        "-c",
+        "getent group rmd >/dev/null 2>&1 || groupadd --system rmd",
+    ])?;
+    sudo_run(&[
+        "sh",
+        "-c",
+        "id -u rmd >/dev/null 2>&1 || useradd --system --no-create-home \
+         --shell /usr/sbin/nologin -g rmd -G input -c 'ReachMyDevice broker' rmd",
+    ])?;
+    sudo_run(&["usermod", "-aG", "input", "rmd"])?;
+
+    // 2. State + config dirs, owned by rmd, not world-readable.
+    sudo_run(&["mkdir", "-p", "/var/lib/rmd", "/etc/rmd"])?;
+    sudo_run(&["chown", "rmd:rmd", "/var/lib/rmd", "/etc/rmd"])?;
+    sudo_run(&["chmod", "0700", "/var/lib/rmd", "/etc/rmd"])?;
+
+    // 3. Migrate this user's device identity/token so the broker keeps the same
+    //    device (no re-enrollment). key.env (passphrase) goes to /etc/rmd, read by
+    //    the broker unit's EnvironmentFile.
+    let cfg = rmd_session::settings::config_dir();
+    let migrate = |name: &str, dest_dir: &str| -> anyhow::Result<()> {
+        let src = cfg.join(name);
+        if src.exists() {
+            let bytes = std::fs::read(&src)?;
+            let dest = format!("{dest_dir}/{name}");
+            sudo_write_file(&dest, &bytes)?;
+            sudo_run(&["chown", "rmd:rmd", &dest])?;
+            sudo_run(&["chmod", "0600", &dest])?;
+            println!("  migrated {name} -> {dest}");
+        }
+        Ok(())
+    };
+    for f in ["identity.key", "settings.enc", "token", "authorized_keys"] {
+        migrate(f, "/var/lib/rmd")?;
+    }
+    migrate("key.env", "/etc/rmd")?;
+
+    // 4. Broker system unit (dedicated user; uinput via the `input` supplementary
+    //    group; /run/rmd for the agent socket).
+    let broker_unit = format!(
+        "# Generated by `rmdd setup-linux system`.\n\
+         [Unit]\n\
+         Description=ReachMyDevice broker (system remote-desktop endpoint)\n\
+         After=network-online.target\n\
+         Wants=network-online.target\n\n\
+         [Service]\n\
+         Type=simple\n\
+         User=rmd\n\
+         Group=rmd\n\
+         SupplementaryGroups=input\n\
+         Environment=RMD_STATE_DIR=/var/lib/rmd\n\
+         EnvironmentFile=-/etc/rmd/key.env\n\
+         ExecStart={exe} broker\n\
+         Restart=always\n\
+         RestartSec=3\n\
+         TimeoutStopSec=5\n\
+         RuntimeDirectory=rmd\n\
+         RuntimeDirectoryMode=0755\n\
+         NoNewPrivileges=true\n\
+         ProtectSystem=strict\n\
+         ProtectHome=true\n\
+         ReadWritePaths=/var/lib/rmd\n\
+         PrivateTmp=true\n\n\
+         [Install]\n\
+         WantedBy=graphical.target\n"
+    );
+    sudo_write_file(
+        "/etc/systemd/system/rmd-broker.service",
+        broker_unit.as_bytes(),
+    )?;
+
+    // 5. Agent unit — a *system-wide user unit* (/etc/systemd/user), so it runs in
+    //    EVERY graphical session: the gdm greeter (login screen) and, after login,
+    //    the user's session. Bound to graphical-session.target so it inherits each
+    //    session's environment and auto-detects the right capture backend.
+    let agent_unit = format!(
+        "# Generated by `rmdd setup-linux system`.\n\
+         [Unit]\n\
+         Description=ReachMyDevice capture agent (per-session screen source)\n\
+         After=graphical-session.target\n\
+         PartOf=graphical-session.target\n\n\
+         [Service]\n\
+         Type=simple\n\
+         # Lock-gating: keep the auto-login session locked at rest; an authenticated\n\
+         # remote viewer unlocks it (passwordless, via logind) and it re-locks on\n\
+         # disconnect. Physical hardware stays locked unless a remote session opened it.\n\
+         Environment=RMD_SESSION_LOCK=1\n\
+         ExecStart={exe} agent\n\
+         Restart=always\n\
+         RestartSec=3\n\
+         TimeoutStopSec=5\n\
+         # Exit 3 = 'greeter session, nothing to do' — don't restart-loop there.\n\
+         RestartPreventExitStatus=3\n\n\
+         [Install]\n\
+         WantedBy=graphical-session.target\n"
+    );
+    sudo_write_file("/etc/systemd/user/rmd-agent.service", agent_unit.as_bytes())?;
+
+    // 6. Group membership so the greeter (gdm) and this user can reach the broker
+    //    socket under /run/rmd (group rmd). Effective on next session start.
+    sudo_run(&[
+        "sh",
+        "-c",
+        "id -u gdm >/dev/null 2>&1 && usermod -aG rmd gdm || true",
+    ])?;
+    if !user.is_empty() && user != "root" {
+        sudo_run(&["usermod", "-aG", "rmd", &user])?;
+    }
+
+    // 7. Enable GDM auto-login for this user. The login screen can't be captured
+    //    (mutter inhibits ScreenCast behind the lock shield), so instead the box
+    //    auto-logs-in and the agent keeps the session LOCKED at rest — an
+    //    authenticated remote viewer unlocks it (passwordless, via logind) and it
+    //    re-locks on disconnect. Physical hardware stays locked; more secure than
+    //    plain auto-login.
+    enable_gdm_autologin(&user)?;
+
+    // 8. Reload + enable (do NOT start: starting now would race the still-running
+    //    per-user service for the same device token, and auto-login + group changes
+    //    need a fresh boot anyway).
+    sudo_run(&["systemctl", "daemon-reload"])?;
+    sudo_run(&["systemctl", "enable", "rmd-broker.service"])?;
+    sudo_run(&["systemctl", "--global", "enable", "rmd-agent.service"])?;
+
+    println!("\n✓ System mode installed (broker + agent enabled; auto-login + lock-gating on).");
+    println!("Security model: the box auto-logs-in but the session stays LOCKED; only an");
+    println!("authenticated remote connection unlocks it, and it re-locks on disconnect.");
+    println!("Next steps — verify remote access still works, THEN:");
+    println!("  1. Stop the per-user host so it doesn't fight the broker for the device:");
+    println!("       rmdd disable");
+    println!("  2. Reboot:");
+    println!("       sudo reboot");
+    println!("  After reboot: the box sits locked; connect remotely to unlock + control it.");
+    Ok(())
+}
+
+/// Enable GDM auto-login for `user` in `/etc/gdm3/custom.conf` (idempotent;
+/// timestamped backup). Auto-login only dodges the un-capturable greeter — the
+/// agent's lock-gating is what keeps the box secure. A no-op if GDM isn't present.
+#[cfg(target_os = "linux")]
+fn enable_gdm_autologin(user: &str) -> anyhow::Result<()> {
+    const CONF: &str = "/etc/gdm3/custom.conf";
+    if !std::path::Path::new(CONF).exists() {
+        println!("  (no {CONF}; enable auto-login manually for your display manager)");
+        return Ok(());
+    }
+    let content = match std::fs::read_to_string(CONF) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("  (could not read {CONF}: {e}; enable auto-login manually)");
+            return Ok(());
+        }
+    };
+    let want_enable = "AutomaticLoginEnable=true";
+    let want_user = format!("AutomaticLogin={user}");
+    if content.lines().any(|l| l.trim() == want_enable)
+        && content.lines().any(|l| l.trim() == want_user)
+    {
+        println!("  auto-login already enabled for {user}");
+        return Ok(());
+    }
+    // Rebuild: drop any prior uncommented AutomaticLogin* lines, inject fresh ones
+    // right after the [daemon] header (leave commented examples as-is).
+    let mut out = String::new();
+    let mut injected = false;
+    for line in content.lines() {
+        let t = line.trim_start();
+        if t.starts_with("AutomaticLoginEnable=") || t.starts_with("AutomaticLogin=") {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+        if line.trim() == "[daemon]" && !injected {
+            out.push_str(want_enable);
+            out.push('\n');
+            out.push_str(&want_user);
+            out.push('\n');
+            injected = true;
+        }
+    }
+    if !injected {
+        out.push_str(&format!("\n[daemon]\n{want_enable}\n{want_user}\n"));
+    }
+    sudo_run(&[
+        "sh",
+        "-c",
+        &format!("cp -n {CONF} {CONF}.rmd-bak 2>/dev/null || true"),
+    ])?;
+    sudo_write_file(CONF, out.as_bytes())?;
+    println!("  enabled GDM auto-login for {user}");
     Ok(())
 }
 
@@ -630,7 +848,9 @@ fn run_setup_display() -> anyhow::Result<()> {
             let sysfs = entry.file_name().to_string_lossy().to_string();
             // Entries look like `card1-HDMI-A-2`; skip the card device nodes and
             // render nodes (`card1`, `renderD128`).
-            let Some((card, conn)) = sysfs.split_once('-') else { continue };
+            let Some((card, conn)) = sysfs.split_once('-') else {
+                continue;
+            };
             if !card.starts_with("card") {
                 continue;
             }
@@ -644,7 +864,10 @@ fn run_setup_display() -> anyhow::Result<()> {
             saw_any = true;
             let status = std::fs::read_to_string(entry.path().join("status")).unwrap_or_default();
             if status.trim() == "connected" {
-                connected.push(DrmConnector { sysfs: sysfs.clone(), name: conn.to_string() });
+                connected.push(DrmConnector {
+                    sysfs: sysfs.clone(),
+                    name: conn.to_string(),
+                });
             }
         }
     }
@@ -660,9 +883,7 @@ fn run_setup_display() -> anyhow::Result<()> {
     }
 
     // Prefer an external output over a laptop panel (eDP/LVDS/DSI) when both are up.
-    connected.sort_by_key(|c| {
-        ["eDP", "LVDS", "DSI"].iter().any(|p| c.name.starts_with(p)) as u8
-    });
+    connected.sort_by_key(|c| ["eDP", "LVDS", "DSI"].iter().any(|p| c.name.starts_with(p)) as u8);
     let target = &connected[0];
     println!("Target connector: {} ({})", target.name, target.sysfs);
 
@@ -734,7 +955,10 @@ fn persist_kernel_params(params: &[String]) -> anyhow::Result<()> {
 
     let original = std::fs::read_to_string(GRUB)?;
     // Which params are missing from the file already (idempotency)?
-    let missing: Vec<&String> = params.iter().filter(|p| !original.contains(p.as_str())).collect();
+    let missing: Vec<&String> = params
+        .iter()
+        .filter(|p| !original.contains(p.as_str()))
+        .collect();
     if missing.is_empty() {
         println!("GRUB already carries the display parameters — no changes needed.");
         return Ok(());
@@ -764,8 +988,19 @@ fn persist_kernel_params(params: &[String]) -> anyhow::Result<()> {
     }
 
     // Timestamped backup, then write + regenerate.
-    println!("Backing up {GRUB} and adding: {}", missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("  "));
-    sudo_run(&["sh", "-c", &format!("cp -n {GRUB} {GRUB}.rmd-bak.$(date +%Y%m%d%H%M%S)")])?;
+    println!(
+        "Backing up {GRUB} and adding: {}",
+        missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("  ")
+    );
+    sudo_run(&[
+        "sh",
+        "-c",
+        &format!("cp -n {GRUB} {GRUB}.rmd-bak.$(date +%Y%m%d%H%M%S)"),
+    ])?;
     sudo_write_file(GRUB, edited.as_bytes())?;
     regenerate_grub()?;
     Ok(())
@@ -834,7 +1069,9 @@ fn maybe_refresh_initramfs(sysfs: &str) {
             .map(|o| String::from_utf8_lossy(&o.stdout).contains(&format!("{driver}.ko")))
             .unwrap_or(false);
         if listed {
-            println!("Driver `{driver}` loads from the initramfs (early-KMS); refreshing it so the EDID blob is included.");
+            println!(
+                "Driver `{driver}` loads from the initramfs (early-KMS); refreshing it so the EDID blob is included."
+            );
             if let Err(e) = sudo_run(&["update-initramfs", "-u"]) {
                 tracing::warn!(error = %e, "update-initramfs failed; you may need to rebuild the initramfs manually");
             }
@@ -942,10 +1179,11 @@ fn main() -> anyhow::Result<()> {
                 // Documented on Linux only (native input needs a one-time
                 // /dev/uinput grant); silent no-op / omitted elsewhere.
                 #[cfg(target_os = "linux")]
-                let setup_help = "  rmdd setup-linux [input|display]\n                       \
+                let setup_help = "  rmdd setup-linux [input|display|system]\n                       \
                      one-time machine setup (sudo). input: native uinput; display:\n                       \
-                     survive a monitor unplug / arm a headless virtual display.\n                       \
-                     Omit the target to do both.\n\n";
+                     survive a monitor unplug / arm a headless virtual display;\n                       \
+                     system: broker + per-session agent for remote LOGIN-SCREEN\n                       \
+                     access (GDM) and greeter->user handover. Omit target = input+display.\n\n";
                 #[cfg(not(target_os = "linux"))]
                 let setup_help = "";
                 println!(
@@ -1020,12 +1258,35 @@ fn main() -> anyhow::Result<()> {
     ) {
         return run_setup_linux(&args);
     }
+    // System-mode capture agent (Linux, opt-in): connects to the broker's Unix
+    // socket, captures the current graphical session, and streams encoded H.264.
+    // Holds no identity/token (those live in the broker), so it's safe to run in
+    // the ephemeral greeter session. See `rmdd setup-linux system`.
+    #[cfg(target_os = "linux")]
+    if matches!(args.first().map(String::as_str), Some("agent")) {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info".into()),
+            )
+            .init();
+        return rmd_session::agent::run_agent(rmd_session::agent::AgentConfig::from_env());
+    }
+
+    // System-mode broker (Linux, opt-in): the always-on network endpoint. It shares
+    // the full daemon setup below (identity/token/ICE/signaling) and only differs in
+    // the final run call, so it falls through rather than returning here.
+    let broker_mode =
+        cfg!(target_os = "linux") && matches!(args.first().map(String::as_str), Some("broker"));
 
     // Any other unrecognized first argument is a mistake, not a request to start
     // the daemon — bail rather than silently serving (M15). A bare `rmdd` (no
-    // args) still starts the host; `--version`/`--help` returned above.
+    // args) still starts the host; `--version`/`--help` returned above; `broker`
+    // falls through to the daemon setup.
     if let Some(first) = args.first() {
-        anyhow::bail!("unknown command '{first}' — run `rmdd --help` for usage");
+        if !broker_mode {
+            anyhow::bail!("unknown command '{first}' — run `rmdd --help` for usage");
+        }
     }
 
     tracing_subscriber::fmt()
@@ -1204,6 +1465,16 @@ fn main() -> anyhow::Result<()> {
         return tray::run_with_tray(cfg, signaling);
     }
 
+    // System-mode broker: identical setup, but the video plane is fed by
+    // per-session agents over the Unix socket (enables remote login-screen access
+    // and greeter->user handover). Falls through to the local host otherwise.
+    #[cfg(target_os = "linux")]
+    if broker_mode {
+        return rmd_session::broker::run_broker(cfg, signaling, move |s| {
+            session_active.store(matches!(s, HostStatus::Active), Ordering::Relaxed);
+        });
+    }
+
     run_host_reporting(cfg, signaling, move |s| {
         session_active.store(matches!(s, HostStatus::Active), Ordering::Relaxed);
     })
@@ -1249,7 +1520,10 @@ mod tests {
     #[test]
     fn earliest_turn_expiry_none_for_unparseable_username() {
         // A non-timestamp leading field must not yield a bogus (tiny) expiry.
-        assert_eq!(earliest_turn_expiry(&[turn(Some("not-a-timestamp:x"))]), None);
+        assert_eq!(
+            earliest_turn_expiry(&[turn(Some("not-a-timestamp:x"))]),
+            None
+        );
     }
 
     #[test]

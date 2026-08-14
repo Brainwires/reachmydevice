@@ -176,7 +176,10 @@ pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
 /// query fails. Unlike `conn.setup().roots[..].width_in_pixels` (a snapshot taken
 /// when the client connected), this reflects live resizes — essential under
 /// XWayland, where mutter resizes the root after connect and on every RandR change.
-fn current_root_size<C: Connection>(conn: &C, root: x11rb::protocol::xproto::Window) -> Option<(u16, u16)> {
+fn current_root_size<C: Connection>(
+    conn: &C,
+    root: x11rb::protocol::xproto::Window,
+) -> Option<(u16, u16)> {
     let geom = conn.get_geometry(root).ok()?.reply().ok()?;
     Some((geom.width, geom.height))
 }

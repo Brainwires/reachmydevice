@@ -9,8 +9,12 @@
 //! - [`identity`] — device keypair identity + TOFU trust store.
 
 pub mod account;
+#[cfg(target_os = "linux")]
+pub mod agent;
 #[cfg(feature = "audio")]
 pub mod audio;
+#[cfg(target_os = "linux")]
+pub mod broker;
 pub mod clipboard;
 pub mod filexfer;
 pub mod host;

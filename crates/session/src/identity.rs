@@ -58,7 +58,10 @@ fn parse_key_env_line(line: &str) -> Option<String> {
     if line.is_empty() || line.starts_with('#') {
         return None;
     }
-    let line = line.strip_prefix("export ").map(str::trim_start).unwrap_or(line);
+    let line = line
+        .strip_prefix("export ")
+        .map(str::trim_start)
+        .unwrap_or(line);
     let rest = line.strip_prefix(KEY_PASSPHRASE_ENV)?;
     // Require the key to be followed immediately by `=` (so `RMD_KEY_PASSPHRASE_X`
     // doesn't match `RMD_KEY_PASSPHRASE`).
@@ -220,7 +223,9 @@ pub(crate) fn restrict_perms(path: &Path) -> anyhow::Result<()> {
                     stderr = %String::from_utf8_lossy(&out.stderr).trim(),
                     "icacls could not restrict permissions on a secret file"
                 ),
-                Err(e) => tracing::warn!(error = %e, path = %path.display(), "failed to run icacls to restrict a secret file"),
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %path.display(), "failed to run icacls to restrict a secret file")
+                }
                 _ => {}
             },
             Err(_) => tracing::warn!(
@@ -541,21 +546,42 @@ mod tests {
         let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).unwrap();
         assert!(vk.verify(&msg, &sig).is_ok());
         // …but not over a message with a different timestamp (replay binding).
-        assert!(vk.verify(&token_refresh_message(&pk, ts + 1), &sig).is_err());
+        assert!(
+            vk.verify(&token_refresh_message(&pk, ts + 1), &sig)
+                .is_err()
+        );
     }
 
     #[test]
     fn key_env_line_parsing() {
         let p = KEY_PASSPHRASE_ENV;
         // Plain, export-prefixed, and quoted forms.
-        assert_eq!(parse_key_env_line(&format!("{p}=hunter2")).as_deref(), Some("hunter2"));
-        assert_eq!(parse_key_env_line(&format!("export {p}=hunter2")).as_deref(), Some("hunter2"));
-        assert_eq!(parse_key_env_line(&format!("{p}=\"hunter2\"")).as_deref(), Some("hunter2"));
-        assert_eq!(parse_key_env_line(&format!("{p}='hunter2'")).as_deref(), Some("hunter2"));
+        assert_eq!(
+            parse_key_env_line(&format!("{p}=hunter2")).as_deref(),
+            Some("hunter2")
+        );
+        assert_eq!(
+            parse_key_env_line(&format!("export {p}=hunter2")).as_deref(),
+            Some("hunter2")
+        );
+        assert_eq!(
+            parse_key_env_line(&format!("{p}=\"hunter2\"")).as_deref(),
+            Some("hunter2")
+        );
+        assert_eq!(
+            parse_key_env_line(&format!("{p}='hunter2'")).as_deref(),
+            Some("hunter2")
+        );
         // Interior whitespace/quotes preserved inside a quoted value.
-        assert_eq!(parse_key_env_line(&format!("{p}=\"  a b  \"")).as_deref(), Some("  a b  "));
+        assert_eq!(
+            parse_key_env_line(&format!("{p}=\"  a b  \"")).as_deref(),
+            Some("  a b  ")
+        );
         // Unquoted value is trimmed.
-        assert_eq!(parse_key_env_line(&format!("{p}=  spaced  ")).as_deref(), Some("spaced"));
+        assert_eq!(
+            parse_key_env_line(&format!("{p}=  spaced  ")).as_deref(),
+            Some("spaced")
+        );
         // Comments, blanks, other keys, empty values, and near-miss keys are ignored.
         assert_eq!(parse_key_env_line(&format!("# {p}=x")), None);
         assert_eq!(parse_key_env_line(""), None);
