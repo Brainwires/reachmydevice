@@ -529,14 +529,6 @@ fn run_setup_input() -> anyhow::Result<()> {
     Ok(())
 }
 
-// On non-Linux, `setup-input` is a silent no-op — native input needs no such
-// setup on macOS (CGEvent) or the future Windows backend, so the verb is
-// intentionally undocumented and produces no output there.
-#[cfg(not(target_os = "linux"))]
-fn run_setup_input() -> anyhow::Result<()> {
-    Ok(())
-}
-
 /// `rmdd setup-linux [input|display]`: one-time machine setup for headless remote
 /// access. With no target it does both. `input` arms native uinput input;
 /// `display` makes a monitor connector survive an unplug (or arms a headless
