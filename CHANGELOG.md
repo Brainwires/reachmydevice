@@ -2,7 +2,7 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
-## [Unreleased]
+## [0.8.0] - 2026-08-14
 
 ### Added
 - **System mode: unattended remote login + seamless session handover (opt-in).**
