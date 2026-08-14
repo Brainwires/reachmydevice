@@ -438,7 +438,12 @@ fn run_setup_input() -> anyhow::Result<()> {
         # /dev/uinput so rmdd can inject remote keyboard/mouse (native, no prompt).\n\
         KERNEL==\"uinput\", SUBSYSTEM==\"misc\", TAG+=\"uaccess\", GROUP=\"input\", MODE=\"0660\", OPTIONS+=\"static_node=uinput\"\n";
 
-    let writable = || std::fs::OpenOptions::new().write(true).open("/dev/uinput").is_ok();
+    let writable = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/uinput")
+            .is_ok()
+    };
     if writable() {
         println!("/dev/uinput is already accessible — native input is ready.");
         return Ok(());
@@ -480,7 +485,11 @@ fn run_setup_input() -> anyhow::Result<()> {
         Ok(())
     };
     sudo(&["modprobe", "uinput"])?;
-    sudo(&["sh", "-c", "echo uinput > /etc/modules-load.d/rmd-uinput.conf"])?;
+    sudo(&[
+        "sh",
+        "-c",
+        "echo uinput > /etc/modules-load.d/rmd-uinput.conf",
+    ])?;
     // Add the user to the `input` group too, so /dev/uinput is openable even on a
     // headless/no-seat boot where logind's `uaccess` ACL grants no active session
     // (audit B5). Best-effort; takes effect on next login. The udev `uaccess` tag
@@ -510,8 +519,12 @@ fn run_setup_input() -> anyhow::Result<()> {
         println!("  Apply it to the running host:  rmdd restart");
     } else {
         println!("\n\u{2713} udev rule installed; it takes effect on your next login or reboot.");
-        println!("  Try now:  rmdd restart  (the host will use native input if it can open /dev/uinput,");
-        println!("  otherwise it falls back to X11 XTest). If it stays on the fallback, log out and back in.");
+        println!(
+            "  Try now:  rmdd restart  (the host will use native input if it can open /dev/uinput,"
+        );
+        println!(
+            "  otherwise it falls back to X11 XTest). If it stays on the fallback, log out and back in."
+        );
     }
     Ok(())
 }
@@ -577,8 +590,8 @@ fn run_setup_linux(_args: &[String]) -> anyhow::Result<()> {
 /// reboots — prints next steps, matching `setup-linux display`.
 #[cfg(target_os = "linux")]
 fn run_setup_system() -> anyhow::Result<()> {
-    let exe = std::env::current_exe()
-        .map_err(|e| anyhow::anyhow!("cannot resolve rmdd path: {e}"))?;
+    let exe =
+        std::env::current_exe().map_err(|e| anyhow::anyhow!("cannot resolve rmdd path: {e}"))?;
     let exe = exe.to_string_lossy().to_string();
     let user = std::env::var("USER").unwrap_or_default();
 
@@ -653,7 +666,10 @@ fn run_setup_system() -> anyhow::Result<()> {
          [Install]\n\
          WantedBy=graphical.target\n"
     );
-    sudo_write_file("/etc/systemd/system/rmd-broker.service", broker_unit.as_bytes())?;
+    sudo_write_file(
+        "/etc/systemd/system/rmd-broker.service",
+        broker_unit.as_bytes(),
+    )?;
 
     // 5. Agent unit — a *system-wide user unit* (/etc/systemd/user), so it runs in
     //    EVERY graphical session: the gdm greeter (login screen) and, after login,
@@ -840,7 +856,9 @@ fn run_setup_display() -> anyhow::Result<()> {
             let sysfs = entry.file_name().to_string_lossy().to_string();
             // Entries look like `card1-HDMI-A-2`; skip the card device nodes and
             // render nodes (`card1`, `renderD128`).
-            let Some((card, conn)) = sysfs.split_once('-') else { continue };
+            let Some((card, conn)) = sysfs.split_once('-') else {
+                continue;
+            };
             if !card.starts_with("card") {
                 continue;
             }
@@ -854,7 +872,10 @@ fn run_setup_display() -> anyhow::Result<()> {
             saw_any = true;
             let status = std::fs::read_to_string(entry.path().join("status")).unwrap_or_default();
             if status.trim() == "connected" {
-                connected.push(DrmConnector { sysfs: sysfs.clone(), name: conn.to_string() });
+                connected.push(DrmConnector {
+                    sysfs: sysfs.clone(),
+                    name: conn.to_string(),
+                });
             }
         }
     }
@@ -870,9 +891,7 @@ fn run_setup_display() -> anyhow::Result<()> {
     }
 
     // Prefer an external output over a laptop panel (eDP/LVDS/DSI) when both are up.
-    connected.sort_by_key(|c| {
-        ["eDP", "LVDS", "DSI"].iter().any(|p| c.name.starts_with(p)) as u8
-    });
+    connected.sort_by_key(|c| ["eDP", "LVDS", "DSI"].iter().any(|p| c.name.starts_with(p)) as u8);
     let target = &connected[0];
     println!("Target connector: {} ({})", target.name, target.sysfs);
 
@@ -944,7 +963,10 @@ fn persist_kernel_params(params: &[String]) -> anyhow::Result<()> {
 
     let original = std::fs::read_to_string(GRUB)?;
     // Which params are missing from the file already (idempotency)?
-    let missing: Vec<&String> = params.iter().filter(|p| !original.contains(p.as_str())).collect();
+    let missing: Vec<&String> = params
+        .iter()
+        .filter(|p| !original.contains(p.as_str()))
+        .collect();
     if missing.is_empty() {
         println!("GRUB already carries the display parameters — no changes needed.");
         return Ok(());
@@ -974,8 +996,19 @@ fn persist_kernel_params(params: &[String]) -> anyhow::Result<()> {
     }
 
     // Timestamped backup, then write + regenerate.
-    println!("Backing up {GRUB} and adding: {}", missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("  "));
-    sudo_run(&["sh", "-c", &format!("cp -n {GRUB} {GRUB}.rmd-bak.$(date +%Y%m%d%H%M%S)")])?;
+    println!(
+        "Backing up {GRUB} and adding: {}",
+        missing
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("  ")
+    );
+    sudo_run(&[
+        "sh",
+        "-c",
+        &format!("cp -n {GRUB} {GRUB}.rmd-bak.$(date +%Y%m%d%H%M%S)"),
+    ])?;
     sudo_write_file(GRUB, edited.as_bytes())?;
     regenerate_grub()?;
     Ok(())
@@ -1044,7 +1077,9 @@ fn maybe_refresh_initramfs(sysfs: &str) {
             .map(|o| String::from_utf8_lossy(&o.stdout).contains(&format!("{driver}.ko")))
             .unwrap_or(false);
         if listed {
-            println!("Driver `{driver}` loads from the initramfs (early-KMS); refreshing it so the EDID blob is included.");
+            println!(
+                "Driver `{driver}` loads from the initramfs (early-KMS); refreshing it so the EDID blob is included."
+            );
             if let Err(e) = sudo_run(&["update-initramfs", "-u"]) {
                 tracing::warn!(error = %e, "update-initramfs failed; you may need to rebuild the initramfs manually");
             }
@@ -1493,7 +1528,10 @@ mod tests {
     #[test]
     fn earliest_turn_expiry_none_for_unparseable_username() {
         // A non-timestamp leading field must not yield a bogus (tiny) expiry.
-        assert_eq!(earliest_turn_expiry(&[turn(Some("not-a-timestamp:x"))]), None);
+        assert_eq!(
+            earliest_turn_expiry(&[turn(Some("not-a-timestamp:x"))]),
+            None
+        );
     }
 
     #[test]

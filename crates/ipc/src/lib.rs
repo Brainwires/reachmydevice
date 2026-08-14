@@ -203,7 +203,13 @@ mod tests {
         write_msg(&mut a, &hello).await.unwrap();
         let got: AgentMsg = read_msg(&mut b).await.unwrap();
         match got {
-            AgentMsg::Hello { phase, backend, uid, monitor_rect, displays } => {
+            AgentMsg::Hello {
+                phase,
+                backend,
+                uid,
+                monitor_rect,
+                displays,
+            } => {
                 assert_eq!(phase, SessionPhase::Greeter);
                 assert_eq!(backend, BackendKind::GnomeWayland);
                 assert_eq!(uid, 975);
@@ -221,7 +227,11 @@ mod tests {
         write_msg(&mut a, &video).await.unwrap();
         let got: AgentMsg = read_msg(&mut b).await.unwrap();
         match got {
-            AgentMsg::Video { annexb, is_keyframe, capture_ts_micros } => {
+            AgentMsg::Video {
+                annexb,
+                is_keyframe,
+                capture_ts_micros,
+            } => {
                 assert_eq!(annexb, vec![0, 0, 0, 1, 0x65, 0xAA, 0xBB]);
                 assert!(is_keyframe);
                 assert_eq!(capture_ts_micros, 123_456);
@@ -230,7 +240,9 @@ mod tests {
         }
 
         // Reverse direction.
-        write_msg(&mut b, &BrokerMsg::SetBitrate(2_500_000)).await.unwrap();
+        write_msg(&mut b, &BrokerMsg::SetBitrate(2_500_000))
+            .await
+            .unwrap();
         let got: BrokerMsg = read_msg(&mut a).await.unwrap();
         assert!(matches!(got, BrokerMsg::SetBitrate(2_500_000)));
 

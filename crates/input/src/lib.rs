@@ -15,10 +15,10 @@ use rmd_protocol::input_event::Event as InputEvent;
 pub mod keymap;
 #[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(target_os = "linux")]
-pub mod uinput;
 #[cfg(target_os = "macos")]
 pub mod mac;
+#[cfg(target_os = "linux")]
+pub mod uinput;
 
 /// Errors from input injection.
 #[derive(Debug, thiserror::Error)]
@@ -70,7 +70,14 @@ impl MonitorRect {
                 && dw > 0.0
                 && dh > 0.0
             {
-                return Some(Self { ox, oy, mw, mh, dw, dh });
+                return Some(Self {
+                    ox,
+                    oy,
+                    mw,
+                    mh,
+                    dw,
+                    dh,
+                });
             }
         }
         tracing::warn!(value = %raw, "ignoring malformed RMD_INPUT_MONITOR_RECT (expected ox,oy,mw,mh,dw,dh)");

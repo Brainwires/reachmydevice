@@ -80,7 +80,11 @@ fn uid_of(name: &str) -> Option<u32> {
     // SAFETY: read pw_uid immediately from the returned static buffer.
     unsafe {
         let pw = libc::getpwnam(cname.as_ptr());
-        if pw.is_null() { None } else { Some((*pw).pw_uid) }
+        if pw.is_null() {
+            None
+        } else {
+            Some((*pw).pw_uid)
+        }
     }
 }
 
@@ -130,9 +134,15 @@ impl SessionGate {
             .filter(|s| !s.is_empty())
             .or_else(detect_session_id);
         if enabled && session_id.is_none() {
-            tracing::warn!("RMD_SESSION_LOCK set but no logind session id found; lock-gating disabled");
+            tracing::warn!(
+                "RMD_SESSION_LOCK set but no logind session id found; lock-gating disabled"
+            );
         }
-        Self { enabled, session_id, idle_inhibit: None }
+        Self {
+            enabled,
+            session_id,
+            idle_inhibit: None,
+        }
     }
 
     fn loginctl(&self, verb: &str) {
@@ -152,7 +162,9 @@ impl SessionGate {
 
     /// Whether logind reports the session locked.
     fn is_locked(&self) -> bool {
-        let Some(id) = &self.session_id else { return false };
+        let Some(id) = &self.session_id else {
+            return false;
+        };
         std::process::Command::new("loginctl")
             .args(["show-session", id, "-p", "LockedHint", "--value"])
             .output()
@@ -178,7 +190,11 @@ impl SessionGate {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 if self.is_locked() {
                     if round > 0 {
-                        tracing::info!("session locked (took {} retr{})", round + 1, if round == 0 { "y" } else { "ies" });
+                        tracing::info!(
+                            "session locked (took {} retr{})",
+                            round + 1,
+                            if round == 0 { "y" } else { "ies" }
+                        );
                     }
                     return;
                 }
@@ -401,7 +417,13 @@ async fn run_agent_async(cfg: AgentConfig) -> anyhow::Result<()> {
 
     // Encode thread: frames -> H.264 -> enc_tx. Bitrate + keyframe are driven by
     // the broker via the shared atomics.
-    spawn_agent_encode_thread(&cfg, force_keyframe.clone(), bitrate.clone(), frame_rx, enc_tx)?;
+    spawn_agent_encode_thread(
+        &cfg,
+        force_keyframe.clone(),
+        bitrate.clone(),
+        frame_rx,
+        enc_tx,
+    )?;
 
     // Writer task: encoded frames -> socket.
     let writer = tokio::spawn(async move {

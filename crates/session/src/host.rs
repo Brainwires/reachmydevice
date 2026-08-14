@@ -635,7 +635,9 @@ impl CaptureController {
             return; // unchanged — nothing to persist
         }
         self.config.restore_token = Some(token.clone());
-        let Some(identity) = self.identity.clone() else { return };
+        let Some(identity) = self.identity.clone() else {
+            return;
+        };
         let path = crate::settings::SettingsStore::default_path();
         // Hold the settings lock across load-modify-save so a concurrent
         // `rmdd set` can't clobber this write (or vice versa).
@@ -888,7 +890,10 @@ const THROTTLE_MAX_SECS: u64 = 30;
 
 impl PasswordThrottle {
     fn new() -> Self {
-        Self { failures: 0, locked_until: None }
+        Self {
+            failures: 0,
+            locked_until: None,
+        }
     }
 
     /// True while a lockout window is active (reject without evaluating a guess).

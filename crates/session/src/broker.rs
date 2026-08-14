@@ -34,7 +34,11 @@ const NO_AGENT: u64 = u64::MAX;
 
 /// Run the system-mode broker: identical session semantics to the single-process
 /// host, but the video plane is fed by per-session agents over a Unix socket.
-pub fn run_broker<F>(cfg: HostConfig, signal: Box<dyn crate::Signaling>, on_status: F) -> anyhow::Result<()>
+pub fn run_broker<F>(
+    cfg: HostConfig,
+    signal: Box<dyn crate::Signaling>,
+    on_status: F,
+) -> anyhow::Result<()>
 where
     F: Fn(HostStatus),
 {
@@ -353,7 +357,13 @@ async fn agent_conn(
 
     loop {
         match rmd_ipc::read_msg::<_, AgentMsg>(&mut rd).await {
-            Ok(AgentMsg::Hello { phase, backend, uid, monitor_rect, displays }) => {
+            Ok(AgentMsg::Hello {
+                phase,
+                backend,
+                uid,
+                monitor_rect,
+                displays,
+            }) => {
                 tracing::debug!(agent = id, uid, "broker: agent hello");
                 let rect = monitor_rect.map(|r| rmd_input::MonitorRect {
                     ox: r.ox,
@@ -364,13 +374,23 @@ async fn agent_conn(
                     dh: r.dh,
                 });
                 if ev_tx
-                    .send(AgentEvent::Hello { id, phase, backend, monitor_rect: rect, displays })
+                    .send(AgentEvent::Hello {
+                        id,
+                        phase,
+                        backend,
+                        monitor_rect: rect,
+                        displays,
+                    })
                     .is_err()
                 {
                     break;
                 }
             }
-            Ok(AgentMsg::Video { annexb, is_keyframe, capture_ts_micros }) => {
+            Ok(AgentMsg::Video {
+                annexb,
+                is_keyframe,
+                capture_ts_micros,
+            }) => {
                 // Only the active provider's frames reach the viewer; a stale
                 // greeter agent lingering after handover is silently dropped.
                 if active_id.load(Ordering::Relaxed) == id {
