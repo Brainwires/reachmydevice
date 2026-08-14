@@ -2,6 +2,19 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
+## [0.8.1] - 2026-08-14
+
+### Fixed
+- **Lock-gated capture no longer intermittently hangs on connect.** In system
+  mode the agent unlocked the session, waited a fixed 500 ms, then started
+  capture — but gnome-shell can take longer than that to dismiss the lock shield
+  (notably with the monitor unplugged / a cold display), so mutter still reported
+  the session locked and refused ScreenCast (`Session creation inhibited`). With
+  no retry the session stayed hung, and replugging the monitor didn't recover it.
+  The agent now re-issues the unlock and **polls `LockedHint` until the session is
+  actually unlocked**, then **retries `resume()` until capture starts**, closing
+  the race deterministically.
+
 ## [0.8.0] - 2026-08-14
 
 ### Added

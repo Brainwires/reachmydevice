@@ -210,7 +210,7 @@ impl SessionGate {
         if !self.enabled {
             return;
         }
-        self.loginctl("unlock-session");
+        // Hold an idle inhibitor so GNOME can't idle-lock mid-session.
         if self.idle_inhibit.is_none() {
             match std::process::Command::new("systemd-inhibit")
                 .args([
@@ -227,8 +227,21 @@ impl SessionGate {
                 Err(e) => tracing::warn!(error=%e, "could not inhibit idle-lock"),
             }
         }
-        // Let gnome-shell drop the lock shield before we try to capture.
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Re-issue unlock and poll until the session is actually unlocked. mutter
+        // inhibits ScreenCast ("Session creation inhibited") until gnome-shell
+        // dismisses the lock shield, which can lag — noticeably longer with the
+        // monitor unplugged / a cold display — so a fixed sleep races and the
+        // capture start fails. Poll `LockedHint` (re-issuing the unlock) instead.
+        for _ in 0..10 {
+            self.loginctl("unlock-session");
+            for _ in 0..5 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if !self.is_locked() {
+                    return;
+                }
+            }
+        }
+        tracing::warn!("session still locked after unlock retries; capture may be inhibited");
     }
 
     /// Release the idle inhibitor (viewer gone).
@@ -396,7 +409,22 @@ async fn run_agent_async(cfg: AgentConfig) -> anyhow::Result<()> {
                         // Unlock (passwordless) + inhibit idle-lock BEFORE capture,
                         // so mutter stops inhibiting ScreenCast.
                         gate.unlock();
-                        ctl.resume();
+                        // Retry capture start: even once LockedHint clears, mutter can
+                        // briefly still refuse ScreenCast ("Session creation inhibited")
+                        // — worse when the monitor was unplugged. resume() fails fast on
+                        // that error, so retry until capture actually starts (bounded).
+                        for attempt in 0..15 {
+                            ctl.resume();
+                            if ctl.is_capturing() {
+                                break;
+                            }
+                            if attempt == 0 {
+                                tracing::warn!(
+                                    "capture not started yet (mutter still inhibiting?); retrying"
+                                );
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(400));
+                        }
                     }
                     CaptureCmd::SetCapturing(false) => {
                         ctl.pause();
