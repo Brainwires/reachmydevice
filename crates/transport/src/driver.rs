@@ -90,6 +90,14 @@ const SAMPLE_BUILDER_MAX_LATE: u16 = 128;
 /// Upper bound on how long a single socket read may block, so command and
 /// timeout servicing stays responsive without busy-spinning.
 const MAX_SOCKET_READ_WAIT: Duration = Duration::from_millis(5);
+/// Safety valve for the sans-IO timer service. A due timer is normally fired and
+/// the loop re-pumped immediately (so freshly generated outbound datagrams flush
+/// without waiting on a read). But a handler stuck reporting an already-expired
+/// deadline that `handle_timeout` cannot advance (e.g. a dead ICE/DTLS/SCTP timer
+/// on a session that failed before it ever connected) would re-pump forever and
+/// peg a core. After this many back-to-back immediate fires we stop short-cutting
+/// and fall through to a bounded blocking read, so the loop can never busy-spin.
+const MAX_CONSECUTIVE_REFIRES: u32 = 256;
 /// `sdp_fmtp_line` announcing constrained-baseline, packetization-mode 1.
 const H264_FMTP: &str = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
 /// Default STUN port (RFC 5389) when a `stun:` URL omits one.
@@ -1040,6 +1048,10 @@ fn event_loop<I: Interceptor>(
 ) -> anyhow::Result<LoopOutcome> {
     let mut connected = false;
     let mut read_buf = vec![0u8; 2048];
+    // Consecutive immediate timer fires without an intervening blocking read.
+    // Reset whenever the next deadline is in the future; capped so a stuck timer
+    // can't spin the loop (see `MAX_CONSECUTIVE_REFIRES`).
+    let mut refires: u32 = 0;
 
     // On a viewer rebuild, apply the offer that triggered it to the fresh PC.
     if let Some(msg) = initial_signal {
@@ -1115,8 +1127,29 @@ fn event_loop<I: Interceptor>(
         if let Some(eto) = pc_deadline {
             if eto <= now {
                 pc.handle_timeout(now).context("handle_timeout")?;
-                continue; // re-run the pump immediately after a fired timer
+                // Normally re-pump at once so datagrams that `handle_timeout`
+                // just produced flush without waiting on a read. But a handler
+                // stuck at an expired deadline would `continue` forever and peg
+                // a core, so bound the streak: once it trips, fall through to a
+                // bounded blocking read instead of short-cutting.
+                refires += 1;
+                if refires < MAX_CONSECUTIVE_REFIRES {
+                    continue; // re-run the pump immediately after a fired timer
+                }
+                if refires == MAX_CONSECUTIVE_REFIRES {
+                    tracing::warn!(
+                        connected,
+                        remote_answered = pc.remote_description().is_some(),
+                        deadline_late_ms = now.saturating_duration_since(eto).as_millis(),
+                        "transport: sans-IO timer stuck at an expired deadline; \
+                         throttling the driver loop to avoid a busy-spin"
+                    );
+                }
+            } else {
+                refires = 0;
             }
+        } else {
+            refires = 0;
         }
         let turn_deadline = turn.as_mut().and_then(|t| t.poll_timeout());
         let deadline = match (pc_deadline, turn_deadline) {
@@ -1402,15 +1435,25 @@ fn drain_events<I: Interceptor>(
                 // connection, so we tear it down and rebuild rather than ICE-
                 // restart. The host emits a fresh offer immediately; the viewer
                 // rebuilds and waits for it.
+                //
+                // `Failed` is terminal (dead ICE), so we rebuild even when the
+                // session never reached `Connected` — otherwise a host waiting
+                // with no viewer would park on a dead peer connection and its
+                // stuck timers would spin the driver loop. `Disconnected` can
+                // still recover on its own and `Closed` only happens when we
+                // closed it, so those two only rebuild once a session was live.
                 RTCPeerConnectionState::Failed
                 | RTCPeerConnectionState::Disconnected
                 | RTCPeerConnectionState::Closed
-                    if *connected =>
+                    if *connected || matches!(s, RTCPeerConnectionState::Failed) =>
                 {
+                    let was_connected = *connected;
                     *connected = false;
-                    let _ = event_tx.send(TransportEvent::Disconnected);
+                    if was_connected {
+                        let _ = event_tx.send(TransportEvent::Disconnected);
+                    }
                     state.rebuild = true;
-                    tracing::warn!(state = ?s, "transport: connection lost; rebuilding session");
+                    tracing::warn!(state = ?s, "transport: session torn down; rebuilding");
                 }
                 _ => {}
             },
