@@ -698,7 +698,12 @@ fn run_host(
         let registry = configure_nack(registry, &mut media_engine);
         let registry = configure_rtcp_reports(registry);
         register_twcc_sender_headers(&mut media_engine).context("register TWCC headers")?;
+        // Cap GCC at the host's configured bitrate. The library default ceiling is
+        // 2.5 Mbps, which would silently throttle a host asked for (say) 8 Mbps to a
+        // third of its target on a link that can carry it. GCC still backs off toward
+        // its floor on congestion; this only lifts the upper bound to what we asked for.
         let (gcc_builder, gcc_handle) = GccInterceptorBuilder::new();
+        let gcc_builder = gcc_builder.with_max_bitrate(config.video_bitrate_bps);
         let registry = registry
             .with(gcc_builder.build())
             .with(TwccSenderBuilder::new().build());

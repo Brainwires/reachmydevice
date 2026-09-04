@@ -654,6 +654,64 @@ impl CaptureController {
     }
 }
 
+/// How long the encode thread waits for a new captured frame before falling
+/// through to its idle path. Small enough that a keyframe request is answered
+/// promptly on a static screen, large enough not to spin.
+const ENCODE_POLL: Duration = Duration::from_millis(250);
+/// Wall-clock period for a keyframe when no new frame is arriving. Mirrors the
+/// encoder's own ~2 s intra period (`fps * 2`), but driven by the clock instead of
+/// by `encode()` calls — so a static screen still refreshes and can recover from
+/// loss (the encoder's GOP counter only advances when we actually encode a frame,
+/// and on-change capture backends deliver nothing while the screen doesn't change).
+const KEYFRAME_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Whether the encode thread should emit a keyframe on its idle path (no new frame
+/// this interval). True when a keyframe was explicitly requested — a viewer join,
+/// display switch, or an inbound RTCP PLI / data-channel `RequestKeyframe` — or when
+/// the periodic interval has elapsed since we last sent anything. Factored out as a
+/// pure predicate so it can be unit-tested without a live capture/transport.
+fn should_emit_idle_keyframe(force_pending: bool, since_last_send: Duration) -> bool {
+    force_pending || since_last_send >= KEYFRAME_INTERVAL
+}
+
+/// Crop/scale to the active zoom (if any) and encode one frame, handing any output
+/// access unit to the transport. Shared by the live-frame and idle-keyframe paths so
+/// both apply zoom, bitrate, and packetization identically. When no zoom is active
+/// `crop_scale` returns `None` and the frame is encoded untouched (zero added cost).
+fn encode_and_send(
+    encoder: &mut dyn codec::Encoder,
+    scaler: &mut codec::Scaler,
+    zoom: &Arc<Mutex<codec::CropRect>>,
+    sender: &TransportSender,
+    frame: &capture::Frame,
+    ts_micros: u64,
+    force_keyframe: bool,
+) {
+    let rect = *zoom.lock().unwrap();
+    let (data, width, height, stride) = match scaler.crop_scale(
+        &frame.data,
+        frame.width,
+        frame.height,
+        frame.bytes_per_row,
+        rect,
+        frame.width,
+        frame.height,
+    ) {
+        Some(scaled) => (scaled, frame.width, frame.height, frame.width * 4),
+        None => (
+            frame.data.as_ref(),
+            frame.width,
+            frame.height,
+            frame.bytes_per_row,
+        ),
+    };
+    match encoder.encode(data, width, height, stride, ts_micros, force_keyframe) {
+        Ok(Some(ef)) => sender.send_video(ef.data, ef.is_keyframe, ef.capture_ts_micros),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error=%e, "encode error"),
+    }
+}
+
 fn spawn_encode_thread(
     cfg: &HostConfig,
     sender: TransportSender,
@@ -681,60 +739,103 @@ fn spawn_encode_thread(
             };
             // Reused across frames; only does work when a zoom is active.
             let mut scaler = codec::Scaler::new();
-            while let Ok(mut frame) = frame_rx.recv() {
-                // Keep-latest: if we fell behind (encoding slower than capture, or a
-                // slow link backing the pipeline up), skip straight to the newest
-                // captured frame and drop the stale ones. The capture→encode channel
-                // is unbounded and FIFO, so without this the encoder perpetually
-                // works on old frames and latency grows without bound ("minutes
-                // behind"). A screen share only ever wants the freshest frame;
-                // dropping *raw* frames is safe (unlike dropping encoded P-frames,
-                // which would corrupt the stream) — it just lowers the effective FPS.
-                let mut dropped = 0u32;
-                while let Ok(newer) = frame_rx.try_recv() {
-                    frame = newer;
-                    dropped += 1;
-                }
-                if dropped > 0 {
-                    tracing::trace!(dropped, "encode: dropped stale frames to stay live");
-                }
+            // The most recent raw frame, retained so we can re-emit a keyframe while
+            // the screen is static (an on-change capture backend delivers nothing
+            // then). `Frame.data` is `Bytes`, so holding it is a cheap Arc bump.
+            let mut last_frame: Option<capture::Frame> = None;
+            // When `last_frame` was captured, and when we last sent an access unit.
+            // The idle keyframe advances the capture ts by real elapsed time so the
+            // RTP timestamp moves forward (`send_video` steps from the ts delta).
+            let mut retained_at = Instant::now();
+            let mut last_sent = Instant::now();
+            loop {
+                // Wait for the next captured frame, but wake on a timeout so the idle
+                // path below can still emit a keyframe when the screen isn't changing.
+                let frame = match frame_rx.recv_timeout(ENCODE_POLL) {
+                    Ok(mut frame) => {
+                        // Keep-latest: if we fell behind (encoding slower than capture,
+                        // or a slow link backing the pipeline up), skip straight to the
+                        // newest captured frame and drop the stale ones. The
+                        // capture→encode channel is unbounded and FIFO, so without this
+                        // the encoder perpetually works on old frames and latency grows
+                        // without bound ("minutes behind"). A screen share only ever
+                        // wants the freshest frame; dropping *raw* frames is safe (unlike
+                        // dropping encoded P-frames, which would corrupt the stream) — it
+                        // just lowers the effective FPS.
+                        let mut dropped = 0u32;
+                        while let Ok(newer) = frame_rx.try_recv() {
+                            frame = newer;
+                            dropped += 1;
+                        }
+                        if dropped > 0 {
+                            tracing::trace!(dropped, "encode: dropped stale frames to stay live");
+                        }
+                        Some(frame)
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    // Capture closed (controller dropped): exit the thread.
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+
                 // Only encode/send once the viewer is authorized (never stream the
                 // screen to an unauthorized peer; also avoids RTP before SRTP is up
-                // and saves CPU when idle).
+                // and saves CPU when idle). Still retain the latest frame so we can
+                // key-frame immediately once authorized, even on a static screen.
                 if !authorized.load(Ordering::Relaxed) {
+                    if let Some(f) = frame {
+                        last_frame = Some(f);
+                        retained_at = Instant::now();
+                    }
                     continue;
                 }
+
                 // Track the GCC target so the stream adapts to the link.
                 encoder.set_target_bitrate(sender.target_bitrate_bps());
-                let force = force_keyframe.swap(false, Ordering::Relaxed);
-                // Digital zoom: crop the requested sub-rect and scale it back to
-                // the frame's own size, so the wire resolution never changes. When
-                // there's no zoom (the common case), `crop_scale` returns None and
-                // we encode the frame untouched — zero added cost.
-                let rect = *zoom.lock().unwrap();
-                let (data, width, height, stride) = match scaler.crop_scale(
-                    &frame.data,
-                    frame.width,
-                    frame.height,
-                    frame.bytes_per_row,
-                    rect,
-                    frame.width,
-                    frame.height,
-                ) {
-                    Some(scaled) => (scaled, frame.width, frame.height, frame.width * 4),
-                    None => (
-                        frame.data.as_ref(),
-                        frame.width,
-                        frame.height,
-                        frame.bytes_per_row,
-                    ),
-                };
-                match encoder.encode(data, width, height, stride, frame.capture_ts_micros, force) {
-                    Ok(Some(ef)) => {
-                        sender.send_video(ef.data, ef.is_keyframe, ef.capture_ts_micros)
+
+                match frame {
+                    // A fresh frame: encode and send it, forcing an IDR if one was
+                    // requested. Retain it for the idle path.
+                    Some(frame) => {
+                        let force = force_keyframe.swap(false, Ordering::Relaxed);
+                        encode_and_send(
+                            encoder.as_mut(),
+                            &mut scaler,
+                            &zoom,
+                            &sender,
+                            &frame,
+                            frame.capture_ts_micros,
+                            force,
+                        );
+                        last_sent = Instant::now();
+                        last_frame = Some(frame);
+                        retained_at = last_sent;
                     }
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!(error=%e, "encode error"),
+                    // No new frame this interval. Re-emit a keyframe if one was
+                    // requested (PLI / RequestKeyframe / join) or the periodic interval
+                    // elapsed, so a static screen still recovers from loss and refreshes
+                    // late joiners — the encoder's own periodic IDR never fires here
+                    // because we never call `encode()` without a frame.
+                    None => {
+                        let force_pending = force_keyframe.load(Ordering::Relaxed);
+                        if let Some(frame) = last_frame.as_ref()
+                            && should_emit_idle_keyframe(force_pending, last_sent.elapsed())
+                        {
+                            force_keyframe.store(false, Ordering::Relaxed);
+                            let ts = frame
+                                .capture_ts_micros
+                                .saturating_add(retained_at.elapsed().as_micros() as u64);
+                            encode_and_send(
+                                encoder.as_mut(),
+                                &mut scaler,
+                                &zoom,
+                                &sender,
+                                frame,
+                                ts,
+                                true,
+                            );
+                            last_sent = Instant::now();
+                        }
+                    }
                 }
             }
             tracing::info!("encode thread ended (capture closed)");
@@ -1014,12 +1115,33 @@ fn log_file_event(ev: FileEvent) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccessControl, authorization_permits, check_codec_compatible, verify_connect_password,
+        AccessControl, KEYFRAME_INTERVAL, authorization_permits, check_codec_compatible,
+        should_emit_idle_keyframe, verify_connect_password,
     };
     use crate::identity::DeviceIdentity;
     use rmd_protocol as proto;
     use rmd_protocol::pb::envelope::Payload;
     use std::collections::HashSet;
+    use std::time::Duration;
+
+    /// The encode thread's idle path must emit a keyframe when one was explicitly
+    /// requested (PLI / `RequestKeyframe` / join) OR the periodic interval has
+    /// elapsed since the last send — and must stay quiet otherwise, so a static
+    /// screen isn't re-keyed every poll tick. This is what lets a frozen static
+    /// screen recover even though the on-change capture backend delivers no frames.
+    #[test]
+    fn idle_keyframe_fires_on_request_or_interval_only() {
+        let short = KEYFRAME_INTERVAL - Duration::from_millis(1);
+        // A pending request forces a keyframe immediately, regardless of timing.
+        assert!(should_emit_idle_keyframe(true, Duration::ZERO));
+        assert!(should_emit_idle_keyframe(true, short));
+        // No request, interval not yet elapsed → stay quiet.
+        assert!(!should_emit_idle_keyframe(false, Duration::ZERO));
+        assert!(!should_emit_idle_keyframe(false, short));
+        // No request, but the periodic interval elapsed → periodic refresh fires.
+        assert!(should_emit_idle_keyframe(false, KEYFRAME_INTERVAL));
+        assert!(should_emit_idle_keyframe(false, KEYFRAME_INTERVAL + Duration::from_secs(1)));
+    }
 
     fn hello_payload() -> Payload {
         proto::hello("v", proto::Role::Viewer, 0).payload.unwrap()

@@ -461,6 +461,10 @@ fn start_latency_control(session: &Rc<Session>, receiver: RtcRtpReceiver) {
     };
     let pc = session.pc.clone();
     let video = session.video.clone();
+    // A weak handle to the session so the freeze path can reach the control channel
+    // to request a keyframe. Weak (not a clone of the Rc) so this leaked interval
+    // closure doesn't keep the session alive past teardown.
+    let session_weak = Rc::downgrade(session);
     // Previous cumulative (jitterBufferDelay, jitterBufferEmittedCount) so we can
     // derive the delay over just the last interval, not the lifetime average.
     let prev = Rc::new(RefCell::new((0.0_f64, 0.0_f64)));
@@ -471,6 +475,7 @@ fn start_latency_control(session: &Rc<Session>, receiver: RtcRtpReceiver) {
         let prev = prev.clone();
         let buf_ms = buf_ms.clone();
         let receiver = receiver.clone();
+        let session = session_weak.clone();
         spawn_local(async move {
             let Ok(stats) = JsFuture::from(pc.get_stats()).await else {
                 return;
@@ -488,6 +493,16 @@ fn start_latency_control(session: &Rc<Session>, receiver: RtcRtpReceiver) {
                 buf_ms.set(n);
                 apply_jitter_target(&receiver, n);
                 video.set_playback_rate(1.0);
+                // A freeze often means the decoder is stuck on a lost reference frame
+                // that a bigger buffer alone won't fix — ask the host for a fresh
+                // keyframe over the control channel (it forces an IDR on this). The
+                // 1 s monitor interval naturally throttles repeats.
+                if let Some(session) = session.upgrade()
+                    && let Some(dc) = session.control.borrow().as_ref()
+                {
+                    let _ = dc
+                        .send_with_u8_array(&rmd_protocol::encode(&rmd_protocol::request_keyframe()));
+                }
                 return;
             }
             let target_s = buf_ms.get() / 1000.0;

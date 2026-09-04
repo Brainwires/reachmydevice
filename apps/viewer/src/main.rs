@@ -53,6 +53,16 @@ const POLL_INTERVAL: Duration = Duration::from_millis(4);
 /// How often the viewer probes the host for round-trip latency.
 const PING_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How long the video may go without a decoded frame before we assume the stream
+/// has stalled (a lost reference frame the decoder can't recover from) and ask the
+/// host for a fresh keyframe. Short enough to recover quickly, long enough not to
+/// fire on ordinary frame-to-frame jitter.
+const STALL_THRESHOLD: Duration = Duration::from_millis(350);
+
+/// Minimum spacing between keyframe requests, so a persistent stall triggers at most
+/// a couple of requests per second instead of one every poll tick.
+const KEYFRAME_REQ_THROTTLE: Duration = Duration::from_millis(500);
+
 /// Default rendezvous server shown in the login form (overridable in the field
 /// or via `RMD_RENDEZVOUS_URL`).
 const DEFAULT_SERVER: &str = "https://app.reachmy.dev";
@@ -205,6 +215,10 @@ struct App {
     host_verified: Option<bool>,
     latency: Option<Duration>,
     last_ping: Instant,
+    /// When we last received a decoded video frame, and when we last asked the host
+    /// for a keyframe — together these drive stall-recovery in `about_to_wait`.
+    last_frame: Instant,
+    last_keyframe_req: Instant,
 
     // in-session UI
     view_only: bool,
@@ -299,6 +313,8 @@ impl App {
             host_verified: None,
             latency: None,
             last_ping: Instant::now(),
+            last_frame: Instant::now(),
+            last_keyframe_req: Instant::now(),
             view_only: false,
             hud_visible: true,
             file_status: None,
@@ -366,6 +382,8 @@ impl App {
                 self.pw_submitted = false;
                 self.latency = None;
                 self.last_ping = Instant::now();
+                self.last_frame = Instant::now();
+                self.last_keyframe_req = Instant::now();
                 self.conn = ConnState::Establishing;
                 self.screen = Screen::Connecting;
                 self.error = None;
@@ -404,6 +422,8 @@ impl App {
     fn handle_session_update(&mut self, update: ViewerUpdate) {
         match update {
             ViewerUpdate::Frame(frame) => {
+                // A decoded frame arrived: the stream is live, so reset the stall clock.
+                self.last_frame = Instant::now();
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.upload_frame(&frame);
                 }
@@ -1522,6 +1542,19 @@ impl ApplicationHandler for App {
                 s.send_ping();
             }
             self.last_ping = Instant::now();
+        }
+
+        // Stall recovery: if the video has gone quiet (a lost reference frame the
+        // decoder can't recover from — decode errors are dropped silently), ask the
+        // host for a fresh keyframe. The host honors this over the control channel;
+        // throttled so a persistent stall doesn't spam requests.
+        if self.screen == Screen::InSession
+            && self.last_frame.elapsed() > STALL_THRESHOLD
+            && self.last_keyframe_req.elapsed() > KEYFRAME_REQ_THROTTLE
+            && let Some(s) = &self.session
+        {
+            s.request_keyframe();
+            self.last_keyframe_req = Instant::now();
         }
 
         // Keep spinners animating while a job is in flight or we're establishing.
