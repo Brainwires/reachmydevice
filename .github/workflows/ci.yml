@@ -13,7 +13,8 @@ jobs:
   # macOS: the full native stack (ScreenCaptureKit/VideoToolbox path). Gating.
   build-macos:
     name: build & test (macOS)
-    runs-on: macos-14
+    # macos-14 is being retired (brownouts from 2026-10; EOL 2026-11-02); macos-15 is arm64 too.
+    runs-on: macos-15
     # The runner ships CMake 4.x, which dropped compatibility with pre-3.5
     # `cmake_minimum_required` — and libopus (bundled + built from source by
     # audiopus_sys under the `audio` feature, pulled in by `--all-features`) still
