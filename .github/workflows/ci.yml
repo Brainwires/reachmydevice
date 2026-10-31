@@ -13,7 +13,8 @@ jobs:
   # macOS: the full native stack (ScreenCaptureKit/VideoToolbox path). Gating.
   build-macos:
     name: build & test (macOS)
-    runs-on: macos-14
+    # macos-14 is being retired (brownouts from 2026-10; EOL 2026-11-02); macos-15 is arm64 too.
+    runs-on: macos-15
     # The runner ships CMake 4.x, which dropped compatibility with pre-3.5
     # `cmake_minimum_required` — and libopus (bundled + built from source by
     # audiopus_sys under the `audio` feature, pulled in by `--all-features`) still
@@ -103,10 +104,15 @@ jobs:
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
-      - name: cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+      # Run cargo-deny on the host, not the docker action: the action's container
+      # lacks the rust-toolchain.toml-pinned toolchain (so rustup errors before the
+      # check runs), while the host's rustup auto-installs it. Same reason the docker
+      # cargo-audit pass was dropped above.
+      - uses: taiki-e/install-action@v2
         with:
-          command: check advisories licenses bans sources
+          tool: cargo-deny
+      - name: cargo-deny
+        run: cargo deny check advisories licenses bans sources
 
   # Fuzz the untrusted-input parsers (protobuf decode, file-transfer state
   # machine, signaling frame) for a short time each. Uses nightly + cargo-fuzz;

@@ -99,9 +99,10 @@ mod imp {
         let display = std::env::var("DISPLAY").unwrap_or_default();
         let custom_x_server = !display.is_empty() && display != ":0";
 
-        // `-` prefix: optional file. Holds RMD_KEY_PASSPHRASE for at-rest identity
-        // encryption; the daemon prefers it from the env (see identity.rs), falling
-        // back to reading the file directly for the CLI.
+        // `-` prefix: optional file. Holds RMD_KEY_PASSPHRASE, which overrides the
+        // default at-rest identity encryption (the OS keyring; see identity.rs) —
+        // useful for headless hosts with no keyring. The daemon prefers it from the
+        // env, falling back to reading the file directly for the CLI.
         let env_file = "EnvironmentFile=-%h/.config/rmd/key.env";
 
         let unit = if custom_x_server {
@@ -311,6 +312,7 @@ mod imp {
                <key>RunAtLoad</key><true/>\n  \
                <key>KeepAlive</key><true/>\n  \
                <key>ThrottleInterval</key><integer>10</integer>\n  \
+               <key>SoftResourceLimits</key><dict><key>NumberOfFiles</key><integer>8192</integer></dict>\n  \
                <key>StandardErrorPath</key><string>{log}</string>\n  \
                <key>StandardOutPath</key><string>{log}</string>\n\
              </dict>\n</plist>\n",

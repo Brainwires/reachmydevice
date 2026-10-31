@@ -2,6 +2,56 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
+## [0.8.2] - 2026-10-31
+
+### Fixed
+- **Capture matches the display's real aspect ratio — no more cropped/stretched
+  screens.** The host configured capture to a fixed-aspect box (the `width`/`height`
+  cap), so a non-16:9 panel (e.g. a 16:10 Retina display) was cropped or letterboxed,
+  and pointer clicks landed off. The encode size is now fitted to each display's real
+  aspect (bounded by the cap) and re-fitted on a display switch, so the screen is sent
+  edge-to-edge and the normalized pointer mapping is correct; the encoder adopts the
+  per-frame size.
+- **Host no longer loses its TURN relay for a day at a time.** The relay-credential
+  refresh restarted the host *before* expiry to re-fetch, but the `/api/ice` broker
+  caches the ephemeral credential and only rotates it once lapsed — so the early
+  re-fetch got the same near-expiry credential, tripped the "too soon" guard, and gave
+  up permanently, leaving cross-NAT/browser viewers unable to hold a session (dropped
+  at the ~31s ICE consent timeout) until a manual restart. The host now refreshes
+  shortly *after* expiry and never gives up, with a per-process rate floor so a stuck
+  timestamp can't cause a restart loop.
+- **Host no longer leaks file descriptors on self-restart.** The DNS-wedge watchdog
+  re-execs the process, but macOS kqueue/Mach-port fds are not close-on-exec, so each
+  restart leaked a batch until a long-lived host hit `EMFILE` and could never recover.
+  `restart_in_place` now closes inherited fds before the re-exec, and the generated
+  launchd plist raises the fd soft limit to 8192 as a backstop.
+
+### Changed
+- README: dropped the hosted-relay sales pitch (it lives on the landing page); the repo
+  README stays focused on the open core.
+
+### Security
+- **The device identity key is now encrypted at rest by default** via the OS keyring
+  (macOS Keychain / Windows Credential Manager / Linux Secret Service). A headless host
+  with no keyring available falls back to storing the key in plaintext (`0600`) with a
+  loud warning — set `RMD_KEY_PASSPHRASE` or drop a `key.env` to encrypt there.
+  `RMD_KEY_PASSPHRASE` / `key.env` still take priority when present, existing identities
+  migrate in place on first run, and an identity is **never** regenerated on a decrypt
+  failure (it fails loudly instead of silently rotating your device id). **Note:** on
+  macOS the Keychain entry is bound to the binary's code signature, so a
+  rebuilt/reinstalled `rmdd` prompts once to re-authorize (GUI); stable code signing
+  avoids repeated prompts.
+- **The signaling relay is now scoped to the sender's account and rate-limited per
+  socket**, preventing cross-account presence probing and flooding in multi-tenant
+  deployments.
+- **`view_only` is now enforced on the host** (input injection is suppressed on the host
+  side), not just hidden in the viewer UI.
+- **The native ICE client sends the device token via `Authorization: Bearer`** instead of
+  the URL query string, keeping it out of proxy and access logs.
+- Updated `rustls`→0.23.46, `rustls-webpki`→0.103.16, `webpki-roots`→1.0.11,
+  `tokio`→1.54.1, and `clipboard-win`→5.4.3 to clear the 2026 TLS/tokio advisories
+  (RUSTSEC-2026-0285 / -0346 / -0348 / -0349 / -0382 / -0381 / -0386).
+
 ## [0.8.1] - 2026-08-14
 
 ### Fixed

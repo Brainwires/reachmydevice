@@ -32,6 +32,16 @@ services:
       DATABASE_URL: sqlite:/data/rmd.db?mode=rwc
       # Closed by default; set to 1/true only to provision the first account.
       RMD_RZ_OPEN_REGISTRATION: ${RMD_RZ_OPEN_REGISTRATION:-false}
+      # Secret required to create the FIRST account (stops a land-grab on any
+      # internet-reachable deploy). Admin token gates the admin API.
+      RMD_RZ_BOOTSTRAP_TOKEN: ${RMD_RZ_BOOTSTRAP_TOKEN:-}
+      RMD_RZ_ADMIN_TOKEN: ${RMD_RZ_ADMIN_TOKEN:-}
+      # Device-token and TURN-credential lifetimes (service defaults if unset).
+      RMD_RZ_TOKEN_TTL: ${RMD_RZ_TOKEN_TTL:-}
+      RMD_TURN_TTL: ${RMD_TURN_TTL:-}
+      # Behind the packaged Caddy, trust its forwarded-for header so per-IP rate
+      # limiting sees real client IPs instead of the proxy's single IP.
+      RMD_TRUSTED_PROXY_HEADER: ${RMD_TRUSTED_PROXY_HEADER:-x-forwarded-for}
       # TURN relay is OFF by default. Turn it on ONLY if you accept that relayed
       # media flows through — and uses the bandwidth of — this server (it's the
       # fallback for peers that can't connect directly). STUN-only stays fully

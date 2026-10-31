@@ -124,9 +124,17 @@ impl AccountClient {
     /// Fetch ICE servers (STUN + TURN with ephemeral credentials) minted by the
     /// rendezvous for this device `token` (`GET /api/ice`). Returns an empty list
     /// if the deployment advertises none; errors only on transport/HTTP failure.
+    ///
+    /// The token travels in `Authorization: Bearer`, never the query string, so
+    /// the long-lived credential can't land in proxy / access logs (H3). The
+    /// server also still accepts the deprecated `?token=` form for older clients.
     pub fn ice_servers(&self, token: &str) -> anyhow::Result<Vec<rmd_transport::IceServer>> {
-        let url = format!("{}/api/ice?token={}", self.base, token);
-        let resp = run(self.agent.get(&url).call())?;
+        let url = format!("{}/api/ice", self.base);
+        let resp = run(self
+            .agent
+            .get(&url)
+            .set("Authorization", &bearer_auth(token))
+            .call())?;
         Ok(resp.into_json::<IceConfig>()?.ice_servers)
     }
 
@@ -218,6 +226,11 @@ fn basic_auth(user: &str, pass: &str) -> String {
     format!("Basic {token}")
 }
 
+/// Build a `Bearer` `Authorization` header value from a device token.
+fn bearer_auth(token: &str) -> String {
+    format!("Bearer {token}")
+}
+
 /// Turn a `ureq` result into an `anyhow` one, surfacing HTTP error status codes
 /// and the server's error body as a readable message (instead of a bare status).
 fn run(result: Result<ureq::Response, ureq::Error>) -> anyhow::Result<ureq::Response> {
@@ -280,6 +293,11 @@ mod tests {
     fn basic_auth_encodes_credentials() {
         // "user:pass" -> base64
         assert_eq!(basic_auth("user", "pass"), "Basic dXNlcjpwYXNz");
+    }
+
+    #[test]
+    fn bearer_auth_formats_header() {
+        assert_eq!(bearer_auth("abc123"), "Bearer abc123");
     }
 
     #[test]
