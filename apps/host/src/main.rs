@@ -195,54 +195,63 @@ fn earliest_turn_expiry(servers: &[IceServer]) -> Option<u64> {
 
 /// Keep the host's TURN relay credential fresh. rmdd allocates its relay candidate
 /// **once** at startup and never refreshes it, so a host up longer than the
-/// credential's lifetime (`RMD_TURN_TTL` on the server) silently loses its relay:
-/// it stays connected but cross-NAT viewers can no longer reach it. Rather than
-/// re-allocate on the live media path, we restart the process **in place** shortly
-/// before the credential expires — a fresh start re-fetches ICE and re-allocates —
-/// and only while **no session is active**, so an in-progress connection is never
-/// interrupted. Reuses the same supervised-relaunch path as the DNS watchdog. A
-/// no-op when there's no credentialed TURN server (LAN/dev, STUN-only).
+/// credential's lifetime (`RMD_TURN_TTL` on the server) silently loses its relay: it
+/// stays connected but cross-NAT viewers can no longer reach it. We restart the
+/// process **in place** to re-fetch ICE + re-allocate, only while **no session is
+/// active** (never interrupting a live connection), reusing the DNS watchdog's
+/// supervised-relaunch path. A no-op when there's no credentialed TURN (LAN/dev,
+/// STUN-only).
+///
+/// We refresh shortly **after** expiry, not before: the `/api/ice` broker caches the
+/// ephemeral coturn credential and only rotates it once the cached one has lapsed, so
+/// re-fetching early just returns the same near-expiry cred (which previously made us
+/// give up and leave the relay dead for a day). Restarting just past expiry
+/// guarantees a fresh full-TTL credential. A floor since thread start bounds the
+/// restart rate so a stuck/already-expired timestamp can't cause a tight loop.
 fn spawn_turn_refresh(servers: &[IceServer], session_active: Arc<AtomicBool>) {
-    /// Restart this long before the credential lapses (leaves margin to reconnect).
-    const LEAD: u64 = 300;
-    /// Refuse to schedule a refresh nearer than this — guards against a mis-parsed
-    /// or already-expired timestamp turning into a restart loop.
-    const MIN_LEAD: u64 = 600;
+    /// Restart this long after the credential lapses (lets the broker rotate it).
+    const SETTLE: u64 = 30;
+    /// Never restart more often than this (guards a mis-parsed/stuck expiry against a
+    /// tight restart loop — e.g. a broker that keeps returning an expired cred).
+    const MIN_RESTART_INTERVAL: u64 = 600;
 
     let Some(expiry) = earliest_turn_expiry(servers) else {
         return;
     };
     let now = now_unix().max(0) as u64;
-    if expiry <= now + MIN_LEAD {
-        tracing::warn!(
-            expiry,
-            now,
-            "TURN credential expiry too soon or unrecognised; not scheduling a refresh"
-        );
-        return;
-    }
     tracing::info!(
         expiry,
         in_secs = expiry.saturating_sub(now),
-        "scheduling TURN credential refresh before expiry"
+        "scheduling TURN credential refresh after expiry"
     );
     std::thread::spawn(move || {
+        // Wall-clock floor: never restart until at least MIN_RESTART_INTERVAL has
+        // elapsed since this (re-exec'd) process started, so a persistently
+        // stale/expired cred degrades to one restart every MIN_RESTART_INTERVAL, not
+        // a tight loop.
+        let started = now_unix().max(0) as u64;
         loop {
             let now = now_unix().max(0) as u64;
-            let refresh_at = expiry.saturating_sub(LEAD);
-            if now < refresh_at {
-                // Nap until refresh time, capped so we re-check periodically.
-                std::thread::sleep(Duration::from_secs((refresh_at - now).min(3600)));
+            let restart_at = expiry.saturating_add(SETTLE);
+            if now < restart_at {
+                // Nap until just past expiry, capped so we re-check periodically.
+                std::thread::sleep(Duration::from_secs((restart_at - now).min(3600)));
                 continue;
             }
-            // Past refresh time: wait for an idle moment, then restart for fresh creds.
+            let since_start = now.saturating_sub(started);
+            if since_start < MIN_RESTART_INTERVAL {
+                std::thread::sleep(Duration::from_secs(MIN_RESTART_INTERVAL - since_start));
+                continue;
+            }
+            // Past expiry and past the rate floor: wait for an idle moment, then
+            // restart for a fresh credential.
             if session_active.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_secs(30));
                 continue;
             }
             tracing::info!(
                 expiry,
-                "refreshing TURN credential before it expires — restarting host in place"
+                "refreshing expired TURN credential — restarting host in place"
             );
             rmd_session::rendezvous::restart_in_place();
         }

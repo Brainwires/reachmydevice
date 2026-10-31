@@ -135,6 +135,32 @@ impl Signaling for RendezvousClient {
     }
 }
 
+/// Close every inherited fd `>= 3` (keep stdio) so a self-`exec` starts with a
+/// clean descriptor table. macOS kqueue/Mach-port fds (tokio/mio, the system DNS
+/// resolver) are NOT close-on-exec, so without this each watchdog re-exec leaks a
+/// batch and a long-lived host eventually hits EMFILE ("Too many open files") and
+/// can never recover. Best-effort: closing an already-closed fd just returns EBADF.
+/// No open fd can be `>= RLIM_NOFILE` (the soft limit), so iterating to it covers
+/// them all; cap the loop so a pathologically large/absent limit can't hang us.
+#[cfg(unix)]
+fn close_inherited_fds() {
+    let max: i32 = unsafe {
+        let mut rl: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0 && rl.rlim_cur != libc::RLIM_INFINITY
+        {
+            (rl.rlim_cur as i64).min(65536) as i32
+        } else {
+            65536
+        }
+    };
+    for fd in 3..max {
+        // SAFETY: closing a plain fd; EBADF on an unused slot is fine and ignored.
+        unsafe {
+            libc::close(fd);
+        }
+    }
+}
+
 /// Restart the process **in place** for a clean slate — a fresh system DNS
 /// resolver (shedding a wedged `getaddrinfo`) and a fresh startup ICE fetch (so a
 /// host that came up relay-less, or whose TURN credential is expiring, re-acquires
@@ -148,6 +174,8 @@ pub fn restart_in_place() -> ! {
         use std::os::unix::process::CommandExt;
         if let Ok(exe) = std::env::current_exe() {
             let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+            // Shed leaked non-close-on-exec fds so the fresh image starts clean.
+            close_inherited_fds();
             // `exec` only returns on error.
             let err = std::process::Command::new(&exe).args(&args).exec();
             tracing::error!(error = %err, "re-exec failed; exiting for a supervisor to relaunch");

@@ -578,10 +578,26 @@ impl VideoPlane for LocalVideoPlane {
     }
 }
 
+/// Largest even-dimensioned rectangle with the `disp_w : disp_h` aspect ratio that
+/// fits within the `(cap_w, cap_h)` box. Used to fit the encode size to the captured
+/// display's real aspect, so a non-16:9 panel is sent edge-to-edge instead of being
+/// letterboxed or cropped by a fixed-aspect cap (which also keeps the normalized
+/// pointer mapping honest). Falls back to the cap if any input is zero.
+fn fit_display_aspect(disp_w: u32, disp_h: u32, cap_w: u32, cap_h: u32) -> (u32, u32) {
+    if disp_w == 0 || disp_h == 0 || cap_w == 0 || cap_h == 0 {
+        return (cap_w.max(2), cap_h.max(2));
+    }
+    let scale = f64::min(cap_w as f64 / disp_w as f64, cap_h as f64 / disp_h as f64);
+    let even = |v: f64| ((v.round() as u32).max(2)) & !1u32;
+    (even(disp_w as f64 * scale), even(disp_h as f64 * scale))
+}
+
 /// Owns the live capture session and can restart it on another display
 /// (multi-monitor). The encode thread reads a stable frame channel, so switching
-/// displays only swaps the producer — the encoded output size is unchanged
-/// (the backend scales each display to the configured dimensions).
+/// displays only swaps the producer. The encode size is fitted to each display's
+/// real aspect ratio (bounded by the configured `width`/`height` cap) via
+/// [`fit_display_aspect`], so a non-16:9 display is captured edge-to-edge; the
+/// encoder adopts whatever frame size the capture produces.
 ///
 /// `pub(crate)` so the system-mode [agent](crate::agent) can reuse it as its
 /// capture source (driven by broker control messages instead of a local viewer).
@@ -622,6 +638,22 @@ impl CaptureController {
             force_keyframe,
             identity,
         })
+    }
+
+    /// The capture config with the encode size fitted to the CURRENT display's
+    /// aspect ratio (bounded by the configured `width`/`height` cap), so a non-16:9
+    /// display is captured edge-to-edge instead of letterboxed/cropped.
+    /// `self.config.{width,height}` stay the cap; only the returned clone is fitted,
+    /// so switching to a differently-shaped display re-fits correctly.
+    fn fitted_config(&self) -> capture::CaptureConfig {
+        let mut cfg = self.config.clone();
+        if let Some(d) = self.displays.get(self.current) {
+            let (w, h) =
+                fit_display_aspect(d.width, d.height, self.config.width, self.config.height);
+            cfg.width = w;
+            cfg.height = h;
+        }
+        cfg
     }
 
     /// Persist a portal restore token the capture backend just obtained, so the
@@ -676,7 +708,7 @@ impl CaptureController {
         if self.handle.is_some() {
             return;
         }
-        match capture::start_capture(self.config.clone(), self.current, self.frame_tx.clone()) {
+        match capture::start_capture(self.fitted_config(), self.current, self.frame_tx.clone()) {
             Ok(h) => {
                 let token = h.restore_token();
                 self.handle = Some(h);
@@ -728,7 +760,7 @@ impl CaptureController {
         if self.handle.is_none() {
             return; // not capturing yet — the next resume() picks up the new config
         }
-        match capture::start_capture(self.config.clone(), self.current, self.frame_tx.clone()) {
+        match capture::start_capture(self.fitted_config(), self.current, self.frame_tx.clone()) {
             Ok(handle) => {
                 let token = handle.restore_token();
                 self.handle = Some(handle); // dropping the old session stops it
@@ -756,7 +788,7 @@ impl CaptureController {
         if self.handle.is_none() {
             return;
         }
-        match capture::start_capture(self.config.clone(), idx, self.frame_tx.clone()) {
+        match capture::start_capture(self.fitted_config(), idx, self.frame_tx.clone()) {
             Ok(handle) => {
                 let token = handle.restore_token();
                 self.handle = Some(handle); // dropping the old session stops it

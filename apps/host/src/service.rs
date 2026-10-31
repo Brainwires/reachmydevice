@@ -311,6 +311,7 @@ mod imp {
                <key>RunAtLoad</key><true/>\n  \
                <key>KeepAlive</key><true/>\n  \
                <key>ThrottleInterval</key><integer>10</integer>\n  \
+               <key>SoftResourceLimits</key><dict><key>NumberOfFiles</key><integer>8192</integer></dict>\n  \
                <key>StandardErrorPath</key><string>{log}</string>\n  \
                <key>StandardOutPath</key><string>{log}</string>\n\
              </dict>\n</plist>\n",
