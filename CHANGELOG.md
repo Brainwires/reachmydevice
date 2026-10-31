@@ -2,6 +2,34 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
+## [0.8.2] - 2026-10-31
+
+### Fixed
+- **Capture matches the display's real aspect ratio — no more cropped/stretched
+  screens.** The host configured capture to a fixed-aspect box (the `width`/`height`
+  cap), so a non-16:9 panel (e.g. a 16:10 Retina display) was cropped or letterboxed,
+  and pointer clicks landed off. The encode size is now fitted to each display's real
+  aspect (bounded by the cap) and re-fitted on a display switch, so the screen is sent
+  edge-to-edge and the normalized pointer mapping is correct; the encoder adopts the
+  per-frame size.
+- **Host no longer loses its TURN relay for a day at a time.** The relay-credential
+  refresh restarted the host *before* expiry to re-fetch, but the `/api/ice` broker
+  caches the ephemeral credential and only rotates it once lapsed — so the early
+  re-fetch got the same near-expiry credential, tripped the "too soon" guard, and gave
+  up permanently, leaving cross-NAT/browser viewers unable to hold a session (dropped
+  at the ~31s ICE consent timeout) until a manual restart. The host now refreshes
+  shortly *after* expiry and never gives up, with a per-process rate floor so a stuck
+  timestamp can't cause a restart loop.
+- **Host no longer leaks file descriptors on self-restart.** The DNS-wedge watchdog
+  re-execs the process, but macOS kqueue/Mach-port fds are not close-on-exec, so each
+  restart leaked a batch until a long-lived host hit `EMFILE` and could never recover.
+  `restart_in_place` now closes inherited fds before the re-exec, and the generated
+  launchd plist raises the fd soft limit to 8192 as a backstop.
+
+### Changed
+- README: dropped the hosted-relay sales pitch (it lives on the landing page); the repo
+  README stays focused on the open core.
+
 ## [0.8.1] - 2026-08-14
 
 ### Fixed
