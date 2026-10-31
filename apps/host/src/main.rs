@@ -276,8 +276,11 @@ fn authorized_device_ids() -> Vec<String> {
 }
 
 /// Load (or first-run create) this host's device identity, used to prove the
-/// host's identity to viewers (bound to the DTLS session). Encrypted at rest when
-/// `RMD_KEY_PASSPHRASE` is set.
+/// host's identity to viewers (bound to the DTLS session). Encrypted at rest by
+/// default via the OS keyring (macOS Keychain / Windows Credential Manager /
+/// Linux Secret Service); `RMD_KEY_PASSPHRASE` / a `key.env` file override that
+/// and take priority. A headless host with no keyring available falls back to a
+/// plaintext (`0600`) key with a warning.
 fn identity_path() -> std::path::PathBuf {
     rmd_session::settings::config_dir().join("identity.key")
 }

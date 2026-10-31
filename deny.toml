@@ -16,30 +16,38 @@ version = 2
 yanked = "deny"
 # Add specific RUSTSEC IDs here ONLY with a written justification + expiry.
 # Everything below is a TRANSITIVE dependency with no reachable exploit path in
-# what we ship, and no upstream fix currently available. Revisit ~2026-Q4.
+# what we ship, and no upstream fix currently available. Security-audited
+# 2026-10-31; revisit ~2027-Q2.
 ignore = [
     # --- Unmaintained (informational — not vulnerabilities) ---
-    # gtk-rs GTK3 bindings — pulled ONLY by the optional `tray` feature's Linux
-    # backend (macOS/Windows trays are native); headless/server hosts never build it.
-    "RUSTSEC-2024-0412",
-    "RUSTSEC-2024-0413",
-    "RUSTSEC-2024-0415",
-    "RUSTSEC-2024-0416",
-    "RUSTSEC-2024-0418",
-    "RUSTSEC-2024-0419",
-    "RUSTSEC-2024-0420",
-    "RUSTSEC-2024-0370", # proc-macro-error — transitive proc-macro helper
-    "RUSTSEC-2024-0436", # paste — transitive proc-macro helper
-    "RUSTSEC-2026-0150", # audiopus_sys — only under the optional `audio` feature
-    "RUSTSEC-2026-0192", # ttf-parser — via egui/epaint's default font stack (viewer)
-    # --- Vulnerabilities (transitive, feature/platform-gated, no upstream fix yet) ---
+    "RUSTSEC-2024-0370", # proc-macro-error — transitive proc-macro helper (tray feature, build-time only)
+    "RUSTSEC-2024-0436", # paste — transitive proc-macro helper (av1 feature, build-time only)
+    "RUSTSEC-2026-0150", # audiopus_sys — C libopus bindgen, only under the optional `audio` feature
+    "RUSTSEC-2026-0192", # ttf-parser — via sctk-adwaita (Wayland client-side decorations); parses bundled titlebar fonts, never attacker data
+    # zbus 4 name/variant crates — pulled by `ashpd` (Wayland screen-capture, Linux
+    # only), unmaintained (merged into zbus 6). No fix until ashpd moves to zbus 6;
+    # maintenance advisories, no known exploit. Track ashpd; revisit ~2027-Q2.
+    "RUSTSEC-2026-0370", # zvariant
+    "RUSTSEC-2026-0371", # zbus_names
+    "RUSTSEC-2026-0372", # zvariant_derive
+    # --- Vulnerabilities (transitive, feature/platform-gated or not practically exploitable, no upstream fix) ---
     # crossbeam Debug-format invalid-pointer deref — via rav1e (optional `av1`
     # feature) → rayon; not exercised by our Debug output. No patched release yet.
     "RUSTSEC-2026-0204",
-    # quick-xml DoS on hostile XML (dup-attr / namespace flooding) — transitive; we
-    # never feed it attacker-controlled XML. Awaiting an upstream fix.
+    # quick-xml DoS on hostile XML — via `wayland-scanner` (build-time proc-macro);
+    # only parses the Wayland protocol XML shipped with the crates, never attacker XML.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+    # crypto-bigint 0.5.5 timing side-channel in generic BoxedUint ops — reached via
+    # the vendored rtc-dtls fork's p256/p384 0.13 → elliptic-curve 0.13 (DTLS ECDHE).
+    # LOW risk: DTLS keys are ephemeral per handshake (one measurement per secret,
+    # defeating repeated-measurement timing attacks), p256 uses fiat-crypto field
+    # backends that bypass the flagged branches, and exploitation needs a co-resident
+    # CPU attacker — outside the remote-KVM threat model. No fix exists: crypto-bigint
+    # >=0.7.6 (the advisory's requirement) is unreleased in RustCrypto, and a full fork
+    # bump of p256→0.14 only reaches 0.6.x. Tracked; revisit when a >=0.7.6-capable
+    # elliptic-curve/p256 ships.
+    "RUSTSEC-2026-0387",
 ]
 
 [licenses]

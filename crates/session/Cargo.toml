@@ -70,6 +70,20 @@ base64 = "0.22"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# OS keyring for the identity-key wrapping passphrase (identity.rs): the key file
+# is encrypted at rest BY DEFAULT, with the random passphrase held by the
+# platform credential store instead of a plaintext file. keyring 3 enables no
+# backend by default, so each platform opts into its native one here:
+# macOS Keychain, Windows Credential Manager, Linux Secret Service (gnome-keyring /
+# KWallet over D-Bus via zbus — pure Rust, no libdbus; `tokio` is the executor
+# zbus blocks on, `crypto-rust` the pure-Rust session encryption).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
 [[example]]
 name = "audio_e2e"
 path = "examples/audio_e2e.rs"

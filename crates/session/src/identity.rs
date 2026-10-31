@@ -8,6 +8,32 @@
 //!
 //! The private key never leaves the device and is not shared with the rendezvous
 //! server — the server only stores the public key for display.
+//!
+//! # At-rest protection
+//!
+//! The private seed is stored in `identity.key`, **encrypted by default**
+//! (Argon2id + XChaCha20-Poly1305, see [`DeviceIdentity::save`]). The wrapping
+//! passphrase comes from the first of these that yields one:
+//!
+//! 1. the `RMD_KEY_PASSPHRASE` env var ([`KEY_PASSPHRASE_ENV`]);
+//! 2. a `key.env` file next to the key holding the same `RMD_KEY_PASSPHRASE=…`;
+//! 3. the OS keyring (macOS Keychain / Windows Credential Manager / Linux
+//!    Secret Service): a random passphrase generated on first use and stored
+//!    under [`KEYRING_SERVICE`]/[`KEYRING_ENTRY`], so the key is encrypted
+//!    without any operator setup and the passphrase never touches the disk in
+//!    plaintext.
+//!
+//! When none applies (typically a headless host with no keyring — a systemd
+//! system service without a Secret Service / D-Bus session) the key is stored in
+//! **plaintext** with a loud warning and a hint to set `RMD_KEY_PASSPHRASE`. The
+//! settings store is encrypted under a subkey of this seed, so in that fallback
+//! the stored device token and connection password are only as protected as the
+//! `0600` file permissions. The hardware-backed (TPM/Enclave) option is the
+//! future answer for non-exportable unattended keys.
+//!
+//! An existing identity is never regenerated: if the key file is encrypted and no
+//! source yields the right passphrase, loading fails (so the host does not
+//! silently de-register from the rendezvous under a new `device_id`).
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -18,35 +44,191 @@ use std::path::Path;
 use zeroize::Zeroizing;
 
 /// Env var holding the passphrase used to encrypt the identity key at rest.
-/// When set, the key file is wrapped (Argon2id + XChaCha20-Poly1305); when
-/// absent, the key is stored in plaintext (with a loud warning) so headless
-/// hosts still start — the hardware-backed (TPM/Enclave) option is the future
-/// answer for non-exportable unattended keys.
+/// Highest-priority passphrase source (see the module docs for the full order):
+/// when set it is used for both wrapping and unwrapping, ahead of `key.env` and
+/// the OS keyring, so existing deployments that provision it (systemd
+/// `EnvironmentFile`) are unaffected by the keyring default.
 pub const KEY_PASSPHRASE_ENV: &str = "RMD_KEY_PASSPHRASE";
+
+/// OS-keyring *service* name under which the auto-generated identity-key
+/// passphrase is stored (shown by Keychain Access / `secret-tool` / Credential
+/// Manager). Shared by every binary of the same OS user (`rmdd` and `rmd`), which
+/// also share `identity.key`.
+pub const KEYRING_SERVICE: &str = "com.brainwires.rmd";
+
+/// OS-keyring *entry* (account / username) name of the identity-key passphrase.
+pub const KEYRING_ENTRY: &str = "identity-key-passphrase";
 
 /// Magic header identifying an encrypted (wrapped) identity file.
 const WRAP_MAGIC: &[u8; 4] = b"ORK1";
 const WRAP_SALT_LEN: usize = 16;
 const WRAP_NONCE_LEN: usize = 24;
 
-/// Resolve the identity-key passphrase. Prefers `RMD_KEY_PASSPHRASE` from the
+/// Which source a wrapping passphrase came from. Logged (never the value) so an
+/// operator can tell which of env / `key.env` / keyring is in force.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PassphraseSource {
+    Env,
+    KeyEnvFile,
+    OsKeyring,
+}
+
+impl std::fmt::Display for PassphraseSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PassphraseSource::Env => KEY_PASSPHRASE_ENV,
+            PassphraseSource::KeyEnvFile => "key.env",
+            PassphraseSource::OsKeyring => "OS keyring",
+        })
+    }
+}
+
+/// Resolve an operator-provided identity-key passphrase (sources 1–2; the OS
+/// keyring is layered on by [`resolve_wrap_passphrase`] /
+/// [`resolve_unwrap_passphrase`]). Prefers `RMD_KEY_PASSPHRASE` from the
 /// environment (how the daemon gets it, via its systemd `EnvironmentFile`), and
 /// otherwise reads a `key.env` file sitting next to the key (same
 /// `RMD_KEY_PASSPHRASE=…` line). Without this fallback the `rmdd` CLI can't open
 /// an encrypted key from a plain shell — `rmdd set/list` would fail "identity is
 /// encrypted" while the service worked. `config_dir` is the directory holding
 /// `identity.key` (i.e. `~/.config/rmd`).
-fn key_passphrase(config_dir: Option<&Path>) -> Option<Zeroizing<String>> {
+fn explicit_passphrase(config_dir: Option<&Path>) -> Option<(Zeroizing<String>, PassphraseSource)> {
     if let Ok(v) = std::env::var(KEY_PASSPHRASE_ENV) {
         if !v.is_empty() {
-            return Some(Zeroizing::new(v));
+            return Some((Zeroizing::new(v), PassphraseSource::Env));
         }
     }
     let content = Zeroizing::new(std::fs::read_to_string(config_dir?.join("key.env")).ok()?);
     content
         .lines()
         .find_map(parse_key_env_line)
-        .map(Zeroizing::new)
+        .map(|p| (Zeroizing::new(p), PassphraseSource::KeyEnvFile))
+}
+
+/// The OS keyring as a passphrase source. Every call runs on a dedicated thread:
+/// the Linux Secret Service backend blocks on an internal async executor and
+/// can deadlock when invoked from a thread that is inside a tokio runtime
+/// (keyring-rs #132), and a panicking platform backend must surface as
+/// "unavailable" rather than take the daemon down.
+mod os_keyring {
+    use super::{KEYRING_ENTRY, KEYRING_SERVICE};
+    use zeroize::Zeroizing;
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn on_thread<T: Send + 'static>(
+        f: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+    ) -> anyhow::Result<T> {
+        std::thread::Builder::new()
+            .name("rmd-keyring".into())
+            .spawn(f)
+            .map_err(|e| anyhow::anyhow!("spawn keyring thread: {e}"))?
+            .join()
+            .map_err(|_| anyhow::anyhow!("OS keyring backend panicked"))?
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn entry() -> anyhow::Result<keyring::Entry> {
+        keyring::Entry::new(KEYRING_SERVICE, KEYRING_ENTRY)
+            .map_err(|e| anyhow::anyhow!("OS keyring: {e}"))
+    }
+
+    /// Read the stored passphrase: `Ok(None)` when the store is reachable but
+    /// holds no (or an empty) entry; `Err` when the store itself is unavailable.
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    fn read(entry: &keyring::Entry) -> anyhow::Result<Option<Zeroizing<String>>> {
+        match entry.get_password() {
+            Ok(p) if !p.is_empty() => Ok(Some(Zeroizing::new(p))),
+            Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("OS keyring: {e}")),
+        }
+    }
+
+    /// Fetch the passphrase if the keyring holds one. Never creates an entry.
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    pub(super) fn get() -> anyhow::Result<Option<Zeroizing<String>>> {
+        on_thread(|| read(&entry()?))
+    }
+
+    /// Fetch the passphrase, generating + storing a random one on first use.
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    pub(super) fn get_or_create() -> anyhow::Result<Zeroizing<String>> {
+        on_thread(|| {
+            let entry = entry()?;
+            if let Some(existing) = read(&entry)? {
+                return Ok(existing);
+            }
+            let mut raw = Zeroizing::new([0u8; 32]);
+            getrandom::getrandom(raw.as_mut()).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
+            let fresh = Zeroizing::new(hex::encode(raw.as_ref()));
+            entry
+                .set_password(&fresh)
+                .map_err(|e| anyhow::anyhow!("OS keyring: {e}"))?;
+            // Read back and use *what the store holds*, not the local value: a
+            // key must only ever be wrapped under a passphrase the keyring has
+            // demonstrably persisted (a store that accepts a write it won't keep
+            // would otherwise lock the identity out on the next start), and if two
+            // processes raced the first-run create the one the store kept wins.
+            read(&entry)?.ok_or_else(|| {
+                anyhow::anyhow!("OS keyring accepted the passphrase but did not persist it")
+            })
+        })
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    pub(super) fn get() -> anyhow::Result<Option<Zeroizing<String>>> {
+        let _ = (KEYRING_SERVICE, KEYRING_ENTRY);
+        Err(anyhow::anyhow!(
+            "OS keyring is not supported on this platform"
+        ))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    pub(super) fn get_or_create() -> anyhow::Result<Zeroizing<String>> {
+        Err(anyhow::anyhow!(
+            "OS keyring is not supported on this platform"
+        ))
+    }
+}
+
+/// Resolve the passphrase to **wrap** (write) the identity key under, in the
+/// module-documented order: env, `key.env`, then the OS keyring (creating a
+/// random passphrase there on first use). `Err` carries the reason no passphrase
+/// is available — the caller falls back to plaintext and must say so loudly.
+fn resolve_wrap_passphrase(
+    config_dir: Option<&Path>,
+) -> anyhow::Result<(Zeroizing<String>, PassphraseSource)> {
+    if let Some(explicit) = explicit_passphrase(config_dir) {
+        return Ok(explicit);
+    }
+    os_keyring::get_or_create().map(|p| (p, PassphraseSource::OsKeyring))
+}
+
+/// Resolve the passphrase to **unwrap** (read) an encrypted identity key: env,
+/// `key.env`, then the OS keyring — read-only, so a keyring that has lost its
+/// entry is reported, never silently replaced with a fresh (useless) passphrase.
+/// `Err` means no passphrase is available at all; the caller must fail the load
+/// rather than regenerate the identity.
+fn resolve_unwrap_passphrase(
+    config_dir: Option<&Path>,
+) -> anyhow::Result<(Zeroizing<String>, PassphraseSource)> {
+    if let Some(explicit) = explicit_passphrase(config_dir) {
+        return Ok(explicit);
+    }
+    match os_keyring::get() {
+        Ok(Some(p)) => Ok((p, PassphraseSource::OsKeyring)),
+        Ok(None) => anyhow::bail!(
+            "identity key is encrypted but no passphrase is available: {KEY_PASSPHRASE_ENV} is \
+             unset, there is no key.env, and the OS keyring has no `{KEYRING_SERVICE}` / \
+             `{KEYRING_ENTRY}` entry (deleted, or a different OS user/keychain?) — restore the \
+             passphrase or set {KEY_PASSPHRASE_ENV}; do NOT delete the key, that discards this \
+             device's identity and its rendezvous registration"
+        ),
+        Err(e) => anyhow::bail!(
+            "identity key is encrypted but the OS keyring is unavailable ({e}) and \
+             {KEY_PASSPHRASE_ENV} is unset — set {KEY_PASSPHRASE_ENV} (or key.env next to the \
+             key) to the wrapping passphrase"
+        ),
+    }
 }
 
 /// Parse one `key.env` line into the passphrase value, tolerating a leading
@@ -409,13 +591,25 @@ impl DeviceIdentity {
         format!("{:06}", n % 1_000_000)
     }
 
-    /// Load the identity from `path`, or generate + save a new one if absent.
+    /// Load the identity from `path`, or generate + save a new one **only if the
+    /// file is absent**.
     ///
-    /// If `RMD_KEY_PASSPHRASE` is set the file is encrypted at rest; a
-    /// legacy plaintext file is read (with a warning) and transparently upgraded
-    /// to the encrypted form when a passphrase is available.
+    /// - An encrypted file is unwrapped with the first passphrase source that
+    ///   yields one (env, `key.env`, OS keyring — see the module docs). If none
+    ///   does, or the passphrase is wrong, this **fails**: the identity is never
+    ///   regenerated over an existing file, since a new `device_id` would silently
+    ///   de-register the host from the rendezvous.
+    /// - A legacy plaintext file is read and transparently upgraded to the
+    ///   encrypted form when any passphrase source (including a freshly created
+    ///   keyring entry) is available; otherwise it stays plaintext with a warning.
     pub fn load_or_create(path: &Path) -> anyhow::Result<Self> {
-        let passphrase = key_passphrase(path.parent());
+        // Best-effort cross-process serialization (same advisory lock the settings
+        // store uses, on `identity.lock`): two first-run starters (`rmdd` service +
+        // a concurrent `rmdd set`) must not each mint a keyring passphrase and wrap
+        // the key under the one the store then overwrites. Failing to lock (e.g. a
+        // read-only config dir holding a provisioned key) must not block a load.
+        let _lock = crate::settings::lock(path).ok();
+        let config_dir = path.parent();
         if !path.exists() {
             let id = Self::generate()?;
             id.save(path)?;
@@ -423,52 +617,78 @@ impl DeviceIdentity {
         }
 
         let data = std::fs::read(path)?;
-        let wrapped = data.starts_with(WRAP_MAGIC);
-        let seed: Zeroizing<[u8; 32]> = if wrapped {
-            let pass = passphrase.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("identity is encrypted; set {KEY_PASSPHRASE_ENV}")
+        if data.starts_with(WRAP_MAGIC) {
+            // Encrypted: decrypt or fail — never fall through to regeneration.
+            let (pass, source) = resolve_unwrap_passphrase(config_dir)?;
+            let seed = unwrap_seed(&data, pass.as_bytes()).map_err(|e| {
+                anyhow::anyhow!(
+                    "{e} (passphrase source: {source}); refusing to regenerate the identity"
+                )
             })?;
-            unwrap_seed(&data, pass.as_bytes())?
-        } else {
-            // Legacy plaintext hex.
-            let hex_seed = Zeroizing::new(String::from_utf8_lossy(&data).trim().to_string());
-            let bytes = Zeroizing::new(hex::decode(hex_seed.as_str())?);
-            let s: [u8; 32] = bytes
+            return Ok(Self {
+                signing: SigningKey::from_bytes(&seed),
+            });
+        }
+
+        // Legacy plaintext hex.
+        let hex_seed = Zeroizing::new(String::from_utf8_lossy(&data).trim().to_string());
+        let bytes = Zeroizing::new(hex::decode(hex_seed.as_str())?);
+        let seed: Zeroizing<[u8; 32]> = Zeroizing::new(
+            bytes
                 .as_slice()
                 .try_into()
-                .map_err(|_| anyhow::anyhow!("identity file is not a 32-byte key"))?;
-            if passphrase.is_none() {
-                tracing::warn!(
-                    "identity key stored in PLAINTEXT — set {KEY_PASSPHRASE_ENV} to encrypt at rest"
-                );
-            }
-            Zeroizing::new(s)
-        };
-
+                .map_err(|_| anyhow::anyhow!("identity file is not a 32-byte key"))?,
+        );
         let id = Self {
             signing: SigningKey::from_bytes(&seed),
         };
-        // Opportunistically upgrade a legacy plaintext file once a passphrase exists.
-        if !wrapped && passphrase.is_some() {
-            tracing::info!("upgrading plaintext identity key to encrypted-at-rest");
-            id.save(path)?;
+        // Opportunistically upgrade a legacy plaintext file once a passphrase
+        // exists — including the keyring's, minted right here on first use.
+        match resolve_wrap_passphrase(config_dir) {
+            Ok((pass, source)) => {
+                tracing::info!(
+                    passphrase_source = %source,
+                    "upgrading plaintext identity key to encrypted-at-rest"
+                );
+                id.save_with(path, Some(pass.as_bytes()))?;
+            }
+            Err(reason) => tracing::warn!(
+                %reason,
+                "identity key stored in PLAINTEXT (no OS keyring) — set {KEY_PASSPHRASE_ENV} (or key.env next to the key) to encrypt at rest"
+            ),
         }
         Ok(id)
     }
 
     /// Persist the private seed to `path` with restrictive permissions —
-    /// encrypted (Argon2id + XChaCha20-Poly1305) when a passphrase is set, else
-    /// plaintext hex with a warning.
+    /// encrypted (Argon2id + XChaCha20-Poly1305) under the resolved passphrase
+    /// (env, `key.env`, or an OS-keyring passphrase created on first use), else
+    /// plaintext hex with a warning when no keyring is available either.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
-        let seed = Zeroizing::new(self.signing.to_bytes());
-        let bytes = match key_passphrase(path.parent()) {
-            Some(pass) => Zeroizing::new(wrap_seed(&seed, pass.as_bytes())?),
-            None => {
-                tracing::warn!(
-                    "writing identity key in PLAINTEXT — set {KEY_PASSPHRASE_ENV} to encrypt at rest"
-                );
-                Zeroizing::new(hex::encode(seed.as_ref()).into_bytes())
+        match resolve_wrap_passphrase(path.parent()) {
+            Ok((pass, source)) => {
+                tracing::info!(passphrase_source = %source, "identity key encrypted at rest");
+                self.save_with(path, Some(pass.as_bytes()))
             }
+            Err(reason) => {
+                tracing::warn!(
+                    %reason,
+                    "writing identity key in PLAINTEXT (no OS keyring) — set {KEY_PASSPHRASE_ENV} (or key.env next to the key) to encrypt at rest"
+                );
+                self.save_with(path, None)
+            }
+        }
+    }
+
+    /// Write the seed to `path`: wrapped under `passphrase` when given, else
+    /// plaintext hex. Split from [`save`](Self::save) so a caller that already
+    /// resolved the passphrase (the load-time upgrade) doesn't hit the keyring
+    /// twice.
+    fn save_with(&self, path: &Path, passphrase: Option<&[u8]>) -> anyhow::Result<()> {
+        let seed = Zeroizing::new(self.signing.to_bytes());
+        let bytes = match passphrase {
+            Some(pass) => Zeroizing::new(wrap_seed(&seed, pass)?),
+            None => Zeroizing::new(hex::encode(seed.as_ref()).into_bytes()),
         };
         // Atomic + 0600-from-creation, so a crash can't corrupt the identity and
         // the (possibly plaintext) key is never briefly world-readable.
@@ -662,12 +882,40 @@ mod tests {
         assert!(unwrap_seed(b"not-a-wrapped-key-blob-xxxxxxxxxxxxxxxxxxxxxx", b"x").is_err());
     }
 
+    /// Fresh scratch dir for one test. Tests that exercise `load_or_create`
+    /// without a `key.env` would otherwise reach the developer's real OS keyring
+    /// (and on macOS trigger an ACL prompt for every rebuilt test binary), so
+    /// every such test either writes a `key.env` here or installs the in-memory
+    /// test keyring below.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rmd-id-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_key_env(dir: &Path, passphrase: &str) {
+        std::fs::write(
+            dir.join("key.env"),
+            format!("{KEY_PASSPHRASE_ENV}={passphrase}\n"),
+        )
+        .unwrap();
+    }
+
+    fn is_wrapped(path: &Path) -> bool {
+        std::fs::read(path).unwrap().starts_with(WRAP_MAGIC)
+    }
+
     #[test]
     fn save_load_roundtrip_is_stable() {
-        let dir = std::env::temp_dir().join(format!("or-id-{}", std::process::id()));
+        let dir = scratch_dir("roundtrip");
         let path = dir.join("identity.key");
-        let _ = std::fs::remove_dir_all(&dir);
+        write_key_env(&dir, "correct horse battery");
         let id = DeviceIdentity::load_or_create(&path).unwrap();
+        assert!(
+            is_wrapped(&path),
+            "a passphrase source exists → encrypted at rest"
+        );
         let again = DeviceIdentity::load_or_create(&path).unwrap();
         assert_eq!(id.public_key_hex(), again.public_key_hex());
         #[cfg(unix)]
@@ -677,6 +925,264 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600, "identity file must be user-only");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_plaintext_key_is_upgraded_under_explicit_passphrase() {
+        let dir = scratch_dir("legacy");
+        let path = dir.join("identity.key");
+        let id = DeviceIdentity::generate().unwrap();
+        // A pre-keyring, pre-passphrase install: plaintext hex seed on disk.
+        std::fs::write(&path, hex::encode(id.signing.to_bytes())).unwrap();
+        assert!(!is_wrapped(&path));
+        write_key_env(&dir, "hunter2");
+        let loaded = DeviceIdentity::load_or_create(&path).unwrap();
+        assert_eq!(
+            loaded.public_key_hex(),
+            id.public_key_hex(),
+            "same identity"
+        );
+        assert!(is_wrapped(&path), "legacy plaintext key re-wrapped on load");
+        // And the wrapped file opens under that passphrase from then on.
+        let again = DeviceIdentity::load_or_create(&path).unwrap();
+        assert_eq!(again.public_key_hex(), id.public_key_hex());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wrong_passphrase_fails_and_never_regenerates() {
+        let dir = scratch_dir("wrongpass");
+        let path = dir.join("identity.key");
+        write_key_env(&dir, "original");
+        let id = DeviceIdentity::load_or_create(&path).unwrap();
+        let on_disk = std::fs::read(&path).unwrap();
+        // The operator rotates the env to a passphrase that doesn't open the file.
+        write_key_env(&dir, "rotated");
+        let err = DeviceIdentity::load_or_create(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("wrong passphrase"), "got: {err}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            on_disk,
+            "a failed decrypt must leave the identity file untouched"
+        );
+        // Restoring the passphrase recovers the very same identity.
+        write_key_env(&dir, "original");
+        let back = DeviceIdentity::load_or_create(&path).unwrap();
+        assert_eq!(back.public_key_hex(), id.public_key_hex());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// In-memory stand-in for the OS keyring, installed process-wide for the
+    /// test binary so no test can reach a real Keychain / Secret Service. Unlike
+    /// `keyring::mock` it persists across `Entry` instances (like a real store)
+    /// and can be switched "offline" to model a headless host.
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    mod test_keyring {
+        use keyring::credential::{Credential, CredentialApi, CredentialBuilderApi};
+        use std::collections::BTreeMap;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static STORE: Mutex<BTreeMap<(String, String), Vec<u8>>> = Mutex::new(BTreeMap::new());
+        static AVAILABLE: AtomicBool = AtomicBool::new(true);
+
+        struct Cred {
+            key: (String, String),
+        }
+
+        impl CredentialApi for Cred {
+            fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
+                STORE
+                    .lock()
+                    .unwrap()
+                    .insert(self.key.clone(), secret.to_vec());
+                Ok(())
+            }
+            fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+                STORE
+                    .lock()
+                    .unwrap()
+                    .get(&self.key)
+                    .cloned()
+                    .ok_or(keyring::Error::NoEntry)
+            }
+            fn delete_credential(&self) -> keyring::Result<()> {
+                STORE
+                    .lock()
+                    .unwrap()
+                    .remove(&self.key)
+                    .map(|_| ())
+                    .ok_or(keyring::Error::NoEntry)
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        struct Builder;
+
+        impl CredentialBuilderApi for Builder {
+            fn build(
+                &self,
+                _target: Option<&str>,
+                service: &str,
+                user: &str,
+            ) -> keyring::Result<Box<Credential>> {
+                if !AVAILABLE.load(Ordering::SeqCst) {
+                    return Err(keyring::Error::NoStorageAccess(
+                        "test keyring offline (headless)".into(),
+                    ));
+                }
+                Ok(Box::new(Cred {
+                    key: (service.to_string(), user.to_string()),
+                }))
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        pub fn install() {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| keyring::set_default_credential_builder(Box::new(Builder)));
+        }
+
+        pub fn set_available(available: bool) {
+            AVAILABLE.store(available, Ordering::SeqCst);
+        }
+
+        pub fn get(service: &str, user: &str) -> Option<String> {
+            STORE
+                .lock()
+                .unwrap()
+                .get(&(service.to_string(), user.to_string()))
+                .map(|b| String::from_utf8(b.clone()).unwrap())
+        }
+
+        pub fn delete(service: &str, user: &str) {
+            STORE
+                .lock()
+                .unwrap()
+                .remove(&(service.to_string(), user.to_string()));
+        }
+    }
+
+    /// The default (no env, no `key.env`) path end to end: keyring-minted
+    /// passphrase, legacy migration, lost-entry refusal, and headless fallback.
+    /// One sequential test because the store's availability toggle is global.
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[test]
+    fn keyring_default_wraps_migrates_and_never_regenerates() {
+        if std::env::var_os(KEY_PASSPHRASE_ENV).is_some() {
+            eprintln!("skipping: {KEY_PASSPHRASE_ENV} is set in this environment");
+            return;
+        }
+        test_keyring::install();
+        test_keyring::set_available(true);
+        test_keyring::delete(KEYRING_SERVICE, KEYRING_ENTRY);
+
+        // (a) First run: the key is created encrypted under a passphrase the
+        // keyring minted — 32 random bytes, hex — and reloads with it.
+        let dir = scratch_dir("keyring-fresh");
+        let path = dir.join("identity.key");
+        let id = DeviceIdentity::load_or_create(&path).unwrap();
+        assert!(is_wrapped(&path), "default must be encrypted at rest");
+        let pass = test_keyring::get(KEYRING_SERVICE, KEYRING_ENTRY).expect("entry minted");
+        assert_eq!(pass.len(), 64);
+        assert!(pass.bytes().all(|b| b.is_ascii_hexdigit()));
+        let data = std::fs::read(&path).unwrap();
+        assert_eq!(
+            *unwrap_seed(&data, pass.as_bytes()).unwrap(),
+            id.signing.to_bytes(),
+            "file is wrapped under exactly the keyring passphrase"
+        );
+        let again = DeviceIdentity::load_or_create(&path).unwrap();
+        assert_eq!(again.public_key_hex(), id.public_key_hex());
+        assert_eq!(
+            test_keyring::get(KEYRING_SERVICE, KEYRING_ENTRY).unwrap(),
+            pass,
+            "a later load reuses the entry, never re-mints"
+        );
+
+        // (b) Legacy plaintext key + keyring available → upgraded on load under
+        // the keyring passphrase, same identity.
+        let legacy_dir = scratch_dir("keyring-legacy");
+        let legacy_path = legacy_dir.join("identity.key");
+        let legacy = DeviceIdentity::generate().unwrap();
+        std::fs::write(&legacy_path, hex::encode(legacy.signing.to_bytes())).unwrap();
+        let loaded = DeviceIdentity::load_or_create(&legacy_path).unwrap();
+        assert_eq!(loaded.public_key_hex(), legacy.public_key_hex());
+        assert!(is_wrapped(&legacy_path), "legacy key migrated via keyring");
+        assert_eq!(
+            *unwrap_seed(&std::fs::read(&legacy_path).unwrap(), pass.as_bytes()).unwrap(),
+            legacy.signing.to_bytes()
+        );
+
+        // (c) Keyring reachable but the entry is gone (and no env/key.env):
+        // load FAILS, the file is untouched, and no replacement entry is minted
+        // (that would be useless for this file and mask the loss).
+        test_keyring::delete(KEYRING_SERVICE, KEYRING_ENTRY);
+        let on_disk = std::fs::read(&path).unwrap();
+        let err = DeviceIdentity::load_or_create(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no passphrase is available"), "got: {err}");
+        assert_eq!(std::fs::read(&path).unwrap(), on_disk);
+        assert!(
+            test_keyring::get(KEYRING_SERVICE, KEYRING_ENTRY).is_none(),
+            "unwrap path must be read-only on the keyring"
+        );
+        // Explicit sources still outrank the keyring: supplying the original
+        // passphrase via key.env opens the file.
+        write_key_env(&dir, &pass);
+        let back = DeviceIdentity::load_or_create(&path).unwrap();
+        assert_eq!(back.public_key_hex(), id.public_key_hex());
+        std::fs::remove_file(dir.join("key.env")).unwrap();
+
+        // (d) Keyring unavailable (headless) + wrapped file → fail, untouched.
+        test_keyring::set_available(false);
+        let err = DeviceIdentity::load_or_create(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("keyring is unavailable"), "got: {err}");
+        assert_eq!(std::fs::read(&path).unwrap(), on_disk);
+
+        // (e) Keyring unavailable + no file → plaintext fallback; it still
+        // starts, and reloads the same identity while still headless.
+        let headless_dir = scratch_dir("keyring-headless");
+        let headless_path = headless_dir.join("identity.key");
+        let h = DeviceIdentity::load_or_create(&headless_path).unwrap();
+        assert!(
+            !is_wrapped(&headless_path),
+            "headless fallback is plaintext"
+        );
+        assert_eq!(
+            hex::decode(std::fs::read_to_string(&headless_path).unwrap().trim()).unwrap(),
+            h.signing.to_bytes()
+        );
+        let h2 = DeviceIdentity::load_or_create(&headless_path).unwrap();
+        assert_eq!(h2.public_key_hex(), h.public_key_hex());
+        assert!(!is_wrapped(&headless_path));
+
+        // (f) The keyring comes back → that plaintext key is upgraded on the next
+        // load under a newly minted entry.
+        test_keyring::set_available(true);
+        let h3 = DeviceIdentity::load_or_create(&headless_path).unwrap();
+        assert_eq!(h3.public_key_hex(), h.public_key_hex());
+        assert!(is_wrapped(&headless_path));
+        let minted = test_keyring::get(KEYRING_SERVICE, KEYRING_ENTRY).expect("re-minted");
+        assert_ne!(minted, pass);
+        assert_eq!(
+            *unwrap_seed(&std::fs::read(&headless_path).unwrap(), minted.as_bytes()).unwrap(),
+            h.signing.to_bytes()
+        );
+
+        test_keyring::delete(KEYRING_SERVICE, KEYRING_ENTRY);
+        for d in [&dir, &legacy_dir, &headless_dir] {
+            let _ = std::fs::remove_dir_all(d);
+        }
     }
 
     #[test]

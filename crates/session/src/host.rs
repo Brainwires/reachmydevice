@@ -362,6 +362,11 @@ where
     // Per-connection connection-password brute-force throttle; reset when the
     // peer disconnects (a new connection is a fresh DTLS handshake).
     let mut pw_throttle = PasswordThrottle::new();
+    // Per-session view-only state, set by the viewer's `ViewOnly` control message
+    // and enforced HERE (input injection suppressed while on), not just in the
+    // viewer's UI — a modified viewer must not be able to bypass it. Reset per
+    // connection so a new session always starts with input enabled.
+    let mut view_only = false;
 
     // Control / event loop: forward peer signaling in, react to transport events.
     loop {
@@ -412,6 +417,7 @@ where
                 connected.store(true, Ordering::Relaxed);
                 authorized.store(false, Ordering::Relaxed);
                 was_authorized = false;
+                view_only = false;
                 tracing::info!("viewer connected (DTLS); awaiting authorization");
             }
             TransportEvent::Disconnected => {
@@ -419,6 +425,7 @@ where
                 connected.store(false, Ordering::Relaxed);
                 authorized.store(false, Ordering::Relaxed);
                 was_authorized = false;
+                view_only = false;
                 // Release any keys/buttons the viewer left held, so nothing leaks
                 // stuck into the host (or the next session) after disconnect.
                 if let Some(inj) = injector.as_deref_mut() {
@@ -449,6 +456,7 @@ where
                     cfg.connect_password.as_deref(),
                     &mut pw_throttle,
                     &zoom,
+                    &mut view_only,
                 );
                 // The viewer just became authorized (accepted Hello) — surface the
                 // active session once, and start streaming.
@@ -902,6 +910,15 @@ fn authorization_permits(payload: &Payload, authorized: bool) -> bool {
     authorized || matches!(payload, Payload::Hello(_))
 }
 
+/// The view-only gate, as a pure predicate: while the session is view-only (the
+/// viewer sent `ViewOnly { enabled: true }`), `Input` events are dropped on the
+/// HOST, so a modified viewer that ignores its own view-only toggle still can't
+/// inject. Every other control message (ping, clipboard, display switch, the
+/// `ViewOnly` toggle itself…) is unaffected.
+fn view_only_suppresses(payload: &Payload, view_only: bool) -> bool {
+    view_only && matches!(payload, Payload::Input(_))
+}
+
 /// Whether a viewer's supplied connection password satisfies the host's. `None`
 /// configured → no password required (always ok). Constant-time comparison.
 fn verify_connect_password(configured: Option<&str>, supplied: &str) -> bool {
@@ -990,6 +1007,7 @@ fn handle_control(
     connect_password: Option<&str>,
     pw_throttle: &mut PasswordThrottle,
     zoom: &Mutex<codec::CropRect>,
+    view_only: &mut bool,
 ) {
     let env = match proto::decode(bytes) {
         Ok(e) => e,
@@ -1009,6 +1027,13 @@ fn handle_control(
     // HelloAck alone gates nothing.
     if !authorization_permits(&payload, authorized.load(Ordering::Relaxed)) {
         tracing::debug!("dropping control message from unauthorized viewer");
+        return;
+    }
+
+    // VIEW-ONLY GATE. Host-side enforcement of the viewer's `ViewOnly` toggle:
+    // while on, input events are dropped here regardless of what the viewer sends.
+    if view_only_suppresses(&payload, *view_only) {
+        tracing::debug!("dropping input event: session is view-only");
         return;
     }
 
@@ -1131,6 +1156,20 @@ fn handle_control(
         Payload::Clipboard(update) => clipboard.apply_remote(update),
         Payload::RequestKeyframe(_) => video.request_keyframe(),
         Payload::SelectDisplay(sel) => video.select(sel.id),
+        Payload::ViewOnly(v) => {
+            if v.enabled != *view_only {
+                tracing::info!(enabled = v.enabled, "viewer toggled view-only");
+            }
+            *view_only = v.enabled;
+            if v.enabled {
+                // Nothing the viewer was holding may stay pressed once its input
+                // is cut off (a stuck modifier/button would otherwise persist
+                // until it disabled view-only or disconnected).
+                if let Some(inj) = injector.as_deref_mut() {
+                    inj.release_all();
+                }
+            }
+        }
         Payload::SetZoom(z) => {
             *zoom.lock().unwrap() = codec::CropRect {
                 x: z.x,
@@ -1165,6 +1204,7 @@ fn log_file_event(ev: FileEvent) {
 mod tests {
     use super::{
         AccessControl, authorization_permits, check_codec_compatible, verify_connect_password,
+        view_only_suppresses,
     };
     use crate::identity::DeviceIdentity;
     use rmd_protocol as proto;
@@ -1218,6 +1258,43 @@ mod tests {
             authorization_permits(&hello, true),
             "Hello must pass post-auth"
         );
+    }
+
+    /// View-only is enforced on the HOST (the protocol doc promises "input
+    /// suppressed while enabled"): with view-only on, `Input` is dropped and
+    /// everything else — including the `ViewOnly` toggle needed to turn it back
+    /// off — still passes. With it off, nothing is suppressed.
+    #[test]
+    fn view_only_gate_drops_only_input_while_enabled() {
+        use proto::pb;
+        let input = Payload::Input(pb::InputEvent::default());
+        assert!(
+            view_only_suppresses(&input, true),
+            "Input must be dropped while view-only"
+        );
+        assert!(
+            !view_only_suppresses(&input, false),
+            "Input must pass when view-only is off"
+        );
+
+        let passthrough: Vec<Payload> = vec![
+            hello_payload(),
+            Payload::Clipboard(pb::ClipboardUpdate::default()),
+            Payload::FileOffer(pb::FileOffer::default()),
+            Payload::SelectDisplay(pb::SelectDisplay::default()),
+            Payload::RequestKeyframe(pb::RequestKeyframe::default()),
+            Payload::Ping(pb::Ping::default()),
+            Payload::ViewOnly(pb::ViewOnly { enabled: false }),
+            Payload::ViewOnly(pb::ViewOnly { enabled: true }),
+            Payload::SetZoom(pb::SetZoom::default()),
+        ];
+        for p in &passthrough {
+            assert!(
+                !view_only_suppresses(p, true),
+                "{p:?} must not be suppressed by view-only"
+            );
+            assert!(!view_only_suppresses(p, false));
+        }
     }
 
     /// Build a viewer `Hello` carrying an access proof bound to `binding`.

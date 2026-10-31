@@ -103,10 +103,15 @@ jobs:
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
-      - name: cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+      # Run cargo-deny on the host, not the docker action: the action's container
+      # lacks the rust-toolchain.toml-pinned toolchain (so rustup errors before the
+      # check runs), while the host's rustup auto-installs it. Same reason the docker
+      # cargo-audit pass was dropped above.
+      - uses: taiki-e/install-action@v2
         with:
-          command: check advisories licenses bans sources
+          tool: cargo-deny
+      - name: cargo-deny
+        run: cargo deny check advisories licenses bans sources
 
   # Fuzz the untrusted-input parsers (protobuf decode, file-transfer state
   # machine, signaling frame) for a short time each. Uses nightly + cargo-fuzz;

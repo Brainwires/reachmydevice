@@ -30,6 +30,28 @@ All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 - README: dropped the hosted-relay sales pitch (it lives on the landing page); the repo
   README stays focused on the open core.
 
+### Security
+- **The device identity key is now encrypted at rest by default** via the OS keyring
+  (macOS Keychain / Windows Credential Manager / Linux Secret Service). A headless host
+  with no keyring available falls back to storing the key in plaintext (`0600`) with a
+  loud warning — set `RMD_KEY_PASSPHRASE` or drop a `key.env` to encrypt there.
+  `RMD_KEY_PASSPHRASE` / `key.env` still take priority when present, existing identities
+  migrate in place on first run, and an identity is **never** regenerated on a decrypt
+  failure (it fails loudly instead of silently rotating your device id). **Note:** on
+  macOS the Keychain entry is bound to the binary's code signature, so a
+  rebuilt/reinstalled `rmdd` prompts once to re-authorize (GUI); stable code signing
+  avoids repeated prompts.
+- **The signaling relay is now scoped to the sender's account and rate-limited per
+  socket**, preventing cross-account presence probing and flooding in multi-tenant
+  deployments.
+- **`view_only` is now enforced on the host** (input injection is suppressed on the host
+  side), not just hidden in the viewer UI.
+- **The native ICE client sends the device token via `Authorization: Bearer`** instead of
+  the URL query string, keeping it out of proxy and access logs.
+- Updated `rustls`→0.23.46, `rustls-webpki`→0.103.16, `webpki-roots`→1.0.11,
+  `tokio`→1.54.1, and `clipboard-win`→5.4.3 to clear the 2026 TLS/tokio advisories
+  (RUSTSEC-2026-0285 / -0346 / -0348 / -0349 / -0382 / -0381 / -0386).
+
 ## [0.8.1] - 2026-08-14
 
 ### Fixed

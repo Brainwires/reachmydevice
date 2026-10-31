@@ -157,7 +157,7 @@ Debian/Ubuntu, and plain `.tar.gz` archives — each with a minisign `.minisig`.
 | `RMD_BITRATE` | `8000000` | Target bitrate in bps (GCC adapts down) | `bitrate` |
 | `RMD_CODEC` | `h264` | `h264` \| `av1` (AV1 needs `--features av1`) | — |
 | `RMD_AUDIO` | off | Set to enable host→viewer Opus audio | — |
-| `RMD_KEY_PASSPHRASE` | — | Encrypt the device identity key at rest | — |
+| `RMD_KEY_PASSPHRASE` | — | Override for at-rest identity-key encryption. The key is encrypted at rest **by default** via the OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service); set this (or use a `key.env`) to encrypt with a passphrase instead — required on headless hosts with no keyring, which otherwise fall back to a plaintext `0600` key with a warning | — |
 | `RMD_AUTHORIZED_KEYS` | `~/.config/rmd/authorized_keys` | Allow-list file for unattended access | — |
 | `RMD_REQUIRE_AUTH` | off | Force the unattended-access gate (auto-on when the allow-list exists) | — |
 | `RMD_NO_KEEPAWAKE` | off | Don't inhibit system sleep | — |

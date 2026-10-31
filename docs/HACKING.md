@@ -1,7 +1,8 @@
 # HACKING — ReachMyDevice developer guide
 
 ## Prerequisites
-- Rust (pinned in `rust-toolchain.toml`), `protoc` (Protobuf compiler) for the `protocol` crate.
+- Rust (pinned in `rust-toolchain.toml`). **No `protoc` needed** — the default build is pure
+  Rust (the protobuf schema compiles with `protox`; see README.md).
 - macOS 13+ for the spike. Grant **Screen Recording** + **Accessibility** (see `macos-permissions.md`).
 
 ## Clone (submodule required)
@@ -16,7 +17,7 @@ Builds are then offline/reproducible — no crates.io/git fetch for the transpor
 
 ## Layout
 - `crates/` — shared libraries (`protocol`, `transport`, `capture`, `codec`, `input`, `session`).
-- `apps/` — binaries: `host`, `viewer`, `signal-dev`.
+- `apps/` — binaries: `host`, `viewer`, `signal-dev`, `rendezvous`, `web-viewer`.
 - `docs/` — architecture, decisions (ADRs), permissions, threat model, deployment.
 
 ## Common commands
