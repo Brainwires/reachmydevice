@@ -20,6 +20,7 @@ use crate::{
 };
 use bytes::Bytes;
 use rmd_protocol::monotonic_micros;
+use std::process::{Child, Command};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -58,6 +59,71 @@ const MAX_FRAME_BYTES: usize = 512 * 1024 * 1024;
 
 /// Upper bound on a single audio buffer's byte length (same rationale).
 const MAX_AUDIO_BYTES: usize = 8 * 1024 * 1024;
+
+/// Pause after waking the display before fetching shareable content, so a panel
+/// coming out of DPMS sleep has a live framebuffer that ScreenCaptureKit can see.
+/// Harmless when the display was already awake (it just delays session start).
+const DISPLAY_WAKE_SETTLE: Duration = Duration::from_millis(800);
+
+// ---------------------------------------------------------------------------
+// Display wake / keep-awake (headless-host display-sleep workaround)
+// ---------------------------------------------------------------------------
+
+/// Keeps the display powered on for the lifetime of a capture session.
+///
+/// When a Mac host's panel idle-sleeps (DPMS off) while the machine stays awake,
+/// the display's framebuffer is torn down and `SCShareableContent` either drops
+/// the display or ScreenCaptureKit delivers nothing — so a remote viewer connects
+/// but sees no screen. On construction this declares user activity (waking the
+/// panel now) and holds a display-sleep assertion so it cannot re-sleep mid
+/// session; the assertion is released on drop, restoring normal power management.
+///
+/// Implemented via the system `caffeinate` tool (always present on macOS) to
+/// avoid an IOKit FFI dependency: `-u` declares user activity (the documented
+/// display-wake path, via `IOPMAssertionDeclareUserActivity`) and `-d` prevents
+/// display idle-sleep.
+struct DisplayWake {
+    /// A `caffeinate -d` child held for the session; killed on drop.
+    hold: Option<Child>,
+}
+
+impl DisplayWake {
+    fn new() -> Self {
+        // Wake the panel now. `-t 2` bounds the one-shot user-activity assertion;
+        // reap the short-lived child on a detached thread so it never zombies.
+        match Command::new("caffeinate").args(["-u", "-t", "2"]).spawn() {
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(e) => tracing::warn!("could not run caffeinate to wake display: {e}"),
+        }
+
+        // Hold the display awake for the whole session (killed in Drop). No `-t`,
+        // so it runs until we stop it.
+        let hold = match Command::new("caffeinate").arg("-d").spawn() {
+            Ok(child) => Some(child),
+            Err(e) => {
+                tracing::warn!("could not hold display awake (caffeinate -d): {e}");
+                None
+            }
+        };
+
+        Self { hold }
+    }
+}
+
+impl Drop for DisplayWake {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.hold.take() {
+            // Release the display-sleep assertion so the panel can idle-sleep
+            // again once no session is active.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Custom SCStreamOutput / SCStreamDelegate class
@@ -215,6 +281,8 @@ pub struct MacCaptureSession {
     // Kept alive for the duration of capture even though not read directly.
     _output: Retained<StreamOutput>,
     _queue: DispatchRetained<DispatchQueue>,
+    // Holds the display awake for the session; dropping it restores power mgmt.
+    _wake: DisplayWake,
 }
 
 impl CaptureSession for MacCaptureSession {
@@ -309,6 +377,13 @@ pub fn start_capture(
     display_index: usize,
     sink: FrameSink,
 ) -> anyhow::Result<Box<dyn CaptureSession>> {
+    // Wake the panel and hold it awake before we enumerate displays: a sleeping
+    // display may be absent from `SCShareableContent` or deliver no frames, so a
+    // viewer would connect to a black/empty screen. The settle pause lets a
+    // just-woken framebuffer come up before we fetch shareable content.
+    let wake = DisplayWake::new();
+    std::thread::sleep(DISPLAY_WAKE_SETTLE);
+
     let content = fetch_shareable_content()?;
     // SAFETY: FFI accessor returning a retained array of displays.
     let displays = unsafe { content.displays() };
@@ -395,6 +470,7 @@ pub fn start_capture(
         stream,
         _output: output,
         _queue: queue,
+        _wake: wake,
     }))
 }
 

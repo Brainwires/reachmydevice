@@ -20,6 +20,7 @@ yanked = "deny"
 # 2026-10-31; revisit ~2027-Q2.
 ignore = [
     # --- Unmaintained (informational — not vulnerabilities) ---
+    "RUSTSEC-2026-0441", # pin-utils — tiny stable pin projection macro, deeply transitive via futures-util; no replacement needed, ecosystem-wide dep (added 2026-11-06)
     "RUSTSEC-2024-0370", # proc-macro-error — transitive proc-macro helper (tray feature, build-time only)
     "RUSTSEC-2024-0436", # paste — transitive proc-macro helper (av1 feature, build-time only)
     "RUSTSEC-2026-0150", # audiopus_sys — C libopus bindgen, only under the optional `audio` feature
