@@ -2,6 +2,19 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
+## [0.8.3] - 2026-11-06
+
+### Fixed
+- **macOS host now wakes a sleeping display on connect — no more black/empty
+  screen when the Mac's panel has idle-slept.** When a Mac host stayed awake but its
+  display had idle-slept (DPMS off), the framebuffer was torn down and ScreenCaptureKit
+  either dropped the display from `SCShareableContent` or delivered nothing, so a viewer
+  connected successfully but saw no screen. On capture start the host now declares user
+  activity to wake the panel, waits briefly for the framebuffer to come up, and holds a
+  display-sleep assertion for the lifetime of the session (released on disconnect, so
+  normal power management resumes when no one is connected). Implemented via the system
+  `caffeinate` tool — no new dependency, macOS only; the Linux backend is unaffected.
+
 ## [0.8.2] - 2026-10-31
 
 ### Fixed
