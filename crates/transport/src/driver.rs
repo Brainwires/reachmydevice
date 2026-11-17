@@ -36,19 +36,20 @@ use std::time::{Duration, Instant};
 
 use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
 use rtc::interceptor::{
-    GccHandle, GccInterceptorBuilder, Interceptor, Registry, TwccSenderBuilder,
+    GccHandle, GccInterceptorBuilder, Interceptor, NoopInterceptor, Registry, Slot,
+    TwccSenderBuilder,
 };
 use rtc::media::io::sample_builder::SampleBuilder;
 use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::{
-    configure_nack, configure_rtcp_reports, register_default_interceptors,
+    configure_key_frame_requests, configure_nack, configure_rtcp_reports,
+    register_default_interceptors,
 };
 use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_AV1, MIME_TYPE_H264, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::{SettingEngine, SettingEngineBuilder};
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::sdp::RTCSessionDescription;
@@ -57,6 +58,7 @@ use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, CandidateRelayConfig, CandidateServerReflexiveConfig,
     RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit, RTCIceServer,
 };
+use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
 use rtc::rtp::codec::h264::H264Packet;
 use rtc::rtp::packetizer::{Packetizer, new_packetizer};
 use rtc::rtp_transceiver::rtp_sender::{
@@ -482,15 +484,23 @@ impl TurnRelay {
             realm: String::new(),
             software: String::new(),
             rto_in_ms: 0,
+            allocation_refresh_interval_cap: None,
         };
-        let mut client = match TurnClient::new(cfg) {
+        let provider = match rtc::crypto::default_provider() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!("transport: TURN crypto provider unavailable: {e}");
+                return None;
+            }
+        };
+        let mut client = match TurnClient::new(cfg, provider) {
             Ok(c) => c,
             Err(e) => {
                 tracing::debug!("transport: TURN client init failed: {e}");
                 return None;
             }
         };
-        if let Err(e) = client.allocate() {
+        if let Err(e) = client.allocate(Instant::now()) {
             tracing::debug!("transport: TURN allocate() failed: {e}");
             return None;
         }
@@ -602,11 +612,7 @@ impl TurnRelay {
 
     /// Drain TURN events: relayed peer datagrams are handed to the peer connection
     /// as if they'd arrived directly from that peer.
-    fn drain_events<I: Interceptor>(
-        &mut self,
-        pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
-        local_addr: SocketAddr,
-    ) {
+    fn drain_events(&mut self, pc: &mut RTCPeerConnection, local_addr: SocketAddr) {
         while let Some(ev) = self.client.poll_event() {
             match ev {
                 TurnEvent::DataIndicationOrChannelData(_, from, data) => {
@@ -637,12 +643,12 @@ impl TurnRelay {
     fn route_out(&mut self, peer: SocketAddr, message: &[u8]) -> bool {
         if self.permitted.insert(peer.ip()) {
             if let Ok(mut relay) = self.client.relay(self.relayed_addr) {
-                let _ = relay.create_permission(peer);
+                let _ = relay.create_permission(Instant::now(), peer);
             }
         }
         if self.relayed_peers.contains(&peer) {
             if let Ok(mut relay) = self.client.relay(self.relayed_addr) {
-                let _ = relay.send_to(message, peer);
+                let _ = relay.send_to(Instant::now(), message, peer);
             }
             return true;
         }
@@ -704,9 +710,16 @@ fn run_host(
         // its floor on congestion; this only lifts the upper bound to what we asked for.
         let (gcc_builder, gcc_handle) = GccInterceptorBuilder::new();
         let gcc_builder = gcc_builder.with_max_bitrate(config.video_bitrate_bps);
+        // Upstream's chain terminus now ends every inbound RTCP packet no interceptor
+        // vouches for — PLI/FIR included — so the key-frame-request interceptor must be
+        // registered explicitly (the default registry has it; this custom one did not).
+        let registry = configure_key_frame_requests(registry);
         let registry = registry
-            .with(gcc_builder.build())
-            .with(TwccSenderBuilder::new().build());
+            .with(
+                Slot::CongestionControl,
+                NoopInterceptor::new().with(gcc_builder.build()),
+            )
+            .with(Slot::TwccSender, TwccSenderBuilder::new().build());
 
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_configuration(
@@ -717,7 +730,7 @@ fn run_host(
             .with_setting_engine(SettingEngine::default())
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
-            .build()
+            .build(Instant::now())
             .context("build host peer connection")?;
 
         // Add the video send track (its SSRC drives the packetizer) and the reliable
@@ -753,7 +766,7 @@ fn run_host(
         // Kick off signaling: create + apply the offer and surface it immediately,
         // so the peer can start negotiating while we gather candidates.
         let offer = pc.create_offer(None).context("create offer")?;
-        pc.set_local_description(offer.clone())
+        pc.set_local_description(Instant::now(), offer.clone())
             .context("set local offer")?;
         emit_session(&event_tx, &offer)?;
 
@@ -785,6 +798,7 @@ fn run_host(
         // Packetizer for outbound encoded frames. The payloader is selected from the
         // codec's MIME type (H264Payloader or Av1Payloader) by the fork.
         let packetizer: Box<dyn Packetizer> = Box::new(new_packetizer(
+            Instant::now(),
             RTP_OUTBOUND_MTU,
             codec.payload_type,
             video_ssrc,
@@ -859,10 +873,9 @@ fn run_viewer(
             .context("default interceptors")?;
 
         // As the answerer we take the DTLS server role (host becomes the client).
-        let mut setting_engine = SettingEngine::default();
-        setting_engine
-            .set_answering_dtls_role(RTCDtlsRole::Server)
-            .context("set answering DTLS role")?;
+        let setting_engine = SettingEngineBuilder::new()
+            .with_answering_dtls_role(RTCDtlsRole::Server)
+            .build();
 
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_configuration(
@@ -873,7 +886,7 @@ fn run_viewer(
             .with_setting_engine(setting_engine)
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
-            .build()
+            .build(Instant::now())
             .context("build viewer peer connection")?;
 
         // Receive one video track.
@@ -1041,8 +1054,8 @@ fn emit_session(
 /// timeouts, read one inbound datagram (bounded wait), then drain events and
 /// media/data reads into [`TransportEvent`]s. Publishes the GCC estimate.
 #[allow(clippy::too_many_arguments)]
-fn event_loop<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+fn event_loop(
+    pc: &mut RTCPeerConnection,
     socket: &UdpSocket,
     local_addr: SocketAddr,
     cmd_rx: &Receiver<DriverCmd>,
@@ -1217,8 +1230,8 @@ enum CommandOutcome {
 }
 
 /// Apply every currently queued [`DriverCmd`].
-fn drain_commands<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+fn drain_commands(
+    pc: &mut RTCPeerConnection,
     cmd_rx: &Receiver<DriverCmd>,
     event_tx: &Sender<TransportEvent>,
     state: &mut RoleState,
@@ -1257,12 +1270,7 @@ fn drain_commands<I: Interceptor>(
 }
 
 /// Packetize and send one Annex-B access unit on the video track (host).
-fn send_video<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
-    state: &mut RoleState,
-    annexb: &Bytes,
-    ts_micros: u64,
-) {
+fn send_video(pc: &mut RTCPeerConnection, state: &mut RoleState, annexb: &Bytes, ts_micros: u64) {
     let Some(video) = state.video.as_mut() else {
         return;
     };
@@ -1278,7 +1286,7 @@ fn send_video<I: Interceptor>(
     };
     video.last_ts_micros = Some(ts_micros);
 
-    let packets = match video.packetizer.packetize(annexb, samples) {
+    let packets = match video.packetizer.packetize(Instant::now(), annexb, samples) {
         Ok(p) => p,
         Err(e) => {
             tracing::debug!("transport: packetize failed: {e}");
@@ -1291,7 +1299,7 @@ fn send_video<I: Interceptor>(
     for mut packet in packets {
         packet.header.ssrc = ssrc;
         if let Some(mut sender) = pc.rtp_sender(sender_id) {
-            if let Err(e) = sender.write_rtp(packet) {
+            if let Err(e) = sender.write_rtp(Instant::now(), packet) {
                 // Common before negotiation completes; not fatal.
                 tracing::trace!("transport: write_rtp dropped: {e}");
             }
@@ -1300,25 +1308,21 @@ fn send_video<I: Interceptor>(
 }
 
 /// Send bytes on the control data channel (either role, once open).
-fn send_data<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
-    state: &mut RoleState,
-    bytes: &Bytes,
-) {
+fn send_data(pc: &mut RTCPeerConnection, state: &mut RoleState, bytes: &Bytes) {
     let Some(id) = state.data_channel_id else {
         tracing::debug!("transport: data channel not open yet, dropping send");
         return;
     };
     if let Some(mut dc) = pc.data_channel(id) {
-        if let Err(e) = dc.send(BytesMut::from(bytes.as_ref())) {
+        if let Err(e) = dc.send(Instant::now(), BytesMut::from(bytes.as_ref())) {
             tracing::debug!("transport: data channel send error: {e}");
         }
     }
 }
 
 /// Apply a peer signaling message (offer/answer/candidate).
-fn apply_signal<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+fn apply_signal(
+    pc: &mut RTCPeerConnection,
     event_tx: &Sender<TransportEvent>,
     state: &mut RoleState,
     msg: SignalMsg,
@@ -1339,12 +1343,12 @@ fn apply_signal<I: Interceptor>(
             // candidates (add_local_candidate requires a local description).
             let offer: RTCSessionDescription =
                 serde_json::from_str(&json).context("parse remote offer")?;
-            pc.set_remote_description(offer)
+            pc.set_remote_description(Instant::now(), offer)
                 .context("set remote offer")?;
             state.remote_description_set = true;
 
             let answer = pc.create_answer(None).context("create answer")?;
-            pc.set_local_description(answer.clone())
+            pc.set_local_description(Instant::now(), answer.clone())
                 .context("set local answer")?;
             emit_session(event_tx, &answer)?;
 
@@ -1380,7 +1384,7 @@ fn apply_signal<I: Interceptor>(
             // Host path: apply the remote answer.
             let answer: RTCSessionDescription =
                 serde_json::from_str(&json).context("parse remote answer")?;
-            pc.set_remote_description(answer)
+            pc.set_remote_description(Instant::now(), answer)
                 .context("set remote answer")?;
             state.remote_description_set = true;
             state.negotiated_once = true;
@@ -1405,10 +1409,7 @@ fn apply_signal<I: Interceptor>(
 }
 
 /// Replay any remote candidates buffered before the remote description existed.
-fn flush_remote_candidates<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
-    state: &mut RoleState,
-) {
+fn flush_remote_candidates(pc: &mut RTCPeerConnection, state: &mut RoleState) {
     for candidate in state.pending_remote_candidates.drain(..) {
         if let Err(e) = pc.add_remote_candidate(RTCIceCandidateInit {
             candidate,
@@ -1420,8 +1421,8 @@ fn flush_remote_candidates<I: Interceptor>(
 }
 
 /// Drain connection-state changes and ICE candidates into events.
-fn drain_events<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+fn drain_events(
+    pc: &mut RTCPeerConnection,
     event_tx: &Sender<TransportEvent>,
     state: &mut RoleState,
     connected: &mut bool,
@@ -1480,19 +1481,19 @@ fn drain_events<I: Interceptor>(
 }
 
 /// Drain inbound RTP (→ reassembled video) and data-channel messages.
-fn drain_reads<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+fn drain_reads(
+    pc: &mut RTCPeerConnection,
     event_tx: &Sender<TransportEvent>,
     state: &mut RoleState,
 ) {
-    while let Some(message) = pc.poll_read() {
-        match message {
+    while let Some(tagged) = pc.poll_read() {
+        match tagged.message {
             RTCMessage::RtpPacket(_track_id, packet) => {
                 if let Some(sb) = state.sample_builder.as_mut() {
                     let ts = packet.header.timestamp;
-                    sb.push(packet);
+                    sb.push(Instant::now(), packet);
                     // Drain any completed access units.
-                    while let Some(sample) = sb.pop() {
+                    while let Some(sample) = sb.pop(Instant::now()) {
                         let _ = event_tx.send(TransportEvent::Video {
                             annexb: sample.data,
                             ts_hint: u64::from(ts),
@@ -1519,6 +1520,8 @@ fn drain_reads<I: Interceptor>(
                     let _ = event_tx.send(TransportEvent::KeyframeRequested);
                 }
             }
+            // `RTCMessage` is `#[non_exhaustive]`; nothing else is consumed here.
+            _ => {}
         }
     }
 }
