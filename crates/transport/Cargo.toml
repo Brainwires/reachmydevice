@@ -29,7 +29,7 @@ if-addrs = "0.13"
 # The fork's master carries GCC congestion control, jitter buffer, DTLS-restart,
 # etc.; everything we use (peer_connection, rtp, media, interceptor, sansio, sdp,
 # shared) is re-exported from the top-level `rtc` crate.
-rtc = { path = "../../third_party/webrtc-rs-rtc/rtc", package = "rtc" }
+rtc = { path = "../../third_party/webrtc-rs-rtc", package = "rtc" }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
