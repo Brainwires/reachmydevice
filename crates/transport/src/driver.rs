@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
 use rtc::interceptor::{
-    GccHandle, GccInterceptorBuilder, Interceptor, NoopInterceptor, Registry, Slot,
+    GccHandle, GccInterceptorBuilder, Interceptor, Registry, Slot, StreamInfo, TaggedPacket,
     TwccSenderBuilder,
 };
 use rtc::media::io::sample_builder::SampleBuilder;
@@ -694,32 +694,8 @@ fn run_host(
             .register_codec(codec.clone(), RtpCodecKind::Video)
             .context("register video codec")?;
 
-        // Interceptor chain. NACK + RTCP reports come from the shared helpers; on top
-        // of those we stack the congestion-control pair required for GCC:
-        //   GCC (innermost) ← TwccSender (outer, stamps the transport-wide seq no.)
-        // GccInterceptorBuilder hands back a `GccHandle` we poll each tick for the
-        // latest target bitrate. The header extension + feedback that let the viewer
-        // reply with TWCC are registered on the media engine below.
-        let registry = Registry::new();
-        let registry = configure_nack(registry, &mut media_engine);
-        let registry = configure_rtcp_reports(registry);
-        register_twcc_sender_headers(&mut media_engine).context("register TWCC headers")?;
-        // Cap GCC at the host's configured bitrate. The library default ceiling is
-        // 2.5 Mbps, which would silently throttle a host asked for (say) 8 Mbps to a
-        // third of its target on a link that can carry it. GCC still backs off toward
-        // its floor on congestion; this only lifts the upper bound to what we asked for.
-        let (gcc_builder, gcc_handle) = GccInterceptorBuilder::new();
-        let gcc_builder = gcc_builder.with_max_bitrate(config.video_bitrate_bps);
-        // Upstream's chain terminus now ends every inbound RTCP packet no interceptor
-        // vouches for — PLI/FIR included — so the key-frame-request interceptor must be
-        // registered explicitly (the default registry has it; this custom one did not).
-        let registry = configure_key_frame_requests(registry);
-        let registry = registry
-            .with(
-                Slot::CongestionControl,
-                NoopInterceptor::new().with(gcc_builder.build()),
-            )
-            .with(Slot::TwccSender, TwccSenderBuilder::new().build());
+        let (registry, gcc_handle) =
+            host_interceptor_registry(&mut media_engine, config.video_bitrate_bps)?;
 
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_configuration(
@@ -949,6 +925,86 @@ fn run_viewer(
             }
         }
     } // end session loop
+}
+
+/// The host's interceptor chain, and the handle GCC publishes its estimate on.
+///
+/// NACK + RTCP reports come from the shared helpers; on top of those we stack the
+/// congestion-control pair required for GCC, GCC at `Slot::CongestionControl`
+/// (wire-most) and the TWCC sender at `Slot::TwccSender` (stamps the transport-wide
+/// seq no. before GCC records the packet). The header extension + feedback that let
+/// the viewer reply with TWCC are registered on the media engine. The chain's
+/// terminus ends inbound RTCP nothing vouches for, PLI/FIR included, so the
+/// key-frame-request interceptor is registered too (the default registry has it).
+fn host_interceptor_registry(
+    media_engine: &mut MediaEngine,
+    max_bitrate_bps: u32,
+) -> anyhow::Result<(Registry, GccHandle)> {
+    let registry = Registry::new();
+    let registry = configure_nack(registry, media_engine);
+    let registry = configure_rtcp_reports(registry);
+    let registry = configure_key_frame_requests(registry);
+    register_twcc_sender_headers(media_engine).context("register TWCC headers")?;
+    // Cap GCC at the host's configured bitrate. The library default ceiling is
+    // 2.5 Mbps, which would silently throttle a host asked for (say) 8 Mbps to a
+    // third of its target on a link that can carry it. GCC still backs off toward
+    // its floor on congestion; this only lifts the upper bound to what we asked for.
+    let (gcc_builder, gcc_handle) = GccInterceptorBuilder::new();
+    let gcc_builder = gcc_builder.with_max_bitrate(max_bitrate_bps);
+    // GCC is a nested (`inner`-wrapping) interceptor. The engine's documented recipe
+    // wraps it around `NoopInterceptor`, but that is the chain's RTCP terminus: it
+    // drops every inbound RTCP packet nothing has marked, so at the wire-most slot it
+    // would swallow NACKs (no retransmissions), receiver reports and PLI/FIR before
+    // any other interceptor or the application saw them. Wrap a pass-through instead.
+    let registry = registry
+        .with(
+            Slot::CongestionControl,
+            PassThrough::default().with(gcc_builder.build()),
+        )
+        .with(Slot::TwccSender, TwccSenderBuilder::new().build());
+    Ok((registry, gcc_handle))
+}
+
+/// An interceptor that hands every packet on unchanged, both ways: the inner end of
+/// a nested interceptor (GCC) placed in a [`Registry`] slot. Unlike `NoopInterceptor`
+/// it is not a terminus, so inbound RTCP carries on to the rest of the chain.
+#[derive(Default)]
+struct PassThrough {
+    reads: std::collections::VecDeque<TaggedPacket>,
+    writes: std::collections::VecDeque<TaggedPacket>,
+}
+
+impl Protocol<TaggedPacket, TaggedPacket, ()> for PassThrough {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = rtc::shared::error::Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        self.reads.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_read(&mut self) -> Option<TaggedPacket> {
+        self.reads.pop_front()
+    }
+
+    fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
+        self.writes.push_back(msg);
+        Ok(())
+    }
+
+    fn poll_write(&mut self) -> Option<TaggedPacket> {
+        self.writes.pop_front()
+    }
+}
+
+impl Interceptor for PassThrough {
+    fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
 }
 
 /// Register the RTP header extension + RTCP feedback that TWCC needs on the
@@ -1572,6 +1628,43 @@ mod tests {
         assert!(!ips.is_empty(), "expected at least one interface address");
         assert!(ips.iter().all(|ip| ip.is_ipv4()));
         assert!(ips.iter().all(|ip| !ip.is_unspecified()));
+    }
+
+    /// Inbound RTCP must cross the host's whole chain: a PLI reaches the application
+    /// (so the encoder sends an IDR). Guards against a terminus nested inside the
+    /// wire-most GCC slot, which dropped every inbound RTCP packet there (PLI/FIR,
+    /// and the NACKs and receiver reports the interceptors further in consume).
+    #[test]
+    fn host_chain_delivers_inbound_pli_to_the_application() {
+        use rtc::interceptor::{AttributedPacket, Packet};
+        use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+
+        let mut media_engine = MediaEngine::default();
+        let (registry, _gcc) = host_interceptor_registry(&mut media_engine, 2_000_000).unwrap();
+        let mut chain = registry.build();
+        let pli = PictureLossIndication {
+            sender_ssrc: 1,
+            media_ssrc: 2,
+        };
+        chain
+            .handle_read(TaggedPacket {
+                now: Instant::now(),
+                transport: TransportContext::default(),
+                message: AttributedPacket::new(Packet::Rtcp(vec![Box::new(pli)])),
+            })
+            .unwrap();
+        let out = chain
+            .poll_read()
+            .expect("the PLI must come out of the chain");
+        let Packet::Rtcp(packets) = &out.message.packet else {
+            panic!("expected RTCP")
+        };
+        assert!(
+            packets
+                .iter()
+                .any(|p| p.as_any().is::<PictureLossIndication>()),
+            "the PLI must reach the application intact"
+        );
     }
 
     #[test]
