@@ -18,14 +18,16 @@
 //! shutdown signal (dropping the session closes the portal). A second "pw"
 //! thread owns the PipeWire main loop. Stopping the session signals both.
 
-use crate::{CaptureConfig, CaptureSession, CaptureSource, DisplayInfo, Frame, FrameSink, PixelFormat};
+use crate::{
+    CaptureConfig, CaptureSession, CaptureSource, DisplayInfo, Frame, FrameSink, PixelFormat,
+};
 use bytes::Bytes;
-use std::sync::{Arc, Mutex};
 use pipewire as pw;
 use pw::spa;
 use rmd_protocol::monotonic_micros;
 use spa::pod::Pod;
 use std::os::fd::OwnedFd;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 /// The portal handshake result handed from the portal thread to the PipeWire
@@ -37,7 +39,11 @@ type PortalReady = Result<(OwnedFd, u32, Option<String>), String>;
 /// the source via its dialog), so advertise a single logical display. The real
 /// resolution is discovered during PipeWire format negotiation.
 pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
-    Ok(vec![DisplayInfo { index: 0, width: 0, height: 0 }])
+    Ok(vec![DisplayInfo {
+        index: 0,
+        width: 0,
+        height: 0,
+    }])
 }
 
 /// A running Wayland capture. Dropping (or [`stop`](CaptureSession::stop)) tears
@@ -109,7 +115,13 @@ pub fn start_capture(
     let portal_thread = std::thread::Builder::new()
         .name("rmd-portal".into())
         .spawn(move || {
-            portal_thread_main(show_cursor, want_virtual, restore_token_in, ready_tx, shutdown_rx)
+            portal_thread_main(
+                show_cursor,
+                want_virtual,
+                restore_token_in,
+                ready_tx,
+                shutdown_rx,
+            )
         })?;
 
     let (pw_quit, pw_quit_rx) = pw::channel::channel::<()>();
@@ -134,7 +146,15 @@ pub fn start_capture(
                 *restore_token_bg.lock().unwrap_or_else(|e| e.into_inner()) = token;
             }
             tracing::info!(node_id, "Wayland PipeWire capture streaming");
-            if let Err(e) = pw_run(PwConnect::Fd(fd), node_id, fps, width, height, sink, pw_quit_rx) {
+            if let Err(e) = pw_run(
+                PwConnect::Fd(fd),
+                node_id,
+                fps,
+                width,
+                height,
+                sink,
+                pw_quit_rx,
+            ) {
                 tracing::error!(error = %e, "PipeWire capture loop ended with error");
             }
         })?;
@@ -159,7 +179,10 @@ fn portal_thread_main(
     ready_tx: std::sync::mpsc::Sender<PortalReady>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => {
             let _ = ready_tx.send(Err(format!("failed to build tokio runtime: {e}")));
@@ -168,9 +191,9 @@ fn portal_thread_main(
     };
 
     rt.block_on(async move {
-        use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
-        use ashpd::desktop::PersistMode;
         use ashpd::WindowIdentifier;
+        use ashpd::desktop::PersistMode;
+        use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
 
         // Create the proxy + session up front so we hold a handle we can always
         // Close on error. If `select_sources`/`start` fail *after* the session
@@ -192,7 +215,11 @@ fn portal_thread_main(
         };
 
         let handshake = async {
-            let cursor = if show_cursor { CursorMode::Embedded } else { CursorMode::Hidden };
+            let cursor = if show_cursor {
+                CursorMode::Embedded
+            } else {
+                CursorMode::Hidden
+            };
             // Pick the source per config. `Monitor` (default) captures the real
             // display — shown locally and remotely (dual-use) — but dies if the
             // monitor is unplugged. `Virtual` asks the compositor for a virtual
@@ -213,7 +240,11 @@ fn portal_thread_main(
                 SourceType::Monitor
             };
             tracing::info!(
-                source = if matches!(source, SourceType::Virtual) { "virtual" } else { "monitor" },
+                source = if matches!(source, SourceType::Virtual) {
+                    "virtual"
+                } else {
+                    "monitor"
+                },
                 "selecting Wayland ScreenCast source"
             );
             proxy
@@ -221,7 +252,7 @@ fn portal_thread_main(
                     &session,
                     cursor,
                     source.into(),
-                    false,                        // single source
+                    false,                       // single source
                     restore_token_in.as_deref(), // reuse this run's grant if we have one
                     // Persist the approval only while rmdd runs (NOT ExplicitlyRevoked,
                     // which leaves a permanent session mutter keeps alive across
@@ -323,7 +354,10 @@ pub(crate) fn pw_run(
         },
     )?;
 
-    let data = StreamData { format: Default::default(), sink };
+    let data = StreamData {
+        format: Default::default(),
+        sink,
+    };
 
     // Clones so the stream callbacks (which run on the loop thread) can stop the
     // loop: on a fatal stream Error or a mid-session disconnect (B3), and when
@@ -451,7 +485,11 @@ fn to_bgra_frame(
         return None;
     }
     let row_bytes = w.checked_mul(4)?;
-    let stride = if stride >= row_bytes { stride } else { row_bytes };
+    let stride = if stride >= row_bytes {
+        stride
+    } else {
+        row_bytes
+    };
 
     // Ensure the source actually holds `height` rows at this stride.
     let needed = offset.checked_add(stride.checked_mul(h)?)?;
@@ -500,10 +538,10 @@ fn to_bgra_frame(
 /// range whose preferred value is `width`x`height` (which also sizes a virtual
 /// monitor), at up to `fps`.
 fn build_format_pod(fps: u32, width: u32, height: u32) -> Vec<u8> {
+    use pw::spa::param::ParamType;
     use pw::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
     use pw::spa::param::video::VideoFormat;
-    use pw::spa::param::ParamType;
-    use pw::spa::pod::{object, property, serialize::PodSerializer, Value};
+    use pw::spa::pod::{Value, object, property, serialize::PodSerializer};
     use pw::spa::utils::{Fraction, Rectangle, SpaTypes};
 
     let obj = object!(
@@ -528,8 +566,14 @@ fn build_format_pod(fps: u32, width: u32, height: u32) -> Vec<u8> {
             Range,
             Rectangle,
             Rectangle { width, height }, // default (also sizes a virtual monitor)
-            Rectangle { width: 1, height: 1 },       // min
-            Rectangle { width: 8192, height: 8192 }  // max
+            Rectangle {
+                width: 1,
+                height: 1
+            }, // min
+            Rectangle {
+                width: 8192,
+                height: 8192
+            }  // max
         ),
         property!(
             FormatProperties::VideoFramerate,
@@ -538,7 +582,10 @@ fn build_format_pod(fps: u32, width: u32, height: u32) -> Vec<u8> {
             Fraction,
             Fraction { num: fps, denom: 1 }, // default
             Fraction { num: 0, denom: 1 },   // min
-            Fraction { num: 1000, denom: 1 } // max
+            Fraction {
+                num: 1000,
+                denom: 1
+            }  // max
         ),
     );
 

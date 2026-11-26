@@ -15,6 +15,13 @@
 //! `?token=` on the upgrade request; the credential is resolved to an identity via
 //! the pluggable [`crate::resolver::CredentialResolver`] (device tokens by default)
 //! before the socket is accepted.
+//!
+//! Authorization: a frame is only forwarded when the target peer belongs to the
+//! **same account** (`user_id`) as the sender — a member of one account can't push
+//! offers/ICE at, or probe the presence of, another account's devices. `from` is
+//! always server-set from the sender's resolved identity (never client-supplied).
+//! Each socket's relay frames are also rate-limited (see [`FrameLimiter`]); frames
+//! over the limit are dropped, the socket stays open.
 
 use crate::db::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -23,17 +30,94 @@ use axum::response::{IntoResponse, Response};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 /// A member of a pairing room: `(member_id, outbound sender)`.
 type RoomMember = (u64, mpsc::UnboundedSender<String>);
 
+/// A connected signaling peer: who it belongs to and how to reach it.
+struct Peer {
+    /// The authenticated account/user the peer resolved to (relay scope key).
+    user_id: i64,
+    tx: mpsc::UnboundedSender<String>,
+}
+
+/// Why [`Hub::relay`] did not deliver a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelayError {
+    /// No peer with that signaling id is connected.
+    Offline,
+    /// The target is connected but belongs to a different account than the sender.
+    /// Never forwarded; indistinguishable from `Offline` to the sender (no presence
+    /// probing across accounts).
+    CrossAccount,
+}
+
+/// Sustained relay-frame rate a single signaling socket may send, in frames per
+/// second. Legitimate signaling is an offer/answer plus a few dozen trickled ICE
+/// candidates per (re)negotiation, well inside this.
+pub const RELAY_FRAMES_PER_SEC: f64 = 16.0;
+/// Burst allowance per socket (the token bucket's capacity): lets a full ICE
+/// gather + offer go out at once without throttling.
+pub const RELAY_BURST: f64 = 64.0;
+
+/// Per-connection token bucket for inbound relay frames. Starts full; refills at
+/// [`RELAY_FRAMES_PER_SEC`] up to [`RELAY_BURST`]. Over-limit frames are dropped by
+/// the caller (not forwarded) rather than closing the socket, so a client that
+/// briefly bursts just loses the excess instead of its session.
+pub struct FrameLimiter {
+    tokens: f64,
+    last: Instant,
+    rate_per_sec: f64,
+    burst: f64,
+}
+
+impl FrameLimiter {
+    pub fn new() -> Self {
+        Self::with_limits(RELAY_FRAMES_PER_SEC, RELAY_BURST)
+    }
+
+    pub fn with_limits(rate_per_sec: f64, burst: f64) -> Self {
+        Self {
+            tokens: burst,
+            last: Instant::now(),
+            rate_per_sec,
+            burst,
+        }
+    }
+
+    /// Try to spend one token now. `true` = frame allowed.
+    pub fn allow(&mut self) -> bool {
+        self.allow_at(Instant::now())
+    }
+
+    /// [`allow`](Self::allow) with an explicit clock (tests).
+    pub fn allow_at(&mut self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.last);
+        self.last = now;
+        self.tokens = (self.tokens + elapsed.as_secs_f64() * self.rate_per_sec).min(self.burst);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for FrameLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Tracks which device_ids are currently connected and how to reach them, plus
 /// ephemeral 2-party **pairing rooms** keyed by a one-time code (no accounts).
 #[derive(Default)]
 pub struct Hub {
-    peers: Mutex<HashMap<String, mpsc::UnboundedSender<String>>>,
+    peers: Mutex<HashMap<String, Peer>>,
     /// code → up to two members. Used by the stateless direct-pairing flow
     /// (QR/PAKE); the relay only forwards opaque ciphertext.
     rooms: Mutex<HashMap<String, Vec<RoomMember>>>,
@@ -97,9 +181,13 @@ impl Hub {
         }
     }
 
-    /// Register a connected device; replaces any prior connection for that id.
-    async fn register(&self, device_id: String, tx: mpsc::UnboundedSender<String>) {
-        self.peers.lock().await.insert(device_id, tx);
+    /// Register a connected device under the account it authenticated as;
+    /// replaces any prior connection for that id.
+    async fn register(&self, device_id: String, user_id: i64, tx: mpsc::UnboundedSender<String>) {
+        self.peers
+            .lock()
+            .await
+            .insert(device_id, Peer { user_id, tx });
     }
 
     /// Remove a device's connection (only if `tx` still matches — avoids evicting
@@ -107,18 +195,24 @@ impl Hub {
     async fn unregister(&self, device_id: &str, tx: &mpsc::UnboundedSender<String>) {
         let mut peers = self.peers.lock().await;
         if let Some(existing) = peers.get(device_id) {
-            if existing.same_channel(tx) {
+            if existing.tx.same_channel(tx) {
                 peers.remove(device_id);
             }
         }
     }
 
-    /// Forward a text frame to `to`. Returns false if the target is offline.
-    async fn relay(&self, to: &str, text: String) -> bool {
+    /// Forward a text frame from a peer of account `from_user_id` to `to`. Only
+    /// delivered when the target is online AND belongs to the same account: the
+    /// relay is scoped to the authenticated account, so cross-account routing is
+    /// dropped (in a single-account self-host every peer shares the account, so
+    /// this is a no-op there). A target whose outbound channel is gone counts as
+    /// offline.
+    async fn relay(&self, from_user_id: i64, to: &str, text: String) -> Result<(), RelayError> {
         let peers = self.peers.lock().await;
         match peers.get(to) {
-            Some(tx) => tx.send(text).is_ok(),
-            None => false,
+            Some(peer) if peer.user_id != from_user_id => Err(RelayError::CrossAccount),
+            Some(peer) => peer.tx.send(text).map_err(|_| RelayError::Offline),
+            None => Err(RelayError::Offline),
         }
     }
 
@@ -192,7 +286,10 @@ async fn handle_socket(
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    state.hub.register(signaling_id.clone(), tx.clone()).await;
+    state
+        .hub
+        .register(signaling_id.clone(), user_id, tx.clone())
+        .await;
     // Notify the activity observer (plugin-supplied) that a session came online.
     // The callback must not block — a plugin offloads any I/O.
     if let Some(obs) = &state.session_observer {
@@ -226,10 +323,14 @@ async fn handle_socket(
         }
     });
 
-    // Read this device's frames and relay them to the addressed peer.
+    // Read this device's frames and relay them to the addressed peer — only within
+    // the sender's own account, and no faster than the per-socket frame limit.
     let hub = state.hub.clone();
     let me = signaling_id.clone();
     let mut recv_task = tokio::spawn(async move {
+        let mut limiter = FrameLimiter::new();
+        // Count over-limit drops so the log line fires once per episode, not per frame.
+        let mut throttled: u64 = 0;
         while let Some(Ok(msg)) = stream.next().await {
             let Message::Text(text) = msg else {
                 if matches!(msg, Message::Close(_)) {
@@ -237,6 +338,17 @@ async fn handle_socket(
                 }
                 continue;
             };
+            if !limiter.allow() {
+                throttled += 1;
+                if throttled == 1 {
+                    tracing::warn!(from = %me, "relay frame rate limit exceeded; dropping frames");
+                }
+                continue;
+            }
+            if throttled > 0 {
+                tracing::debug!(from = %me, dropped = throttled, "relay frame rate limit cleared");
+                throttled = 0;
+            }
             let frame: RelayFrame = match serde_json::from_str(&text) {
                 Ok(f) => f,
                 Err(e) => {
@@ -244,9 +356,17 @@ async fn handle_socket(
                     continue;
                 }
             };
+            // `from` is always this socket's authenticated identity — never taken
+            // from the client frame.
             let out = serde_json::json!({ "from": me, "payload": frame.payload }).to_string();
-            if !hub.relay(&frame.to, out).await {
-                tracing::debug!(from = %me, to = %frame.to, "relay target offline");
+            match hub.relay(user_id, &frame.to, out).await {
+                Ok(()) => {}
+                Err(RelayError::Offline) => {
+                    tracing::debug!(from = %me, to = %frame.to, "relay target offline");
+                }
+                Err(RelayError::CrossAccount) => {
+                    tracing::warn!(from = %me, to = %frame.to, "dropped cross-account relay frame");
+                }
             }
         }
     });
@@ -359,6 +479,7 @@ async fn handle_pair_socket(socket: WebSocket, state: AppState, code: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn pairing_room_relays_between_two_members_and_rejects_third() {
@@ -393,12 +514,84 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let id = "t:1:alice";
         assert!(!hub.is_online(id).await);
-        hub.register(id.to_string(), tx.clone()).await;
+        hub.register(id.to_string(), 1, tx.clone()).await;
         assert!(hub.is_online(id).await);
         assert_eq!(hub.online_count().await, 1);
         assert_eq!(hub.online_peers().await, vec![id.to_string()]);
         hub.unregister(id, &tx).await;
         assert!(!hub.is_online(id).await);
         assert_eq!(hub.online_count().await, 0);
+    }
+
+    /// The relay is scoped to the sender's account: a peer in account 1 can reach
+    /// another account-1 peer (host→viewer and viewer→host alike, including the
+    /// web viewer's `v:` and a tenant member's `t:` ids) but a frame addressed to
+    /// an account-2 device is dropped, not delivered — and reported exactly like
+    /// an offline target would be to the sender (no cross-account presence probe).
+    #[tokio::test]
+    async fn relay_is_scoped_to_the_senders_account() {
+        let hub = Hub::new();
+        let (tx_host1, mut rx_host1) = mpsc::unbounded_channel();
+        let (tx_view1, mut rx_view1) = mpsc::unbounded_channel();
+        let (tx_host2, mut rx_host2) = mpsc::unbounded_channel();
+        hub.register("host1".into(), 1, tx_host1).await;
+        hub.register("v:1:abcd".into(), 1, tx_view1).await;
+        hub.register("host2".into(), 2, tx_host2).await;
+
+        // Same account, both directions.
+        assert_eq!(hub.relay(1, "host1", "offer".into()).await, Ok(()));
+        assert_eq!(rx_host1.recv().await.unwrap(), "offer");
+        assert_eq!(hub.relay(1, "v:1:abcd", "answer".into()).await, Ok(()));
+        assert_eq!(rx_view1.recv().await.unwrap(), "answer");
+
+        // Cross-account: dropped, nothing reaches the target.
+        assert_eq!(
+            hub.relay(1, "host2", "offer".into()).await,
+            Err(RelayError::CrossAccount)
+        );
+        assert_eq!(
+            hub.relay(2, "host1", "offer".into()).await,
+            Err(RelayError::CrossAccount)
+        );
+        assert!(
+            rx_host2.try_recv().is_err(),
+            "account-2 host must get nothing"
+        );
+        assert!(
+            rx_host1.try_recv().is_err(),
+            "account-1 host must get nothing"
+        );
+
+        // Unknown target is offline.
+        assert_eq!(
+            hub.relay(1, "nobody", "x".into()).await,
+            Err(RelayError::Offline)
+        );
+    }
+
+    /// The per-socket token bucket: a burst of `RELAY_BURST` passes, the next is
+    /// dropped, and tokens come back at `RELAY_FRAMES_PER_SEC` (capped at burst).
+    #[test]
+    fn frame_limiter_allows_burst_then_refills() {
+        let mut l = FrameLimiter::with_limits(10.0, 5.0);
+        let t0 = Instant::now();
+        for _ in 0..5 {
+            assert!(l.allow_at(t0), "burst must pass");
+        }
+        assert!(!l.allow_at(t0), "over burst must be dropped");
+        // 100 ms at 10/s refills exactly one token.
+        let t1 = t0 + Duration::from_millis(100);
+        assert!(l.allow_at(t1));
+        assert!(!l.allow_at(t1));
+        // A long idle refills to the cap, no further.
+        let t2 = t1 + Duration::from_secs(60);
+        for _ in 0..5 {
+            assert!(l.allow_at(t2));
+        }
+        assert!(!l.allow_at(t2));
+        // Defaults are the documented ones.
+        let d = FrameLimiter::new();
+        assert_eq!(d.burst, RELAY_BURST);
+        assert_eq!(d.rate_per_sec, RELAY_FRAMES_PER_SEC);
     }
 }

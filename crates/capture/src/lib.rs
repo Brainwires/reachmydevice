@@ -16,12 +16,12 @@ use std::sync::mpsc::Sender;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod mac;
 #[cfg(target_os = "linux")]
 pub mod mutter;
 #[cfg(target_os = "linux")]
 pub mod wayland;
-#[cfg(target_os = "macos")]
-pub mod mac;
 
 /// Which Linux capture backend fits this session.
 #[cfg(target_os = "linux")]

@@ -2,6 +2,127 @@
 
 All notable changes to ReachMyDevice. Format loosely follows Keep a Changelog.
 
+## [0.8.3] - 2026-11-06
+
+### Fixed
+- **macOS host now wakes a sleeping display on connect — no more black/empty
+  screen when the Mac's panel has idle-slept.** When a Mac host stayed awake but its
+  display had idle-slept (DPMS off), the framebuffer was torn down and ScreenCaptureKit
+  either dropped the display from `SCShareableContent` or delivered nothing, so a viewer
+  connected successfully but saw no screen. On capture start the host now declares user
+  activity to wake the panel, waits briefly for the framebuffer to come up, and holds a
+  display-sleep assertion for the lifetime of the session (released on disconnect, so
+  normal power management resumes when no one is connected). Implemented via the system
+  `caffeinate` tool — no new dependency, macOS only; the Linux backend is unaffected.
+
+## [0.8.2] - 2026-10-31
+
+### Fixed
+- **Capture matches the display's real aspect ratio — no more cropped/stretched
+  screens.** The host configured capture to a fixed-aspect box (the `width`/`height`
+  cap), so a non-16:9 panel (e.g. a 16:10 Retina display) was cropped or letterboxed,
+  and pointer clicks landed off. The encode size is now fitted to each display's real
+  aspect (bounded by the cap) and re-fitted on a display switch, so the screen is sent
+  edge-to-edge and the normalized pointer mapping is correct; the encoder adopts the
+  per-frame size.
+- **Host no longer loses its TURN relay for a day at a time.** The relay-credential
+  refresh restarted the host *before* expiry to re-fetch, but the `/api/ice` broker
+  caches the ephemeral credential and only rotates it once lapsed — so the early
+  re-fetch got the same near-expiry credential, tripped the "too soon" guard, and gave
+  up permanently, leaving cross-NAT/browser viewers unable to hold a session (dropped
+  at the ~31s ICE consent timeout) until a manual restart. The host now refreshes
+  shortly *after* expiry and never gives up, with a per-process rate floor so a stuck
+  timestamp can't cause a restart loop.
+- **Host no longer leaks file descriptors on self-restart.** The DNS-wedge watchdog
+  re-execs the process, but macOS kqueue/Mach-port fds are not close-on-exec, so each
+  restart leaked a batch until a long-lived host hit `EMFILE` and could never recover.
+  `restart_in_place` now closes inherited fds before the re-exec, and the generated
+  launchd plist raises the fd soft limit to 8192 as a backstop.
+
+### Changed
+- README: dropped the hosted-relay sales pitch (it lives on the landing page); the repo
+  README stays focused on the open core.
+
+### Security
+- **The device identity key is now encrypted at rest by default** via the OS keyring
+  (macOS Keychain / Windows Credential Manager / Linux Secret Service). A headless host
+  with no keyring available falls back to storing the key in plaintext (`0600`) with a
+  loud warning — set `RMD_KEY_PASSPHRASE` or drop a `key.env` to encrypt there.
+  `RMD_KEY_PASSPHRASE` / `key.env` still take priority when present, existing identities
+  migrate in place on first run, and an identity is **never** regenerated on a decrypt
+  failure (it fails loudly instead of silently rotating your device id). **Note:** on
+  macOS the Keychain entry is bound to the binary's code signature, so a
+  rebuilt/reinstalled `rmdd` prompts once to re-authorize (GUI); stable code signing
+  avoids repeated prompts.
+- **The signaling relay is now scoped to the sender's account and rate-limited per
+  socket**, preventing cross-account presence probing and flooding in multi-tenant
+  deployments.
+- **`view_only` is now enforced on the host** (input injection is suppressed on the host
+  side), not just hidden in the viewer UI.
+- **The native ICE client sends the device token via `Authorization: Bearer`** instead of
+  the URL query string, keeping it out of proxy and access logs.
+- Updated `rustls`→0.23.46, `rustls-webpki`→0.103.16, `webpki-roots`→1.0.11,
+  `tokio`→1.54.1, and `clipboard-win`→5.4.3 to clear the 2026 TLS/tokio advisories
+  (RUSTSEC-2026-0285 / -0346 / -0348 / -0349 / -0382 / -0381 / -0386).
+
+## [0.8.1] - 2026-08-14
+
+### Fixed
+- **Lock-gated capture no longer intermittently hangs on connect.** In system
+  mode the agent unlocked the session, waited a fixed 500 ms, then started
+  capture — but gnome-shell can take longer than that to dismiss the lock shield
+  (notably with the monitor unplugged / a cold display), so mutter still reported
+  the session locked and refused ScreenCast (`Session creation inhibited`). With
+  no retry the session stayed hung, and replugging the monitor didn't recover it.
+  The agent now re-issues the unlock and **polls `LockedHint` until the session is
+  actually unlocked**, then **retries `resume()` until capture starts**, closing
+  the race deterministically.
+
+## [0.8.0] - 2026-08-14
+
+### Added
+- **System mode: unattended remote login + seamless session handover (opt-in).**
+  A new `rmdd setup-linux system` installs a **broker/agent split**: a broker system
+  service (dedicated non-root `rmd` user) owns the network (WebRTC + rendezvous +
+  identity/token) and input injection, while a per-session **agent** captures+encodes
+  the screen and streams it to the broker over a local Unix socket (`rmd-ipc`, a new
+  crate). The broker keeps the viewer's connection alive as agents come and go, so
+  login is a **seamless handover**. The agent auto-detects its capture backend from
+  the session it runs in (GNOME/mutter, X11, Plasma/portal). New daemon verbs
+  `rmdd broker` and `rmdd agent` (Linux). The existing single per-user service is
+  unchanged and remains the default; system mode is entirely opt-in.
+- **Lock-gated auto-login (secure unattended access).** The GDM login screen can't be
+  captured (mutter inhibits ScreenCast behind the lock shield — it needs the privileged
+  RemoteDesktop handover API). Instead, system mode enables GDM **auto-login** but the
+  agent keeps the session **locked**: an authenticated remote viewer unlocks it
+  passwordlessly (via `loginctl`, as the session's own user) and it re-locks on
+  disconnect, while an idle-inhibitor prevents mid-session relock. Local/physical access
+  still always requires the account password (PAM). More secure than plain auto-login.
+  Caveats (see README-LINUX.md): a brief unlocked window at boot before the first lock
+  (use manual login if physically threatened); the auto-login keyring stays locked.
+- **`RMD_STATE_DIR`** overrides the state/secret directory (identity.key, settings.enc,
+  token, authorized_keys), used by the broker to read from `/var/lib/rmd` instead of a
+  per-user home. Unified the four secret paths onto one resolver.
+
+## [0.7.1] - 2026-08-13
+
+### Fixed
+- **Host service now starts in the graphical session, not at boot — fixes capture
+  falling back to a broken X11 path after a reboot.** `rmdd enable` generated a
+  systemd user unit `WantedBy=default.target`, so the daemon launched at boot,
+  *before* GNOME imports `WAYLAND_DISPLAY` / `XDG_CURRENT_DESKTOP` /
+  `XDG_SESSION_TYPE` into the user environment. Running with a stale env it failed
+  to detect GNOME/Wayland and fell back to the X11 capture backend, which then died
+  with "Authorization required" (no valid X cookie) — the viewer connected over
+  WebRTC but got no picture. The generated unit is now `WantedBy=graphical-session.target`
+  (+ `PartOf=`), so the daemon inherits the compositor's environment on every login
+  and picks the mutter backend. An explicit-X-server deployment (headless
+  `DISPLAY=:99` Xvfb) still gets a `default.target` unit. `rmdd enable` also now
+  disables the old unit first, so upgrading from a `default.target` install removes
+  the stale `WantedBy` symlink instead of double-starting at boot. The generated
+  unit also gains the `EnvironmentFile=-…/key.env` line the daemon documents relying
+  on. The `deploy/service/rmd-host.service` template got the same treatment.
+
 ## [0.7.0] - 2026-08-12
 
 ### Added

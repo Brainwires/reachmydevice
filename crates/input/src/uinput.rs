@@ -20,9 +20,9 @@
 use crate::keymap;
 use crate::{Injector, MonitorRect};
 use evdev::{
-    uinput::{VirtualDevice, VirtualDeviceBuilder},
     AbsInfo, AbsoluteAxisType, AttributeSet, EventType, InputEvent as EvEvent, Key, PropType,
     RelativeAxisType, UinputAbsSetup,
+    uinput::{VirtualDevice, VirtualDeviceBuilder},
 };
 use rmd_protocol::input_event::Event as WireEvent;
 use std::collections::HashSet;
@@ -158,11 +158,7 @@ impl UinputInjector {
         let notch = {
             let n = v.round() as i32;
             if n == 0 {
-                if v > 0.0 {
-                    1
-                } else {
-                    -1
-                }
+                if v > 0.0 { 1 } else { -1 }
             } else {
                 n
             }
@@ -212,13 +208,21 @@ impl Injector for UinputInjector {
                     self.pressed.remove(&code);
                 }
                 let [ex, ey] = Self::abs_events(x, y);
-                self.emit(&[ex, ey, EvEvent::new(EventType::KEY, code, i32::from(b.pressed))])?;
+                self.emit(&[
+                    ex,
+                    ey,
+                    EvEvent::new(EventType::KEY, code, i32::from(b.pressed)),
+                ])?;
             }
             WireEvent::MouseScroll(s) => {
                 let mut evs = Vec::with_capacity(4);
                 let (notch, hires) = Self::scroll_axes(s.dy);
                 if notch != 0 {
-                    evs.push(EvEvent::new(EventType::RELATIVE, RelativeAxisType::REL_WHEEL.0, notch));
+                    evs.push(EvEvent::new(
+                        EventType::RELATIVE,
+                        RelativeAxisType::REL_WHEEL.0,
+                        notch,
+                    ));
                     evs.push(EvEvent::new(
                         EventType::RELATIVE,
                         RelativeAxisType::REL_WHEEL_HI_RES.0,
@@ -227,7 +231,11 @@ impl Injector for UinputInjector {
                 }
                 let (hnotch, hhires) = Self::scroll_axes(s.dx);
                 if hnotch != 0 {
-                    evs.push(EvEvent::new(EventType::RELATIVE, RelativeAxisType::REL_HWHEEL.0, hnotch));
+                    evs.push(EvEvent::new(
+                        EventType::RELATIVE,
+                        RelativeAxisType::REL_HWHEEL.0,
+                        hnotch,
+                    ));
                     evs.push(EvEvent::new(
                         EventType::RELATIVE,
                         RelativeAxisType::REL_HWHEEL_HI_RES.0,

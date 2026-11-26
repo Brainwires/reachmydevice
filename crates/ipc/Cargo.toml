@@ -1,0 +1,17 @@
+[package]
+publish = false  # internal workspace member; path-dep, never published to crates.io
+name = "rmd-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+# Compact binary framing for the local broker<->agent Unix socket. Video frames
+# are the only high-rate message, so JSON would bloat/base64 them — postcard keeps
+# the payload tight and dependency-light (pure Rust).
+postcard.workspace = true
+# Async Unix-socket I/O for the framing helpers (length-prefixed read/write).
+tokio.workspace = true

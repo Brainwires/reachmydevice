@@ -104,6 +104,17 @@ impl Encoder for OpenH264Encoder {
         capture_ts_micros: u64,
         force_keyframe: bool,
     ) -> anyhow::Result<Option<EncodedFrame>> {
+        // The capture backend fits the encode size to the display's aspect ratio,
+        // which can differ from the initial config and changes on a display switch.
+        // openh264 takes its dimensions from the frames, so rebuild the encoder when
+        // the frame size moves (openh264 can't change resolution mid-stream).
+        if width != self.cfg.width || height != self.cfg.height {
+            self.cfg.width = width;
+            self.cfg.height = height;
+            self.encoder = build_encoder(&self.cfg)?;
+            self.last_rebuild = Instant::now();
+            tracing::debug!(width, height, "encoder rebuilt for new frame size");
+        }
         self.maybe_reconfigure()?;
         if force_keyframe {
             self.encoder.force_intra_frame();

@@ -194,47 +194,59 @@ pub fn run_host_reporting<F>(
 where
     F: Fn(HostStatus),
 {
+    let transport = spawn_host_transport(&cfg)?;
+    // Security boundary: no screen is encoded/streamed and no input injected until
+    // an accepted Hello sets this. Reset on every (re)connect.
+    let authorized = Arc::new(AtomicBool::new(false));
+    // Digital-zoom crop rect (viewer-driven, via `SetZoom`). Shared by the encode
+    // thread (crops+scales to it) and the input path (remaps pointer coords).
+    let zoom = Arc::new(Mutex::new(codec::CropRect::FULL));
+    // Local capture+encode plane: the default in-process video source.
+    let video: Box<dyn VideoPlane> = Box::new(LocalVideoPlane::start(
+        &cfg,
+        transport.sender(),
+        authorized.clone(),
+        zoom.clone(),
+    )?);
+    run_host_core(cfg, signal, on_status, transport, authorized, zoom, video)
+}
+
+/// Spawn the host's WebRTC transport (offerer role) from `cfg`. Shared by the
+/// single-process host and the system-mode broker.
+pub(crate) fn spawn_host_transport(cfg: &HostConfig) -> anyhow::Result<Transport> {
     let bind_addr = cfg
         .bind_addr
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid bind_addr {:?}: {e}", cfg.bind_addr))?;
-    let transport = Transport::spawn(TransportConfig {
+    Transport::spawn(TransportConfig {
         role: TransportRole::Host,
         ice_servers: cfg.ice_servers.clone(),
         bind_addr,
         video_bitrate_bps: cfg.bitrate_bps,
         video_codec: to_transport_codec(cfg.video_codec),
-    })?;
+    })
+}
 
-    // Force a keyframe on start and whenever a viewer (re)connects.
-    let force_keyframe = Arc::new(AtomicBool::new(true));
-
-    // Capture -> frame channel. The controller owns the capture session so it
-    // can restart on a different display (multi-monitor) without disturbing the
-    // encode thread, which keeps reading the same channel.
-    let (frame_tx, frame_rx) = mpsc::channel();
-    let capture_cfg = capture::CaptureConfig {
-        width: cfg.width,
-        height: cfg.height,
-        fps: cfg.fps,
-        show_cursor: true,
-        restore_token: cfg.screencast_restore_token.clone(),
-        capture_source: cfg.capture_source,
-    };
-    let mut capture_ctl = CaptureController::start(
-        capture_cfg,
-        cfg.display_index,
-        frame_tx,
-        force_keyframe.clone(),
-        cfg.identity.clone(),
-    )?;
+/// The video-source-agnostic host session core: access control, input injection,
+/// clipboard, file transfer, the authorization handshake, and the transport event
+/// loop. The `video` plane is either local capture+encode ([`LocalVideoPlane`],
+/// the default per-user service) or the broker's per-session agent stream
+/// ([`BrokerVideoPlane`]) — everything here is identical for both.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_host_core<F>(
+    cfg: HostConfig,
+    signal: Box<dyn Signaling>,
+    on_status: F,
+    transport: Transport,
+    authorized: Arc<AtomicBool>,
+    zoom: Arc<Mutex<codec::CropRect>>,
+    mut video: Box<dyn VideoPlane>,
+) -> anyhow::Result<()>
+where
+    F: Fn(HostStatus),
+{
     // Whether a viewer's DTLS session is up. Tracks connection lifecycle.
     let connected = Arc::new(AtomicBool::new(false));
-    // Whether the connected viewer has been AUTHORIZED (sent a Hello we accepted).
-    // This is the security boundary: no screen is encoded/streamed, no input is
-    // injected, and no file/clipboard/display action is applied until it's true.
-    // Reset to false on every (re)connect, so each session must re-authorize.
-    let authorized = Arc::new(AtomicBool::new(false));
 
     // Unattended-access policy.
     let access = AccessControl {
@@ -268,44 +280,19 @@ where
         None
     };
 
-    // Digital-zoom crop rect (viewer-driven, via `SetZoom`). Shared by the encode
-    // thread (which crops+scales the video to it) and the input path (which remaps
-    // pointer coords through it, so taps land inside the zoomed region). Default:
-    // no zoom (full screen).
-    let zoom = Arc::new(Mutex::new(codec::CropRect::FULL));
-
-    // Encode thread: frames -> H.264 -> transport, with GCC-driven bitrate.
-    // Gated on `authorized`, so screen content is never streamed to a peer that
-    // has completed DTLS but not been authorized.
-    spawn_encode_thread(
-        &cfg,
-        transport.sender(),
-        force_keyframe.clone(),
-        authorized.clone(),
-        frame_rx,
-        zoom.clone(),
-    )?;
-
     // Input injector (best effort; needs Accessibility permission).
-    // `monitor_rect` places the captured output within the desktop bounding box
-    // for multi-monitor absolute mapping; the capture backend fills it in when it
-    // knows the geometry (else `None` = whole-desktop, and the
-    // `RMD_INPUT_MONITOR_RECT` env override still applies).
-    let monitor_rect = capture::primary_monitor_rect().map(|r| input::MonitorRect {
-        ox: r.ox,
-        oy: r.oy,
-        mw: r.mw,
-        mh: r.mh,
-        dw: r.dw,
-        dh: r.dh,
-    });
-    let mut injector = match input::new_injector(monitor_rect) {
+    // The video plane reports the captured output's placement within the desktop
+    // bounding box for multi-monitor absolute mapping (`None` = whole-desktop, and
+    // the `RMD_INPUT_MONITOR_RECT` env override still applies). The broker plane
+    // can change this on handover to a new agent, so it's rebuildable.
+    let build_injector = |rect: Option<input::MonitorRect>| match input::new_injector(rect) {
         Ok(i) => Some(i),
         Err(e) => {
             tracing::warn!(error=%e, "input injection unavailable (grant Accessibility?)");
             None
         }
     };
+    let mut injector = build_injector(video.monitor_rect());
 
     // Clipboard sync: forward local clipboard changes to the viewer and apply
     // the viewer's. Sends before a viewer connects are dropped by the transport.
@@ -375,6 +362,11 @@ where
     // Per-connection connection-password brute-force throttle; reset when the
     // peer disconnects (a new connection is a fresh DTLS handshake).
     let mut pw_throttle = PasswordThrottle::new();
+    // Per-session view-only state, set by the viewer's `ViewOnly` control message
+    // and enforced HERE (input injection suppressed while on), not just in the
+    // viewer's UI — a modified viewer must not be able to bypass it. Reset per
+    // connection so a new session always starts with input enabled.
+    let mut view_only = false;
 
     // Control / event loop: forward peer signaling in, react to transport events.
     loop {
@@ -393,6 +385,13 @@ where
         if signal.take_peer_switched() {
             tracing::info!("viewer switched device; rebuilding session with a fresh offer");
             transport.request_ice_restart();
+        }
+        // The captured session's geometry changed (broker handover to a new agent
+        // — e.g. greeter -> user login): rebuild the input injector so absolute
+        // pointer mapping matches the new output. Local capture never fires this.
+        if let Some(new_rect) = video.poll_geometry_changed() {
+            tracing::info!("captured session changed; rebuilding input injector");
+            injector = build_injector(new_rect);
         }
         while let Ok(ev) = file_ev_rx.try_recv() {
             log_file_event(ev);
@@ -418,6 +417,7 @@ where
                 connected.store(true, Ordering::Relaxed);
                 authorized.store(false, Ordering::Relaxed);
                 was_authorized = false;
+                view_only = false;
                 tracing::info!("viewer connected (DTLS); awaiting authorization");
             }
             TransportEvent::Disconnected => {
@@ -425,6 +425,7 @@ where
                 connected.store(false, Ordering::Relaxed);
                 authorized.store(false, Ordering::Relaxed);
                 was_authorized = false;
+                view_only = false;
                 // Release any keys/buttons the viewer left held, so nothing leaks
                 // stuck into the host (or the next session) after disconnect.
                 if let Some(inj) = injector.as_deref_mut() {
@@ -434,7 +435,7 @@ where
                 pw_throttle.reset();
                 // Stop capturing so nothing is grabbed (and the OS screen-share
                 // indicator clears) while no viewer is connected.
-                capture_ctl.pause();
+                video.pause();
                 on_status(HostStatus::Ended);
             }
             TransportEvent::Data(bytes) => {
@@ -444,7 +445,7 @@ where
                     &mut injector,
                     &clipboard,
                     &mut files,
-                    &mut capture_ctl,
+                    video.as_mut(),
                     &access,
                     &authorized,
                     remote_fingerprint.as_deref().unwrap_or_default().as_bytes(),
@@ -455,6 +456,7 @@ where
                     cfg.connect_password.as_deref(),
                     &mut pw_throttle,
                     &zoom,
+                    &mut view_only,
                 );
                 // The viewer just became authorized (accepted Hello) — surface the
                 // active session once, and start streaming.
@@ -469,17 +471,145 @@ where
                 // The viewer's RTCP (PLI/FIR) asked for a fresh keyframe after loss.
                 // Force an IDR so it recovers now rather than waiting for the next
                 // periodic keyframe. Cheap and idempotent (a swap-once flag).
-                capture_ctl.force_keyframe.store(true, Ordering::Relaxed);
+                video.request_keyframe();
             }
         }
     }
 }
 
+/// The video source and capture-control surface behind [`run_host_core`].
+///
+/// Two implementations: [`LocalVideoPlane`] captures+encodes the screen in-process
+/// (the default per-user host), and `BrokerVideoPlane` (system mode) receives
+/// encoded frames from a per-session agent over a Unix socket and relays capture
+/// control to it. The core loop drives either identically.
+///
+/// Not `Send`: the local plane owns a thread-affine capture session, and the plane
+/// only ever lives on the core loop's own thread.
+pub(crate) trait VideoPlane {
+    /// Displays available to offer the viewer.
+    fn descriptors(&self) -> Vec<proto::DisplayDescriptor>;
+    /// Start streaming (viewer authorized).
+    fn resume(&mut self);
+    /// Stop streaming (viewer gone / disconnected).
+    fn pause(&mut self);
+    /// Switch the captured display.
+    fn select(&mut self, id: u32);
+    /// Bake the OS cursor into the captured video, or not.
+    fn set_show_cursor(&mut self, show: bool);
+    /// Emit an IDR now (viewer join / decoder PLI).
+    fn request_keyframe(&mut self);
+    /// The captured output's rect for absolute-pointer mapping, if known.
+    fn monitor_rect(&self) -> Option<input::MonitorRect>;
+    /// Returns `Some(rect)` once when the captured session's geometry changed
+    /// (broker handover to a new agent), so the core rebuilds the input injector.
+    /// Local capture returns `None` — its geometry is fixed for the session.
+    fn poll_geometry_changed(&mut self) -> Option<Option<input::MonitorRect>> {
+        None
+    }
+}
+
+/// The default in-process video plane: local screen capture + H.264 encode feeding
+/// the WebRTC transport. Wraps the [`CaptureController`] (which owns the live
+/// capture session) and the encode thread; both share a `force_keyframe` flag.
+struct LocalVideoPlane {
+    ctl: CaptureController,
+}
+
+impl LocalVideoPlane {
+    /// Start capture (idle until [`resume`](VideoPlane::resume)) and the encode
+    /// thread. `zoom` is shared with the core's input-remap path.
+    fn start(
+        cfg: &HostConfig,
+        sender: TransportSender,
+        authorized: Arc<AtomicBool>,
+        zoom: Arc<Mutex<codec::CropRect>>,
+    ) -> anyhow::Result<Self> {
+        // Force a keyframe on start and whenever a viewer (re)connects. Shared by
+        // the capture controller (sets it on stream restart) and the encode thread.
+        let force_keyframe = Arc::new(AtomicBool::new(true));
+        // Capture -> frame channel. The controller owns the capture session so it
+        // can restart on a different display without disturbing the encode thread,
+        // which keeps reading the same channel.
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let capture_cfg = capture::CaptureConfig {
+            width: cfg.width,
+            height: cfg.height,
+            fps: cfg.fps,
+            show_cursor: true,
+            restore_token: cfg.screencast_restore_token.clone(),
+            capture_source: cfg.capture_source,
+        };
+        let ctl = CaptureController::start(
+            capture_cfg,
+            cfg.display_index,
+            frame_tx,
+            force_keyframe.clone(),
+            cfg.identity.clone(),
+        )?;
+        // Encode thread: frames -> H.264 -> transport, with GCC-driven bitrate.
+        // Gated on `authorized`, so screen content is never streamed to a peer that
+        // has completed DTLS but not been authorized.
+        spawn_encode_thread(cfg, sender, force_keyframe, authorized, frame_rx, zoom)?;
+        Ok(Self { ctl })
+    }
+}
+
+impl VideoPlane for LocalVideoPlane {
+    fn descriptors(&self) -> Vec<proto::DisplayDescriptor> {
+        self.ctl.descriptors()
+    }
+    fn resume(&mut self) {
+        self.ctl.resume();
+    }
+    fn pause(&mut self) {
+        self.ctl.pause();
+    }
+    fn select(&mut self, id: u32) {
+        self.ctl.select(id);
+    }
+    fn set_show_cursor(&mut self, show: bool) {
+        self.ctl.set_show_cursor(show);
+    }
+    fn request_keyframe(&mut self) {
+        self.ctl.force_keyframe.store(true, Ordering::Relaxed);
+    }
+    fn monitor_rect(&self) -> Option<input::MonitorRect> {
+        capture::primary_monitor_rect().map(|r| input::MonitorRect {
+            ox: r.ox,
+            oy: r.oy,
+            mw: r.mw,
+            mh: r.mh,
+            dw: r.dw,
+            dh: r.dh,
+        })
+    }
+}
+
+/// Largest even-dimensioned rectangle with the `disp_w : disp_h` aspect ratio that
+/// fits within the `(cap_w, cap_h)` box. Used to fit the encode size to the captured
+/// display's real aspect, so a non-16:9 panel is sent edge-to-edge instead of being
+/// letterboxed or cropped by a fixed-aspect cap (which also keeps the normalized
+/// pointer mapping honest). Falls back to the cap if any input is zero.
+fn fit_display_aspect(disp_w: u32, disp_h: u32, cap_w: u32, cap_h: u32) -> (u32, u32) {
+    if disp_w == 0 || disp_h == 0 || cap_w == 0 || cap_h == 0 {
+        return (cap_w.max(2), cap_h.max(2));
+    }
+    let scale = f64::min(cap_w as f64 / disp_w as f64, cap_h as f64 / disp_h as f64);
+    let even = |v: f64| ((v.round() as u32).max(2)) & !1u32;
+    (even(disp_w as f64 * scale), even(disp_h as f64 * scale))
+}
+
 /// Owns the live capture session and can restart it on another display
 /// (multi-monitor). The encode thread reads a stable frame channel, so switching
-/// displays only swaps the producer — the encoded output size is unchanged
-/// (the backend scales each display to the configured dimensions).
-struct CaptureController {
+/// displays only swaps the producer. The encode size is fitted to each display's
+/// real aspect ratio (bounded by the configured `width`/`height` cap) via
+/// [`fit_display_aspect`], so a non-16:9 display is captured edge-to-edge; the
+/// encoder adopts whatever frame size the capture produces.
+///
+/// `pub(crate)` so the system-mode [agent](crate::agent) can reuse it as its
+/// capture source (driven by broker control messages instead of a local viewer).
+pub(crate) struct CaptureController {
     config: capture::CaptureConfig,
     frame_tx: mpsc::Sender<capture::Frame>,
     displays: Vec<capture::DisplayInfo>,
@@ -499,7 +629,7 @@ impl CaptureController {
     /// Prepare the controller **without** starting capture. Enumerates displays
     /// (metadata only — no capture stream, so no sharing indicator) and waits for
     /// [`resume`](Self::resume) when a viewer connects.
-    fn start(
+    pub(crate) fn start(
         config: capture::CaptureConfig,
         display_index: usize,
         frame_tx: mpsc::Sender<capture::Frame>,
@@ -518,6 +648,22 @@ impl CaptureController {
         })
     }
 
+    /// The capture config with the encode size fitted to the CURRENT display's
+    /// aspect ratio (bounded by the configured `width`/`height` cap), so a non-16:9
+    /// display is captured edge-to-edge instead of letterboxed/cropped.
+    /// `self.config.{width,height}` stay the cap; only the returned clone is fitted,
+    /// so switching to a differently-shaped display re-fits correctly.
+    fn fitted_config(&self) -> capture::CaptureConfig {
+        let mut cfg = self.config.clone();
+        if let Some(d) = self.displays.get(self.current) {
+            let (w, h) =
+                fit_display_aspect(d.width, d.height, self.config.width, self.config.height);
+            cfg.width = w;
+            cfg.height = h;
+        }
+        cfg
+    }
+
     /// Persist a portal restore token the capture backend just obtained, so the
     /// next session (and next daemon start) re-grants without a consent prompt.
     /// A no-op unless the token is new and we have an identity to encrypt the
@@ -529,7 +675,9 @@ impl CaptureController {
             return; // unchanged — nothing to persist
         }
         self.config.restore_token = Some(token.clone());
-        let Some(identity) = self.identity.clone() else { return };
+        let Some(identity) = self.identity.clone() else {
+            return;
+        };
         let path = crate::settings::SettingsStore::default_path();
         // Hold the settings lock across load-modify-save so a concurrent
         // `rmdd set` can't clobber this write (or vice versa).
@@ -557,11 +705,18 @@ impl CaptureController {
     }
 
     /// Start capturing the current display (viewer connected). Idempotent.
-    fn resume(&mut self) {
+    /// Whether a capture session is currently live. Used by the system-mode agent
+    /// (Linux) to retry capture start after unlocking; unused elsewhere.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn is_capturing(&self) -> bool {
+        self.handle.is_some()
+    }
+
+    pub(crate) fn resume(&mut self) {
         if self.handle.is_some() {
             return;
         }
-        match capture::start_capture(self.config.clone(), self.current, self.frame_tx.clone()) {
+        match capture::start_capture(self.fitted_config(), self.current, self.frame_tx.clone()) {
             Ok(h) => {
                 let token = h.restore_token();
                 self.handle = Some(h);
@@ -575,7 +730,7 @@ impl CaptureController {
 
     /// Stop capturing (viewer disconnected) — drops the session, so the OS-level
     /// screen-capture indicator goes away while idle. Idempotent.
-    fn pause(&mut self) {
+    pub(crate) fn pause(&mut self) {
         if let Some(handle) = self.handle.take() {
             // The portal grant resolves asynchronously (non-blocking start), so the
             // restore token usually isn't available until well after resume(). Grab
@@ -605,7 +760,7 @@ impl CaptureController {
     /// renders its own cursor asks for `false` so the pointer isn't subject to the
     /// video pipeline's latency (it draws the cursor locally instead). A no-op when
     /// unchanged, so re-Hellos on the same session don't churn the capture.
-    fn set_show_cursor(&mut self, show: bool) {
+    pub(crate) fn set_show_cursor(&mut self, show: bool) {
         if self.config.show_cursor == show {
             return;
         }
@@ -613,7 +768,7 @@ impl CaptureController {
         if self.handle.is_none() {
             return; // not capturing yet — the next resume() picks up the new config
         }
-        match capture::start_capture(self.config.clone(), self.current, self.frame_tx.clone()) {
+        match capture::start_capture(self.fitted_config(), self.current, self.frame_tx.clone()) {
             Ok(handle) => {
                 let token = handle.restore_token();
                 self.handle = Some(handle); // dropping the old session stops it
@@ -626,7 +781,7 @@ impl CaptureController {
     }
 
     /// Switch capture to display `id` (a no-op if already current or invalid).
-    fn select(&mut self, id: u32) {
+    pub(crate) fn select(&mut self, id: u32) {
         let idx = id as usize;
         if idx == self.current {
             return;
@@ -641,7 +796,7 @@ impl CaptureController {
         if self.handle.is_none() {
             return;
         }
-        match capture::start_capture(self.config.clone(), idx, self.frame_tx.clone()) {
+        match capture::start_capture(self.fitted_config(), idx, self.frame_tx.clone()) {
             Ok(handle) => {
                 let token = handle.restore_token();
                 self.handle = Some(handle); // dropping the old session stops it
@@ -856,6 +1011,15 @@ fn authorization_permits(payload: &Payload, authorized: bool) -> bool {
     authorized || matches!(payload, Payload::Hello(_))
 }
 
+/// The view-only gate, as a pure predicate: while the session is view-only (the
+/// viewer sent `ViewOnly { enabled: true }`), `Input` events are dropped on the
+/// HOST, so a modified viewer that ignores its own view-only toggle still can't
+/// inject. Every other control message (ping, clipboard, display switch, the
+/// `ViewOnly` toggle itself…) is unaffected.
+fn view_only_suppresses(payload: &Payload, view_only: bool) -> bool {
+    view_only && matches!(payload, Payload::Input(_))
+}
+
 /// Whether a viewer's supplied connection password satisfies the host's. `None`
 /// configured → no password required (always ok). Constant-time comparison.
 fn verify_connect_password(configured: Option<&str>, supplied: &str) -> bool {
@@ -883,7 +1047,10 @@ const THROTTLE_MAX_SECS: u64 = 30;
 
 impl PasswordThrottle {
     fn new() -> Self {
-        Self { failures: 0, locked_until: None }
+        Self {
+            failures: 0,
+            locked_until: None,
+        }
     }
 
     /// True while a lockout window is active (reject without evaluating a guess).
@@ -930,7 +1097,7 @@ fn handle_control(
     injector: &mut Option<Box<dyn input::Injector>>,
     clipboard: &ClipboardSync,
     files: &mut FileTransfers,
-    capture_ctl: &mut CaptureController,
+    video: &mut dyn VideoPlane,
     access: &AccessControl,
     authorized: &AtomicBool,
     channel_binding: &[u8],
@@ -941,6 +1108,7 @@ fn handle_control(
     connect_password: Option<&str>,
     pw_throttle: &mut PasswordThrottle,
     zoom: &Mutex<codec::CropRect>,
+    view_only: &mut bool,
 ) {
     let env = match proto::decode(bytes) {
         Ok(e) => e,
@@ -960,6 +1128,13 @@ fn handle_control(
     // HelloAck alone gates nothing.
     if !authorization_permits(&payload, authorized.load(Ordering::Relaxed)) {
         tracing::debug!("dropping control message from unauthorized viewer");
+        return;
+    }
+
+    // VIEW-ONLY GATE. Host-side enforcement of the viewer's `ViewOnly` toggle:
+    // while on, input events are dropped here regardless of what the viewer sends.
+    if view_only_suppresses(&payload, *view_only) {
+        tracing::debug!("dropping input event: session is view-only");
         return;
     }
 
@@ -1019,8 +1194,8 @@ fn handle_control(
                     // the capture (set before resume so the stream starts cursor-less)
                     // — the pointer is then lag-free client-side, not pipelined video.
                     let client_cursor = h.features & proto::FEATURE_CLIENT_CURSOR != 0;
-                    capture_ctl.set_show_cursor(!client_cursor);
-                    capture_ctl.resume();
+                    video.set_show_cursor(!client_cursor);
+                    video.resume();
                     // Prove the host's identity bound to this DTLS session so the
                     // viewer can authenticate the real endpoint (closes A2 MITM).
                     let ack = match host_identity {
@@ -1035,7 +1210,7 @@ fn handle_control(
                     };
                     transport.send_data(Bytes::from(proto::encode(&ack)));
                     // Advertise the host's displays so the viewer can switch monitors.
-                    let list = proto::display_list(capture_ctl.descriptors());
+                    let list = proto::display_list(video.descriptors());
                     transport.send_data(Bytes::from(proto::encode(&list)));
                     tracing::info!(viewer = %h.device_name, "viewer accepted");
                 }
@@ -1080,8 +1255,22 @@ fn handle_control(
             transport.send_data(Bytes::from(proto::encode(&pong)));
         }
         Payload::Clipboard(update) => clipboard.apply_remote(update),
-        Payload::RequestKeyframe(_) => capture_ctl.force_keyframe.store(true, Ordering::Relaxed),
-        Payload::SelectDisplay(sel) => capture_ctl.select(sel.id),
+        Payload::RequestKeyframe(_) => video.request_keyframe(),
+        Payload::SelectDisplay(sel) => video.select(sel.id),
+        Payload::ViewOnly(v) => {
+            if v.enabled != *view_only {
+                tracing::info!(enabled = v.enabled, "viewer toggled view-only");
+            }
+            *view_only = v.enabled;
+            if v.enabled {
+                // Nothing the viewer was holding may stay pressed once its input
+                // is cut off (a stuck modifier/button would otherwise persist
+                // until it disabled view-only or disconnected).
+                if let Some(inj) = injector.as_deref_mut() {
+                    inj.release_all();
+                }
+            }
+        }
         Payload::SetZoom(z) => {
             *zoom.lock().unwrap() = codec::CropRect {
                 x: z.x,
@@ -1116,7 +1305,7 @@ fn log_file_event(ev: FileEvent) {
 mod tests {
     use super::{
         AccessControl, KEYFRAME_INTERVAL, authorization_permits, check_codec_compatible,
-        should_emit_idle_keyframe, verify_connect_password,
+        should_emit_idle_keyframe, verify_connect_password, view_only_suppresses,
     };
     use crate::identity::DeviceIdentity;
     use rmd_protocol as proto;
@@ -1190,6 +1379,43 @@ mod tests {
             authorization_permits(&hello, true),
             "Hello must pass post-auth"
         );
+    }
+
+    /// View-only is enforced on the HOST (the protocol doc promises "input
+    /// suppressed while enabled"): with view-only on, `Input` is dropped and
+    /// everything else — including the `ViewOnly` toggle needed to turn it back
+    /// off — still passes. With it off, nothing is suppressed.
+    #[test]
+    fn view_only_gate_drops_only_input_while_enabled() {
+        use proto::pb;
+        let input = Payload::Input(pb::InputEvent::default());
+        assert!(
+            view_only_suppresses(&input, true),
+            "Input must be dropped while view-only"
+        );
+        assert!(
+            !view_only_suppresses(&input, false),
+            "Input must pass when view-only is off"
+        );
+
+        let passthrough: Vec<Payload> = vec![
+            hello_payload(),
+            Payload::Clipboard(pb::ClipboardUpdate::default()),
+            Payload::FileOffer(pb::FileOffer::default()),
+            Payload::SelectDisplay(pb::SelectDisplay::default()),
+            Payload::RequestKeyframe(pb::RequestKeyframe::default()),
+            Payload::Ping(pb::Ping::default()),
+            Payload::ViewOnly(pb::ViewOnly { enabled: false }),
+            Payload::ViewOnly(pb::ViewOnly { enabled: true }),
+            Payload::SetZoom(pb::SetZoom::default()),
+        ];
+        for p in &passthrough {
+            assert!(
+                !view_only_suppresses(p, true),
+                "{p:?} must not be suppressed by view-only"
+            );
+            assert!(!view_only_suppresses(p, false));
+        }
     }
 
     /// Build a viewer `Hello` carrying an access proof bound to `binding`.

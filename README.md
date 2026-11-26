@@ -5,10 +5,6 @@ RealVNC's departed cloud tier: install a host agent on the machine you want to r
 else, point both at your own rendezvous server on a cheap VPS, and get a low-latency encrypted session —
 **P2P when possible, relayed when not, with no third-party cloud and no subscription required.**
 
-> Prefer not to run a server? Brainwires offers an **optional hosted relay** on a flat monthly
-> subscription — but self-hosting is, and will remain, **unlimited and free**. The paid layer is a
-> separate private component; this repository is the fully-functional open core.
-
 > **Status:** macOS + Linux hosts/viewers working end-to-end, with a full egui viewer UI, reconnect,
 > clipboard, resumable file transfer, audio (real desktop capture → speaker), and multi-monitor.
 > **A real cross-NAT session is proven** (host on a cloud box ↔ viewer behind home NAT, signaling through
@@ -161,7 +157,7 @@ Debian/Ubuntu, and plain `.tar.gz` archives — each with a minisign `.minisig`.
 | `RMD_BITRATE` | `8000000` | Target bitrate in bps (GCC adapts down) | `bitrate` |
 | `RMD_CODEC` | `h264` | `h264` \| `av1` (AV1 needs `--features av1`) | — |
 | `RMD_AUDIO` | off | Set to enable host→viewer Opus audio | — |
-| `RMD_KEY_PASSPHRASE` | — | Encrypt the device identity key at rest | — |
+| `RMD_KEY_PASSPHRASE` | — | Override for at-rest identity-key encryption. The key is encrypted at rest **by default** via the OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service); set this (or use a `key.env`) to encrypt with a passphrase instead — required on headless hosts with no keyring, which otherwise fall back to a plaintext `0600` key with a warning | — |
 | `RMD_AUTHORIZED_KEYS` | `~/.config/rmd/authorized_keys` | Allow-list file for unattended access | — |
 | `RMD_REQUIRE_AUTH` | off | Force the unattended-access gate (auto-on when the allow-list exists) | — |
 | `RMD_NO_KEEPAWAKE` | off | Don't inhibit system sleep | — |
@@ -252,5 +248,3 @@ for the plain-language summary and relicensing details.
 
 > Versions up to and including **0.2.15** were released under *MIT OR Apache-2.0*
 > and remain available under those terms; the relicense applies from **0.2.16**.
-> Don't want limits at all? **Self-hosting is unlimited and free** — the hosted
-> relay subscription is only for people who'd rather not run a server.

@@ -9,20 +9,27 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now rmd-host
 #
-# Wayland/headless notes: X11 capture/input need a running X server the unit can
-# reach (DISPLAY). On a headless box use Xvfb; Wayland needs the PipeWire/libei
-# backend (roadmap).
+# IMPORTANT: bound to graphical-session.target, NOT default.target. GNOME imports
+# WAYLAND_DISPLAY / XDG_CURRENT_DESKTOP / XDG_SESSION_TYPE (and DISPLAY/XAUTHORITY)
+# into the systemd user environment only as that target is reached. Starting at boot
+# would race ahead of that import: the daemon would inherit a stale env, fail to
+# detect GNOME/Wayland, and fall back to a broken X11 capture path.
+#
+# Explicit-X-server (headless Xvfb) alternative: replace the [Install] target with
+# `WantedBy=default.target`, uncomment the Environment=DISPLAY line below to point at
+# your Xvfb (e.g. :99), and `loginctl enable-linger "$USER"` to start it at boot.
 [Unit]
 Description=ReachMyDevice host agent (remote desktop)
-After=graphical-session.target network-online.target
-Wants=network-online.target
+After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
 # Config (rendezvous URL, device token, ICE servers, resolution) lives here:
 EnvironmentFile=%h/.config/rmd/host.env
-# DISPLAY must point at the user's X server for capture + input injection.
-Environment=DISPLAY=:0
+# For an explicit X server only (headless Xvfb); on a desktop the compositor's
+# imported DISPLAY/XAUTHORITY are inherited automatically.
+#Environment=DISPLAY=:99
 ExecStart=%h/.local/bin/rmdd
 Restart=on-failure
 RestartSec=3
@@ -34,4 +41,4 @@ ReadWritePaths=%h/.config/rmd %h/.local/state/rmd
 PrivateTmp=true
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
