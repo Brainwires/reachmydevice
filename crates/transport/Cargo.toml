@@ -3,7 +3,8 @@ publish = false  # internal workspace member; path-dep, never published to crate
 name = "rmd-transport"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# rtci 0.2.0 requires Rust 1.89 (the workspace floor is 1.85).
+rust-version = "1.89"
 license.workspace = true
 
 [dependencies]
@@ -23,13 +24,12 @@ rand = "0.9"
 # candidates when the transport socket binds to the wildcard address.
 if-addrs = "0.13"
 
-# WebRTC via the sans-IO `rtc` fork (ADR-0003), vendored as a git SUBMODULE at
-# third_party/webrtc-rs-rtc and pinned to an exact commit (not a moving branch),
-# so builds are offline/reproducible and the code is present locally for audit.
-# The fork's master carries GCC congestion control, jitter buffer, DTLS-restart,
-# etc.; everything we use (peer_connection, rtp, media, interceptor, sansio, sdp,
-# shared) is re-exported from the top-level `rtc` crate.
-rtc = { path = "../../third_party/webrtc-rs-rtc/rtc", package = "rtc" }
+# WebRTC via the sans-IO `rtci` engine (crates.io; MIT OR Apache-2.0), the
+# successor of the vendored `rtc` fork (ADR-0003). Everything we use
+# (peer_connection, rtp, media, interceptor, sansio, sdp, shared, stun, turn) is
+# re-exported from the top-level `rtci` crate. rtci needs Rust 1.89, hence this
+# crate's own `rust-version` above.
+rtci = "0.2.0"
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

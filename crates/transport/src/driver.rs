@@ -1,6 +1,6 @@
 //! Sans-IO WebRTC driver loop (runs on the transport thread).
 //!
-//! Owns the `rtc` `RTCPeerConnection`, the UDP socket, the H.264 RTP
+//! Owns the `rtci` `RTCPeerConnection`, the UDP socket, the H.264 RTP
 //! packetizer/depacketizer, and the data channel, and pumps the sans-IO state
 //! machine: drain [`DriverCmd`]s, `poll_write` → socket, socket → `handle_read`,
 //! advance timers, drain `poll_event`/`poll_read` → [`TransportEvent`]s. Also
@@ -10,17 +10,16 @@
 //!
 //! - **Host** = offerer + video sender. Adds an H.264 send track and the
 //!   reliable/ordered `control` data channel, creates the offer, and runs the
-//!   sender-side GCC + TWCC congestion-control interceptors.
+//!   default interceptor set (GCC congestion control + pacer + circuit breaker,
+//!   fed by TWCC / RFC 8888 feedback).
 //! - **Viewer** = answerer + video receiver. Adds a `recvonly` H.264
 //!   transceiver, answers the offer, reassembles the incoming track into
 //!   Annex-B access units, and uses the default interceptors (which include the
 //!   TWCC *receiver* that feeds the host's GCC).
 //!
-//! The `rtc` `RTCPeerConnection` is generic over its interceptor chain type
-//! `I`, and the host (with GCC) and viewer (defaults) build *different*
-//! concrete chains. Rather than unify the types, each role builds its own `pc`
-//! locally and hands it to the generic [`event_loop`], which is monomorphised
-//! once per role.
+//! Both roles use `rtci`'s default interceptor set, and `RTCPeerConnection` is
+//! not generic over its chain, so each role builds its own `pc` and hands it to
+//! the one shared [`event_loop`].
 
 use crate::{
     DriverCmd, IceServer, SignalMsg, TransportConfig, TransportEvent, TransportRole, VideoCodec,
@@ -34,44 +33,45 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
-use rtc::data_channel::{RTCDataChannelId, RTCDataChannelInit};
-use rtc::interceptor::{
-    GccHandle, GccInterceptorBuilder, Interceptor, Registry, TwccSenderBuilder,
-};
-use rtc::media::io::sample_builder::SampleBuilder;
-use rtc::media_stream::MediaStreamTrack;
-use rtc::peer_connection::RTCPeerConnectionBuilder;
-use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::interceptor_registry::{
-    configure_nack, configure_rtcp_reports, register_default_interceptors,
-};
-use rtc::peer_connection::configuration::media_engine::{
+use rtci::data_channel::{RTCDataChannelId, RTCDataChannelInit};
+use rtci::interceptor::{CongestionControlHandle, Registry};
+use rtci::media::io::sample_builder::SampleBuilder;
+use rtci::media_stream::MediaStreamTrack;
+use rtci::peer_connection::configuration::RTCConfigurationBuilder;
+use rtci::peer_connection::configuration::interceptor_registry::register_default_interceptors_with_handles;
+use rtci::peer_connection::configuration::media_engine::{
     MIME_TYPE_AV1, MIME_TYPE_H264, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
-use rtc::peer_connection::sdp::RTCSessionDescription;
-use rtc::peer_connection::state::RTCPeerConnectionState;
-use rtc::peer_connection::transport::{
+use rtci::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtci::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
+use rtci::peer_connection::message::RTCMessage;
+use rtci::peer_connection::message::TaggedRTCMessage;
+use rtci::peer_connection::sdp::RTCSessionDescription;
+use rtci::peer_connection::srflx::ReflexiveGathering;
+use rtci::peer_connection::state::RTCPeerConnectionState;
+use rtci::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, CandidateRelayConfig, CandidateServerReflexiveConfig,
     RTCDtlsRole, RTCIceCandidate, RTCIceCandidateInit, RTCIceServer,
 };
-use rtc::rtp::codec::h264::H264Packet;
-use rtc::rtp::packetizer::{Packetizer, new_packetizer};
-use rtc::rtp_transceiver::rtp_sender::{
+use rtci::peer_connection::turn_streams::RelayGathering;
+use rtci::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
+use rtci::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+use rtci::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use rtci::rtp::codec::h264::H264Packet;
+use rtci::rtp::packetizer::{Packetizer, new_packetizer};
+use rtci::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
     RtpCodecKind,
 };
-use rtc::rtp_transceiver::{
+use rtci::rtp_transceiver::{
     RTCRtpSenderId, RTCRtpTransceiverDirection, RTCRtpTransceiverInit, SSRC,
 };
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
-use rtc::stun::addr::MappedAddress;
-use rtc::stun::message::{BINDING_REQUEST, Getter, Message, TransactionId};
-use rtc::stun::xoraddr::XorMappedAddress;
-use rtc::turn::client::{
+use rtci::sansio::Protocol;
+use rtci::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
+use rtci::stun::addr::MappedAddress;
+use rtci::stun::message::{BINDING_REQUEST, Getter, Message, TransactionId};
+use rtci::stun::xoraddr::XorMappedAddress;
+use rtci::turn::client::{
     Client as TurnClient, ClientConfig as TurnClientConfig, Event as TurnEvent,
 };
 
@@ -482,15 +482,23 @@ impl TurnRelay {
             realm: String::new(),
             software: String::new(),
             rto_in_ms: 0,
+            ..Default::default()
         };
-        let mut client = match TurnClient::new(cfg) {
+        let crypto_provider = match rtci::crypto::default_provider() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!("transport: TURN crypto provider unavailable: {e}");
+                return None;
+            }
+        };
+        let mut client = match TurnClient::new(cfg, crypto_provider) {
             Ok(c) => c,
             Err(e) => {
                 tracing::debug!("transport: TURN client init failed: {e}");
                 return None;
             }
         };
-        if let Err(e) = client.allocate() {
+        if let Err(e) = client.allocate(Instant::now()) {
             tracing::debug!("transport: TURN allocate() failed: {e}");
             return None;
         }
@@ -602,11 +610,7 @@ impl TurnRelay {
 
     /// Drain TURN events: relayed peer datagrams are handed to the peer connection
     /// as if they'd arrived directly from that peer.
-    fn drain_events<I: Interceptor>(
-        &mut self,
-        pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
-        local_addr: SocketAddr,
-    ) {
+    fn drain_events(&mut self, pc: &mut RTCPeerConnection, local_addr: SocketAddr) {
         while let Some(ev) = self.client.poll_event() {
             match ev {
                 TurnEvent::DataIndicationOrChannelData(_, from, data) => {
@@ -625,6 +629,15 @@ impl TurnRelay {
                 TurnEvent::AllocateError(_, e) | TurnEvent::CreatePermissionError(_, e) => {
                     tracing::debug!("transport: TURN event error: {e}");
                 }
+                TurnEvent::AllocationLost(relayed, e) => {
+                    tracing::warn!(%relayed, "transport: TURN allocation lost: {e}");
+                }
+                TurnEvent::RefreshError(relayed, e) => {
+                    tracing::warn!(%relayed, "transport: TURN refresh failed: {e}");
+                }
+                TurnEvent::PermissionLost(relayed, peer_ip, e) => {
+                    tracing::warn!(%relayed, %peer_ip, "transport: TURN permission lost: {e}");
+                }
                 _ => {}
             }
         }
@@ -635,14 +648,14 @@ impl TurnRelay {
     /// datagram through it. Returns `true` if the datagram was sent via the relay
     /// (so the caller must NOT also send it directly).
     fn route_out(&mut self, peer: SocketAddr, message: &[u8]) -> bool {
-        if self.permitted.insert(peer.ip()) {
-            if let Ok(mut relay) = self.client.relay(self.relayed_addr) {
-                let _ = relay.create_permission(peer);
-            }
+        if self.permitted.insert(peer.ip())
+            && let Ok(mut relay) = self.client.relay(self.relayed_addr)
+        {
+            let _ = relay.create_permission(Instant::now(), peer);
         }
         if self.relayed_peers.contains(&peer) {
             if let Ok(mut relay) = self.client.relay(self.relayed_addr) {
-                let _ = relay.send_to(message, peer);
+                let _ = relay.send_to(Instant::now(), message, peer);
             }
             return true;
         }
@@ -688,25 +701,18 @@ fn run_host(
             .register_codec(codec.clone(), RtpCodecKind::Video)
             .context("register video codec")?;
 
-        // Interceptor chain. NACK + RTCP reports come from the shared helpers; on top
-        // of those we stack the congestion-control pair required for GCC:
-        //   GCC (innermost) ← TwccSender (outer, stamps the transport-wide seq no.)
-        // GccInterceptorBuilder hands back a `GccHandle` we poll each tick for the
-        // latest target bitrate. The header extension + feedback that let the viewer
-        // reply with TWCC are registered on the media engine below.
-        let registry = Registry::new();
-        let registry = configure_nack(registry, &mut media_engine);
-        let registry = configure_rtcp_reports(registry);
-        register_twcc_sender_headers(&mut media_engine).context("register TWCC headers")?;
-        // Cap GCC at the host's configured bitrate. The library default ceiling is
-        // 2.5 Mbps, which would silently throttle a host asked for (say) 8 Mbps to a
-        // third of its target on a link that can carry it. GCC still backs off toward
-        // its floor on congestion; this only lifts the upper bound to what we asked for.
-        let (gcc_builder, gcc_handle) = GccInterceptorBuilder::new();
-        let gcc_builder = gcc_builder.with_max_bitrate(config.video_bitrate_bps);
-        let registry = registry
-            .with(gcc_builder.build())
-            .with(TwccSenderBuilder::new().build());
+        // Interceptor chain: rtci's default set — NACK, RTCP reports, the TWCC /
+        // RFC 8888 feedback headers, and per-transport GCC congestion control with
+        // its pacer and circuit breaker. The congestion-control handle is polled each
+        // tick for the latest target bitrate.
+        let (registry, handles) =
+            register_default_interceptors_with_handles(Registry::new(), &mut media_engine)
+                .context("default interceptors")?;
+        let gcc = handles.congestion_control;
+        // Cap GCC at the host's configured bitrate (the estimator's own ceiling is far
+        // higher), exactly as the fork's `with_max_bitrate` did: GCC still backs off
+        // toward its floor on congestion; this only bounds it to what we asked for.
+        gcc.set_session_bitrate_limit(Some(f64::from(config.video_bitrate_bps)));
 
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_configuration(
@@ -714,10 +720,10 @@ fn run_host(
                     .with_ice_servers(ice_servers(&config.ice_servers))
                     .build(),
             )
-            .with_setting_engine(SettingEngine::default())
+            .with_setting_engine(app_gathering(SettingEngineBuilder::new()).build())
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
-            .build()
+            .build(Instant::now())
             .context("build host peer connection")?;
 
         // Add the video send track (its SSRC drives the packetizer) and the reliable
@@ -753,7 +759,7 @@ fn run_host(
         // Kick off signaling: create + apply the offer and surface it immediately,
         // so the peer can start negotiating while we gather candidates.
         let offer = pc.create_offer(None).context("create offer")?;
-        pc.set_local_description(offer.clone())
+        pc.set_local_description(Instant::now(), offer.clone())
             .context("set local offer")?;
         emit_session(&event_tx, &offer)?;
 
@@ -785,16 +791,18 @@ fn run_host(
         // Packetizer for outbound encoded frames. The payloader is selected from the
         // codec's MIME type (H264Payloader or Av1Payloader) by the fork.
         let packetizer: Box<dyn Packetizer> = Box::new(new_packetizer(
+            Instant::now(),
             RTP_OUTBOUND_MTU,
             codec.payload_type,
             video_ssrc,
             codec.rtp_codec.payloader().context("video payloader")?,
-            Box::new(rtc::rtp::sequence::new_random_sequencer()),
+            Box::new(rtci::rtp::sequence::new_random_sequencer()),
             VIDEO_CLOCK_RATE,
         ));
 
         let mut state = RoleState {
-            gcc: Some(gcc_handle),
+            gcc: Some(gcc),
+            pli_sender_ssrc: 0,
             video: Some(VideoSend {
                 sender_id: video_sender_id,
                 ssrc: video_ssrc,
@@ -802,6 +810,7 @@ fn run_host(
                 last_ts_micros: None,
             }),
             sample_builder: None,
+            remote_video_ssrc: None,
             data_channel_id: None,
             pending_local_candidates: Vec::new(), // host adds its own eagerly above
             remote_description_set: false,
@@ -854,15 +863,16 @@ fn run_viewer(
 
         // Default interceptors give us NACK, RTCP reports, and — crucially for the
         // host's GCC — the TWCC *receiver* that generates congestion feedback.
-        let registry = Registry::new();
-        let registry = register_default_interceptors(registry, &mut media_engine)
-            .context("default interceptors")?;
+        // (The congestion-control handles only matter to a sender; the viewer
+        // drops them.)
+        let (registry, _handles) =
+            register_default_interceptors_with_handles(Registry::new(), &mut media_engine)
+                .context("default interceptors")?;
 
         // As the answerer we take the DTLS server role (host becomes the client).
-        let mut setting_engine = SettingEngine::default();
-        setting_engine
-            .set_answering_dtls_role(RTCDtlsRole::Server)
-            .context("set answering DTLS role")?;
+        let setting_engine = app_gathering(SettingEngineBuilder::new())
+            .with_answering_dtls_role(RTCDtlsRole::Server)
+            .build();
 
         let mut pc = RTCPeerConnectionBuilder::new()
             .with_configuration(
@@ -873,7 +883,7 @@ fn run_viewer(
             .with_setting_engine(setting_engine)
             .with_media_engine(media_engine)
             .with_interceptor_registry(registry)
-            .build()
+            .build(Instant::now())
             .context("build viewer peer connection")?;
 
         // Receive one video track.
@@ -905,8 +915,12 @@ fn run_viewer(
 
         let mut state = RoleState {
             gcc: None,
+            // Our RTCP sender SSRC for PLIs. Never 0: the host treats a 0-sender PLI
+            // as its own pacer's discard, not a viewer request.
+            pli_sender_ssrc: rand::random::<u32>().max(1),
             video: None,
             sample_builder: Some(sample_builder),
+            remote_video_ssrc: None,
             data_channel_id: None,
             pending_local_candidates,
             remote_description_set: false,
@@ -938,29 +952,14 @@ fn run_viewer(
     } // end session loop
 }
 
-/// Register the RTP header extension + RTCP feedback that TWCC needs on the
-/// sender side (video). Mirrors `configure_twcc_sender_only` but is inlined so
-/// the GCC/TwccSender interceptor pair can be stacked in the caller's chain.
-fn register_twcc_sender_headers(media_engine: &mut MediaEngine) -> anyhow::Result<()> {
-    use rtc::rtp_transceiver::rtp_sender::{RTCPFeedback, RTCRtpHeaderExtensionCapability};
-
-    media_engine.register_feedback(
-        RTCPFeedback {
-            typ: "transport-cc".to_owned(),
-            parameter: String::new(),
-        },
-        RtpCodecKind::Video,
-    );
-    media_engine
-        .register_header_extension(
-            RTCRtpHeaderExtensionCapability {
-                uri: rtc::sdp::extmap::TRANSPORT_CC_URI.to_owned(),
-            },
-            RtpCodecKind::Video,
-            None,
-        )
-        .context("register transport-cc extension")?;
-    Ok(())
+/// Keep the engine's own server-reflexive and relay gathering off: we gather srflx
+/// ourselves before the loop starts and run our own TURN client on the shared
+/// socket. An engine-run Allocate from the same 5-tuple would collide with ours
+/// (437 Allocation Mismatch), and its Binding requests would race our gathering.
+fn app_gathering(builder: SettingEngineBuilder) -> SettingEngineBuilder {
+    builder
+        .with_relay_gathering(RelayGathering::Application)
+        .with_server_reflexive_gathering(ReflexiveGathering::Application)
 }
 
 /// Outbound H.264 send state (host only).
@@ -974,12 +973,19 @@ struct VideoSend {
 
 /// Per-role state threaded through the generic event loop.
 struct RoleState {
-    /// GCC handle (host only) — polled each tick for the target bitrate.
-    gcc: Option<GccHandle>,
+    /// Congestion-control handle (host only) — polled each tick for the GCC
+    /// target bitrate.
+    gcc: Option<CongestionControlHandle>,
+    /// Sender SSRC of the PLIs we write when the sample builder gives up a gap
+    /// (viewer only; non-zero).
+    pli_sender_ssrc: SSRC,
     /// Video send path (host only).
     video: Option<VideoSend>,
     /// Video receive reassembly (viewer only).
     sample_builder: Option<SampleBuilder<H264Packet>>,
+    /// SSRC of the remote video stream, from its RTP (viewer only) — the media
+    /// SSRC of the PLIs we write.
+    remote_video_ssrc: Option<SSRC>,
     /// Id of the open `control` data channel, once its `OnOpen` fires.
     data_channel_id: Option<RTCDataChannelId>,
     /// Our own gathered local candidates (host + srflx), added to the local
@@ -1026,7 +1032,7 @@ fn emit_session(
     desc: &RTCSessionDescription,
 ) -> anyhow::Result<()> {
     let json = serde_json::to_string(desc).context("serialize session description")?;
-    let msg = if desc.sdp_type == rtc::peer_connection::sdp::RTCSdpType::Offer {
+    let msg = if desc.sdp_type == rtci::peer_connection::sdp::RTCSdpType::Offer {
         SignalMsg::Offer(json)
     } else {
         SignalMsg::Answer(json)
@@ -1041,8 +1047,8 @@ fn emit_session(
 /// timeouts, read one inbound datagram (bounded wait), then drain events and
 /// media/data reads into [`TransportEvent`]s. Publishes the GCC estimate.
 #[allow(clippy::too_many_arguments)]
-fn event_loop<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+fn event_loop(
+    pc: &mut RTCPeerConnection,
     socket: &UdpSocket,
     local_addr: SocketAddr,
     cmd_rx: &Receiver<DriverCmd>,
@@ -1059,10 +1065,10 @@ fn event_loop<I: Interceptor>(
     let mut refires: u32 = 0;
 
     // On a viewer rebuild, apply the offer that triggered it to the fresh PC.
-    if let Some(msg) = initial_signal {
-        if let Err(e) = apply_signal(pc, event_tx, state, msg) {
-            tracing::warn!("transport: applying rebuild offer failed: {e:?}");
-        }
+    if let Some(msg) = initial_signal
+        && let Err(e) = apply_signal(pc, event_tx, state, msg)
+    {
+        tracing::warn!("transport: applying rebuild offer failed: {e:?}");
     }
 
     loop {
@@ -1082,10 +1088,8 @@ fn event_loop<I: Interceptor>(
                 .as_mut()
                 .map(|t| t.route_out(peer, &msg.message))
                 .unwrap_or(false);
-            if !relayed {
-                if let Err(e) = socket.send_to(&msg.message, peer) {
-                    tracing::debug!("transport: socket send_to error: {e}");
-                }
+            if !relayed && let Err(e) = socket.send_to(&msg.message, peer) {
+                tracing::debug!("transport: socket send_to error: {e}");
             }
         }
 
@@ -1110,13 +1114,17 @@ fn event_loop<I: Interceptor>(
         // 4. Drain inbound media / data.
         drain_reads(pc, event_tx, state);
 
-        // 5. Publish the latest GCC estimate (host only).
-        if let Some(gcc) = &state.gcc {
-            if let Some(bps) = gcc.target_bitrate_bps() {
-                let prev = state.bitrate_bps.swap(bps, Ordering::Relaxed);
-                if prev != bps {
-                    tracing::debug!("transport: GCC target bitrate -> {bps} bps");
-                }
+        // 5. Publish the latest GCC estimate (host only). Like the fork's GccHandle,
+        //    hold off until feedback has been processed (the estimator's loss figure
+        //    exists only then), so the encoder keeps its configured start rate rather
+        //    than dropping to the estimator's initial guess.
+        if let Some(gcc) = &state.gcc
+            && gcc.stats().packet_loss.is_some()
+        {
+            let bps = gcc.target_bitrate() as u32;
+            let prev = state.bitrate_bps.swap(bps, Ordering::Relaxed);
+            if prev != bps {
+                tracing::debug!("transport: GCC target bitrate -> {bps} bps");
             }
         }
 
@@ -1128,6 +1136,19 @@ fn event_loop<I: Interceptor>(
         if let Some(t) = turn.as_mut() {
             t.handle_timeout(now);
         }
+        // The viewer's sample builder gives a gap up after its wait bound; drive its
+        // `pop` when that comes due even if no packet arrives.
+        let sb_deadline = state
+            .sample_builder
+            .as_ref()
+            .and_then(SampleBuilder::poll_timeout);
+        if sb_deadline.is_some_and(|t| t <= now) {
+            pop_samples(pc, event_tx, state, now, None);
+        }
+        let sb_deadline = state
+            .sample_builder
+            .as_ref()
+            .and_then(SampleBuilder::poll_timeout);
         let pc_deadline = pc.poll_timeout();
         if let Some(eto) = pc_deadline {
             if eto <= now {
@@ -1157,10 +1178,10 @@ fn event_loop<I: Interceptor>(
             refires = 0;
         }
         let turn_deadline = turn.as_mut().and_then(|t| t.poll_timeout());
-        let deadline = match (pc_deadline, turn_deadline) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        let deadline = [pc_deadline, turn_deadline, sb_deadline]
+            .into_iter()
+            .flatten()
+            .min();
 
         let wait = deadline
             .map(|eto| eto.saturating_duration_since(now))
@@ -1217,8 +1238,8 @@ enum CommandOutcome {
 }
 
 /// Apply every currently queued [`DriverCmd`].
-fn drain_commands<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+fn drain_commands(
+    pc: &mut RTCPeerConnection,
     cmd_rx: &Receiver<DriverCmd>,
     event_tx: &Sender<TransportEvent>,
     state: &mut RoleState,
@@ -1257,12 +1278,7 @@ fn drain_commands<I: Interceptor>(
 }
 
 /// Packetize and send one Annex-B access unit on the video track (host).
-fn send_video<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
-    state: &mut RoleState,
-    annexb: &Bytes,
-    ts_micros: u64,
-) {
+fn send_video(pc: &mut RTCPeerConnection, state: &mut RoleState, annexb: &Bytes, ts_micros: u64) {
     let Some(video) = state.video.as_mut() else {
         return;
     };
@@ -1278,7 +1294,7 @@ fn send_video<I: Interceptor>(
     };
     video.last_ts_micros = Some(ts_micros);
 
-    let packets = match video.packetizer.packetize(annexb, samples) {
+    let packets = match video.packetizer.packetize(Instant::now(), annexb, samples) {
         Ok(p) => p,
         Err(e) => {
             tracing::debug!("transport: packetize failed: {e}");
@@ -1290,35 +1306,31 @@ fn send_video<I: Interceptor>(
     let sender_id = video.sender_id;
     for mut packet in packets {
         packet.header.ssrc = ssrc;
-        if let Some(mut sender) = pc.rtp_sender(sender_id) {
-            if let Err(e) = sender.write_rtp(packet) {
-                // Common before negotiation completes; not fatal.
-                tracing::trace!("transport: write_rtp dropped: {e}");
-            }
+        if let Some(mut sender) = pc.rtp_sender(sender_id)
+            && let Err(e) = sender.write_rtp(Instant::now(), packet)
+        {
+            // Common before negotiation completes; not fatal.
+            tracing::trace!("transport: write_rtp dropped: {e}");
         }
     }
 }
 
 /// Send bytes on the control data channel (either role, once open).
-fn send_data<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
-    state: &mut RoleState,
-    bytes: &Bytes,
-) {
+fn send_data(pc: &mut RTCPeerConnection, state: &mut RoleState, bytes: &Bytes) {
     let Some(id) = state.data_channel_id else {
         tracing::debug!("transport: data channel not open yet, dropping send");
         return;
     };
-    if let Some(mut dc) = pc.data_channel(id) {
-        if let Err(e) = dc.send(BytesMut::from(bytes.as_ref())) {
-            tracing::debug!("transport: data channel send error: {e}");
-        }
+    if let Some(mut dc) = pc.data_channel(id)
+        && let Err(e) = dc.send(Instant::now(), BytesMut::from(bytes.as_ref()))
+    {
+        tracing::warn!("transport: data channel send error: {e}");
     }
 }
 
 /// Apply a peer signaling message (offer/answer/candidate).
-fn apply_signal<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+fn apply_signal(
+    pc: &mut RTCPeerConnection,
     event_tx: &Sender<TransportEvent>,
     state: &mut RoleState,
     msg: SignalMsg,
@@ -1339,12 +1351,12 @@ fn apply_signal<I: Interceptor>(
             // candidates (add_local_candidate requires a local description).
             let offer: RTCSessionDescription =
                 serde_json::from_str(&json).context("parse remote offer")?;
-            pc.set_remote_description(offer)
+            pc.set_remote_description(Instant::now(), offer)
                 .context("set remote offer")?;
             state.remote_description_set = true;
 
             let answer = pc.create_answer(None).context("create answer")?;
-            pc.set_local_description(answer.clone())
+            pc.set_local_description(Instant::now(), answer.clone())
                 .context("set local answer")?;
             emit_session(event_tx, &answer)?;
 
@@ -1380,7 +1392,7 @@ fn apply_signal<I: Interceptor>(
             // Host path: apply the remote answer.
             let answer: RTCSessionDescription =
                 serde_json::from_str(&json).context("parse remote answer")?;
-            pc.set_remote_description(answer)
+            pc.set_remote_description(Instant::now(), answer)
                 .context("set remote answer")?;
             state.remote_description_set = true;
             state.negotiated_once = true;
@@ -1392,6 +1404,9 @@ fn apply_signal<I: Interceptor>(
             if state.remote_description_set {
                 if let Err(e) = pc.add_remote_candidate(RTCIceCandidateInit {
                     candidate,
+                    // Signaling carries only the candidate line; rtci (W3C
+                    // addIceCandidate) needs a section. Index 0 is the BUNDLE transport.
+                    sdp_mline_index: Some(0),
                     ..Default::default()
                 }) {
                     tracing::debug!("transport: add_remote_candidate failed: {e}");
@@ -1405,13 +1420,13 @@ fn apply_signal<I: Interceptor>(
 }
 
 /// Replay any remote candidates buffered before the remote description existed.
-fn flush_remote_candidates<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
-    state: &mut RoleState,
-) {
+fn flush_remote_candidates(pc: &mut RTCPeerConnection, state: &mut RoleState) {
     for candidate in state.pending_remote_candidates.drain(..) {
         if let Err(e) = pc.add_remote_candidate(RTCIceCandidateInit {
             candidate,
+            // Signaling carries only the candidate line; rtci (W3C
+            // addIceCandidate) needs a section. Index 0 is the BUNDLE transport.
+            sdp_mline_index: Some(0),
             ..Default::default()
         }) {
             tracing::debug!("transport: buffered add_remote_candidate failed: {e}");
@@ -1420,8 +1435,8 @@ fn flush_remote_candidates<I: Interceptor>(
 }
 
 /// Drain connection-state changes and ICE candidates into events.
-fn drain_events<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+fn drain_events(
+    pc: &mut RTCPeerConnection,
     event_tx: &Sender<TransportEvent>,
     state: &mut RoleState,
     connected: &mut bool,
@@ -1463,16 +1478,35 @@ fn drain_events<I: Interceptor>(
                 _ => {}
             },
             RTCPeerConnectionEvent::OnIceCandidateEvent(ice) => {
-                if let Ok(init) = ice.candidate.to_json() {
-                    if !init.candidate.is_empty() {
-                        let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
-                            init.candidate,
-                        )));
-                    }
+                // `None` = gathering complete; we never signal end-of-candidates.
+                let Some(candidate) = ice.candidate else {
+                    continue;
+                };
+                if let Ok(init) = candidate.to_json()
+                    && !init.candidate.is_empty()
+                {
+                    let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
+                        init.candidate,
+                    )));
                 }
             }
             RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(id)) => {
                 state.data_channel_id = Some(id);
+            }
+            RTCPeerConnectionEvent::OnPacerDiscard {
+                frames,
+                packets,
+                octets,
+                target_bitrate,
+                ..
+            } => {
+                tracing::debug!(
+                    frames,
+                    packets,
+                    octets,
+                    target_bitrate,
+                    "transport: pacer discarded queued video"
+                );
             }
             _ => {}
         }
@@ -1480,24 +1514,20 @@ fn drain_events<I: Interceptor>(
 }
 
 /// Drain inbound RTP (→ reassembled video) and data-channel messages.
-fn drain_reads<I: Interceptor>(
-    pc: &mut rtc::peer_connection::RTCPeerConnection<I>,
+fn drain_reads(
+    pc: &mut RTCPeerConnection,
     event_tx: &Sender<TransportEvent>,
     state: &mut RoleState,
 ) {
-    while let Some(message) = pc.poll_read() {
+    while let Some(TaggedRTCMessage { now, message }) = pc.poll_read() {
         match message {
             RTCMessage::RtpPacket(_track_id, packet) => {
                 if let Some(sb) = state.sample_builder.as_mut() {
                     let ts = packet.header.timestamp;
-                    sb.push(packet);
+                    state.remote_video_ssrc = Some(packet.header.ssrc);
+                    sb.push(now, packet);
                     // Drain any completed access units.
-                    while let Some(sample) = sb.pop() {
-                        let _ = event_tx.send(TransportEvent::Video {
-                            annexb: sample.data,
-                            ts_hint: u64::from(ts),
-                        });
-                    }
+                    pop_samples(pc, event_tx, state, now, Some(ts));
                 }
             }
             RTCMessage::DataChannelMessage(_id, msg) => {
@@ -1509,16 +1539,69 @@ fn drain_reads<I: Interceptor>(
                 // for a fresh keyframe after it lost packets it can't recover via
                 // NACK — surface it so the host forces an IDR right away instead of
                 // leaving the last frame stale until the ~2s periodic keyframe.
-                use rtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
-                use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+                //
+                // rtci's pacer also injects a PLI with sender SSRC 0 when it discards
+                // queued video; that is our own over-budget signal, not the viewer
+                // asking, so it is skipped here (see `OnPacerDiscard`).
                 let wants_keyframe = packets.iter().any(|p| {
                     let any = p.as_any();
-                    any.is::<PictureLossIndication>() || any.is::<FullIntraRequest>()
+                    any.downcast_ref::<PictureLossIndication>()
+                        .is_some_and(|pli| pli.sender_ssrc != 0)
+                        || any.is::<FullIntraRequest>()
                 });
                 if wants_keyframe {
                     let _ = event_tx.send(TransportEvent::KeyframeRequested);
                 }
             }
+            _ => {}
+        }
+    }
+}
+
+/// Emit every access unit the viewer's sample builder can release at `now`, then,
+/// if it gave a gap up (lost packets past its wait bound), ask the host for a key
+/// frame with a PLI. `pushed_ts` is the RTP timestamp of the packet just pushed
+/// (the `ts_hint` used for samples released by a push); a timer-driven pop uses
+/// each sample's own packet timestamp.
+fn pop_samples(
+    pc: &mut RTCPeerConnection,
+    event_tx: &Sender<TransportEvent>,
+    state: &mut RoleState,
+    now: Instant,
+    pushed_ts: Option<u32>,
+) {
+    let Some(sb) = state.sample_builder.as_mut() else {
+        return;
+    };
+    while let Some(sample) = sb.pop(now) {
+        let ts = pushed_ts.unwrap_or(sample.packet_timestamp);
+        let _ = event_tx.send(TransportEvent::Video {
+            annexb: sample.data,
+            ts_hint: u64::from(ts),
+        });
+    }
+    if sb.take_key_frame_request() {
+        request_key_frame(pc, state, now);
+    }
+}
+
+/// Write a PLI for the remote video stream on the (single) receiver.
+fn request_key_frame(pc: &mut RTCPeerConnection, state: &RoleState, now: Instant) {
+    let Some(media_ssrc) = state.remote_video_ssrc else {
+        return;
+    };
+    let receivers: Vec<_> = pc.get_receivers().collect();
+    for id in receivers {
+        if let Some(mut receiver) = pc.rtp_receiver(id) {
+            let pli = PictureLossIndication {
+                sender_ssrc: state.pli_sender_ssrc,
+                media_ssrc,
+            };
+            match receiver.write_rtcp(now, vec![Box::new(pli)]) {
+                Ok(()) => tracing::debug!("transport: gap given up; requested a key frame"),
+                Err(e) => tracing::debug!("transport: key-frame request failed: {e}"),
+            }
+            return;
         }
     }
 }

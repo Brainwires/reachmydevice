@@ -62,11 +62,11 @@ fn rewrite_candidates(s: &str, relay: SocketAddr) -> String {
                 return line.to_string();
             }
             let mut toks: Vec<String> = line.split(' ').map(String::from).collect();
-            if let Some(i) = toks.iter().position(|t| t == "typ") {
-                if i >= 2 {
-                    toks[i - 2] = relay.ip().to_string();
-                    toks[i - 1] = relay.port().to_string();
-                }
+            if let Some(i) = toks.iter().position(|t| t == "typ")
+                && i >= 2
+            {
+                toks[i - 2] = relay.ip().to_string();
+                toks[i - 1] = relay.port().to_string();
             }
             toks.join(" ")
         })

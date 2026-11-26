@@ -38,7 +38,7 @@ This document tracks the intended end-state architecture and marks what exists t
 | Crate / app            | Responsibility                                                              | Status |
 |------------------------|-----------------------------------------------------------------------------|--------|
 | `crates/protocol`      | Versioned wire schema (prost): handshake, input, clipboard/file/multimon/control. | ✅ |
-| `crates/transport`     | WebRTC over the sans-IO `rtc` fork: driver loop, video track, data channel, GCC, **host+srflx ICE gathering**, signaling trait. | ✅ |
+| `crates/transport`     | WebRTC over the sans-IO `rtci` engine: driver loop, video track, data channel, GCC, **host+srflx ICE gathering**, signaling trait. | ✅ |
 | `crates/capture`       | `Capturer` trait + backends: **macOS ScreenCaptureKit**, **Linux X11**. (Windows/Wayland TODO) | ✅ |
 | `crates/codec`         | `Encoder`/`Decoder` traits + **software H.264 (openh264)**. (VideoToolbox/HW TODO) | ✅ |
 | `crates/input`         | `Injector` trait + backends: **macOS CGEvent**, **Linux XTest**. (Windows/Wayland TODO) | ✅ |
@@ -67,9 +67,10 @@ host → CGEvent injection. View-only mode simply drops the input channel.
 
 ## Transport substrate
 
-Built on **`Brainwires/webrtc-rs-rtc`** (the sans-IO `rtc` fork), pinned as a git dependency.
-Chosen for GCC congestion control (adaptive bitrate), jitter buffering, DTLS-restart (reconnect),
-and testability. The `transport` crate owns the UDP-socket + timer **driver loop** that pumps the
+Built on **`rtci`** (crates.io, MIT OR Apache-2.0), the sans-IO WebRTC engine that succeeded the
+vendored `rtc` fork (`Brainwires/webrtc-rs-rtc`). Chosen for GCC congestion control (adaptive
+bitrate, with pacer and circuit breaker), jitter buffering, DTLS-restart (reconnect), and
+testability. The `transport` crate owns the UDP-socket + timer **driver loop** that pumps the
 sans-IO state machine. See `docs/decisions.md` for the full rationale and the fork history.
 
 ## Security model (target)
