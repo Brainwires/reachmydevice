@@ -1329,7 +1329,10 @@ mod tests {
         assert!(!should_emit_idle_keyframe(false, short));
         // No request, but the periodic interval elapsed → periodic refresh fires.
         assert!(should_emit_idle_keyframe(false, KEYFRAME_INTERVAL));
-        assert!(should_emit_idle_keyframe(false, KEYFRAME_INTERVAL + Duration::from_secs(1)));
+        assert!(should_emit_idle_keyframe(
+            false,
+            KEYFRAME_INTERVAL + Duration::from_secs(1)
+        ));
     }
 
     fn hello_payload() -> Payload {
