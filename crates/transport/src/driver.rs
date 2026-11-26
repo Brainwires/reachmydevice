@@ -1545,9 +1545,17 @@ fn drain_reads(
                 // asking, so it is skipped here (see `OnPacerDiscard`).
                 let wants_keyframe = packets.iter().any(|p| {
                     let any = p.as_any();
-                    any.downcast_ref::<PictureLossIndication>()
-                        .is_some_and(|pli| pli.sender_ssrc != 0)
-                        || any.is::<FullIntraRequest>()
+                    if let Some(pli) = any.downcast_ref::<PictureLossIndication>() {
+                        // Logged so live tests can confirm no browser sends PLI
+                        // with sender SSRC 0 (which this filter would drop).
+                        tracing::debug!(
+                            sender_ssrc = pli.sender_ssrc,
+                            media_ssrc = pli.media_ssrc,
+                            "transport: PLI received"
+                        );
+                        return pli.sender_ssrc != 0;
+                    }
+                    any.is::<FullIntraRequest>()
                 });
                 if wants_keyframe {
                     let _ = event_tx.send(TransportEvent::KeyframeRequested);
