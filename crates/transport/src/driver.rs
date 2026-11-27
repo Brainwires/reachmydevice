@@ -441,6 +441,12 @@ const TURN_SETUP_TIMEOUT: Duration = Duration::from_secs(4);
 /// often a 437 Allocation Mismatch: the previous process's allocation on the same
 /// 5-tuple is still live on coturn until its lifetime runs out).
 const TURN_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+/// Delay before the FIRST retry after a failed startup allocation. A restart's 437
+/// is usually the predecessor's just-released allocation: coturn answers a Refresh
+/// with lifetime 0 with success but only deletes the allocation after a 1 s timer
+/// (`refresh_relay_connection` floors the lifetime to 1), so a retry a few seconds
+/// later succeeds. Later retries fall back to [`TURN_RETRY_INTERVAL`].
+const TURN_FIRST_RETRY: Duration = Duration::from_secs(3);
 /// Upper bound on releasing the allocation (Refresh lifetime=0) at shutdown.
 const TURN_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -826,9 +832,9 @@ impl HostTurn {
             }
             None if first_turn_server(ice_servers).is_some() => {
                 this.attempts = 1;
-                this.retry_at = Some(Instant::now() + TURN_RETRY_INTERVAL);
+                this.retry_at = Some(Instant::now() + TURN_FIRST_RETRY);
                 tracing::warn!(
-                    retry_secs = TURN_RETRY_INTERVAL.as_secs(),
+                    retry_secs = TURN_FIRST_RETRY.as_secs(),
                     "transport: TURN relay unavailable; retrying while idle"
                 );
             }
