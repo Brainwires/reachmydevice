@@ -26,7 +26,7 @@ use crate::{
 };
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -34,6 +34,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use rtci::data_channel::{RTCDataChannelId, RTCDataChannelInit};
+use rtci::ice::mdns::MulticastDnsMode;
 use rtci::interceptor::{CongestionControlHandle, Registry};
 use rtci::media::io::sample_builder::SampleBuilder;
 use rtci::media_stream::MediaStreamTrack;
@@ -160,6 +161,51 @@ fn bind_socket(bind_addr: SocketAddr) -> anyhow::Result<(UdpSocket, SocketAddr)>
     let socket = UdpSocket::bind(bind_addr).context("bind transport UDP socket")?;
     let local_addr = socket.local_addr().context("read local addr")?;
     Ok((socket, local_addr))
+}
+
+/// Resolves the local address an inbound datagram arrived on.
+///
+/// rtci credits an inbound datagram to a local candidate only on an exact
+/// address match (`rtci_ice::Agent::find_local_candidate`), so a socket bound to
+/// a wildcard (`0.0.0.0`) can't report its own `local_addr` — that matches no
+/// host candidate and the datagram is discarded. A plain `UdpSocket` doesn't
+/// expose the destination IP (no `IP_PKTINFO`), so for a wildcard bind we use the
+/// source IP the OS routes to that peer from (a connected probe socket's
+/// `local_addr`), which is the interface the peer reaches us on for any
+/// symmetric route. Cached per peer IP. A concrete bind reports itself.
+struct LocalAddrResolver {
+    bound: SocketAddr,
+    by_peer: HashMap<IpAddr, SocketAddr>,
+}
+
+impl LocalAddrResolver {
+    fn new(bound: SocketAddr) -> Self {
+        Self {
+            bound,
+            by_peer: HashMap::new(),
+        }
+    }
+
+    fn local_for(&mut self, peer: SocketAddr) -> SocketAddr {
+        if !self.bound.ip().is_unspecified() {
+            return self.bound;
+        }
+        let bound = self.bound;
+        *self.by_peer.entry(peer.ip()).or_insert_with(|| {
+            let probe_bind: SocketAddr = if peer.is_ipv4() {
+                (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+            } else {
+                (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+            };
+            UdpSocket::bind(probe_bind)
+                .and_then(|probe| {
+                    probe.connect(peer)?;
+                    probe.local_addr()
+                })
+                .map(|a| SocketAddr::new(a.ip(), bound.port()))
+                .unwrap_or(bound)
+        })
+    }
 }
 
 /// Gather every local ICE candidate for the bound socket: a host candidate per
@@ -402,12 +448,14 @@ const TURN_SETUP_TIMEOUT: Duration = Duration::from_secs(4);
 /// we Allocate a relay on coturn, advertise a `relay` candidate, and then
 /// transparently frame traffic to/from any peer that turns out to need the relay.
 ///
-/// Routing is deliberately additive so the common (direct/srflx) path is
-/// untouched when it works: engine outbound goes **direct by default** and is only
-/// wrapped through the relay for a peer once we've actually *received* relayed data
-/// from it (`relayed_peers`). Permissions are installed on coturn for every peer
-/// the engine checks, so a symmetric-NAT peer's checks can bootstrap through our
-/// relay when the direct path never delivers.
+/// Routing follows the engine's own candidate choice: rtci tags every outbound
+/// datagram with the local candidate address it is sent from, so a datagram from
+/// the relay candidate (`relayed_addr`) is wrapped through coturn and everything
+/// else goes straight out of the socket. Inbound relayed data is handed back
+/// tagged with `relayed_addr` as its local address, so the ICE agent matches it to
+/// the relay candidate (rtci discards datagrams whose local address is no known
+/// candidate). Permissions are installed on coturn for every peer the engine
+/// checks, so a symmetric-NAT peer's checks can bootstrap through our relay.
 struct TurnRelay {
     client: TurnClient,
     /// coturn's address — inbound datagrams from here are TURN protocol, not peer
@@ -415,9 +463,6 @@ struct TurnRelay {
     server_addr: SocketAddr,
     /// Our allocated relayed transport address (advertised as the relay candidate).
     relayed_addr: SocketAddr,
-    /// Peers we've received relayed data from → route our outbound to them via the
-    /// relay too (their direct path evidently doesn't reach us).
-    relayed_peers: HashSet<SocketAddr>,
     /// Peer IPs we've already asked coturn to permit (dedup CreatePermission).
     permitted: HashSet<IpAddr>,
 }
@@ -575,7 +620,6 @@ impl TurnRelay {
                 client,
                 server_addr,
                 relayed_addr,
-                relayed_peers: HashSet::new(),
                 permitted: HashSet::new(),
             },
             init,
@@ -586,7 +630,6 @@ impl TurnRelay {
     /// allocation. Old peer addresses won't match a new viewer, and permissions are
     /// re-created lazily as the engine checks the new viewer's candidates.
     fn reset_session(&mut self) {
-        self.relayed_peers.clear();
         self.permitted.clear();
     }
 
@@ -610,15 +653,14 @@ impl TurnRelay {
 
     /// Drain TURN events: relayed peer datagrams are handed to the peer connection
     /// as if they'd arrived directly from that peer.
-    fn drain_events(&mut self, pc: &mut RTCPeerConnection, local_addr: SocketAddr) {
+    fn drain_events(&mut self, pc: &mut RTCPeerConnection) {
         while let Some(ev) = self.client.poll_event() {
             match ev {
                 TurnEvent::DataIndicationOrChannelData(_, from, data) => {
-                    self.relayed_peers.insert(from);
                     let _ = pc.handle_read(TaggedBytesMut {
                         now: Instant::now(),
                         transport: TransportContext {
-                            local_addr,
+                            local_addr: self.relayed_addr,
                             peer_addr: from,
                             ecn: None,
                             transport_protocol: TransportProtocol::UDP,
@@ -644,16 +686,16 @@ impl TurnRelay {
     }
 
     /// Ensure coturn will relay to/from `peer`'s IP (install a permission once),
-    /// then, if we already know `peer` is only reachable via the relay, wrap this
-    /// datagram through it. Returns `true` if the datagram was sent via the relay
-    /// (so the caller must NOT also send it directly).
-    fn route_out(&mut self, peer: SocketAddr, message: &[u8]) -> bool {
+    /// then, if the engine sent this datagram from the relay candidate (`local`),
+    /// wrap it through coturn. Returns `true` if the datagram was sent via the
+    /// relay (so the caller must NOT also send it directly).
+    fn route_out(&mut self, local: SocketAddr, peer: SocketAddr, message: &[u8]) -> bool {
         if self.permitted.insert(peer.ip())
             && let Ok(mut relay) = self.client.relay(self.relayed_addr)
         {
             let _ = relay.create_permission(Instant::now(), peer);
         }
-        if self.relayed_peers.contains(&peer) {
+        if local == self.relayed_addr {
             if let Ok(mut relay) = self.client.relay(self.relayed_addr) {
                 let _ = relay.send_to(Instant::now(), message, peer);
             }
@@ -960,6 +1002,10 @@ fn app_gathering(builder: SettingEngineBuilder) -> SettingEngineBuilder {
     builder
         .with_relay_gathering(RelayGathering::Application)
         .with_server_reflexive_gathering(ReflexiveGathering::Application)
+        // Don't resolve the browser's `.local` mDNS host candidates: we can't
+        // reach a LAN-only name from a relayed/remote host anyway, and the
+        // default (QueryOnly) logs an error per candidate on rtci 0.2.0.
+        .with_multicast_dns_mode(MulticastDnsMode::Disabled)
 }
 
 /// Outbound H.264 send state (host only).
@@ -1063,6 +1109,7 @@ fn event_loop(
     // Reset whenever the next deadline is in the future; capped so a stuck timer
     // can't spin the loop (see `MAX_CONSECUTIVE_REFIRES`).
     let mut refires: u32 = 0;
+    let mut local_of = LocalAddrResolver::new(local_addr);
 
     // On a viewer rebuild, apply the offer that triggered it to the fresh PC.
     if let Some(msg) = initial_signal
@@ -1086,7 +1133,7 @@ fn event_loop(
             let peer = msg.transport.peer_addr;
             let relayed = turn
                 .as_mut()
-                .map(|t| t.route_out(peer, &msg.message))
+                .map(|t| t.route_out(msg.transport.local_addr, peer, &msg.message))
                 .unwrap_or(false);
             if !relayed && let Err(e) = socket.send_to(&msg.message, peer) {
                 tracing::debug!("transport: socket send_to error: {e}");
@@ -1098,7 +1145,7 @@ fn event_loop(
         //     peer connection as if they'd arrived directly.
         if let Some(t) = turn.as_mut() {
             t.pump_out(socket);
-            t.drain_events(pc, local_addr);
+            t.drain_events(pc);
         }
 
         // 3. Surface connection-state and ICE-candidate events.
@@ -1196,7 +1243,7 @@ fn event_loop(
                 let msg = TaggedBytesMut {
                     now: Instant::now(),
                     transport: TransportContext {
-                        local_addr,
+                        local_addr: local_of.local_for(peer_addr),
                         peer_addr,
                         ecn: None,
                         transport_protocol: TransportProtocol::UDP,
@@ -1211,7 +1258,7 @@ fn event_loop(
                     Some(t) if t.is_server(peer_addr) => {
                         t.handle_server_input(msg);
                         t.pump_out(socket);
-                        t.drain_events(pc, local_addr);
+                        t.drain_events(pc);
                     }
                     _ => {
                         pc.handle_read(msg).context("handle_read")?;
@@ -1492,6 +1539,11 @@ fn drain_events(
             }
             RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(id)) => {
                 state.data_channel_id = Some(id);
+            }
+            // Which path the session runs on (host/srflx/relay) — the first thing
+            // to know when a remote session is slow or drops.
+            RTCPeerConnectionEvent::OnSelectedCandidatePairChange(pair) => {
+                tracing::info!(%pair, "transport: selected candidate pair");
             }
             RTCPeerConnectionEvent::OnPacerDiscard {
                 frames,
