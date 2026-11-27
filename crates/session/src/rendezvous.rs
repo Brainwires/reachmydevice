@@ -161,6 +161,10 @@ fn close_inherited_fds() {
     }
 }
 
+/// How long [`restart_in_place`] (and the host's signal handler) waits for the
+/// transport drivers to release their TURN allocations before exiting.
+pub const TURN_RELEASE_BEFORE_EXIT: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// Restart the process **in place** for a clean slate — a fresh system DNS
 /// resolver (shedding a wedged `getaddrinfo`) and a fresh startup ICE fetch (so a
 /// host that came up relay-less, or whose TURN credential is expiring, re-acquires
@@ -168,7 +172,12 @@ fn close_inherited_fds() {
 /// `KeepAlive` supervisor doesn't double-launch us) but a fresh process image. If
 /// `exec` fails (or non-Unix), fall back to `exit(1)` so a supervisor, if any,
 /// still relaunches us. Never returns — callers must ensure no session is active.
+///
+/// Before the `exec` (which runs no destructors) the host's TURN allocation is
+/// released, so the fresh image's Allocate from the same 5-tuple isn't refused with
+/// 437 Allocation Mismatch (which left it relay-less until the old one expired).
 pub fn restart_in_place() -> ! {
+    rmd_transport::release_turn_allocations(TURN_RELEASE_BEFORE_EXIT);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

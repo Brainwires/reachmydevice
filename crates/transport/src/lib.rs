@@ -14,11 +14,10 @@
 
 use bytes::Bytes;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub mod driver;
 
@@ -134,8 +133,70 @@ pub(crate) enum DriverCmd {
     /// Request an ICE restart (host initiates renegotiation to recover the
     /// connection after a network change).
     IceRestart,
+    /// Release the host's TURN allocation now (Refresh with lifetime 0) and ack on
+    /// the sender once done (or given up). The driver keeps running relay-less and
+    /// stops retrying the allocation: the process is about to exit or `exec`.
+    ReleaseTurn(mpsc::Sender<()>),
     /// Tear down and exit the driver loop.
     Shutdown,
+}
+
+/// Command senders of every live host driver, so [`release_turn_allocations`] can
+/// reach them from anywhere in the process. Keyed by a per-driver id; a driver
+/// removes itself when its thread exits.
+static HOST_DRIVERS: Mutex<Vec<(u64, mpsc::Sender<DriverCmd>)>> = Mutex::new(Vec::new());
+/// Source of [`HOST_DRIVERS`] ids.
+static NEXT_DRIVER_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Ask every live host transport driver to release its TURN allocation, and block
+/// until all of them confirm or `timeout` passes (best effort; never hangs longer).
+///
+/// Call this before the process exits or `exec`s itself (no destructors run on an
+/// `exec`), so coturn drops the allocation now instead of holding it for its full
+/// lifetime. Otherwise the next process, which allocates from the same 5-tuple, is
+/// answered 437 (Allocation Mismatch) and runs relay-less. After the release a
+/// driver keeps running, just without a relay.
+pub fn release_turn_allocations(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let senders: Vec<mpsc::Sender<DriverCmd>> = match HOST_DRIVERS.lock() {
+        Ok(drivers) => drivers.iter().map(|(_, tx)| tx.clone()).collect(),
+        Err(poisoned) => poisoned
+            .into_inner()
+            .iter()
+            .map(|(_, tx)| tx.clone())
+            .collect(),
+    };
+    let (ack_tx, ack_rx) = mpsc::channel();
+    let pending = senders
+        .iter()
+        .filter(|tx| tx.send(DriverCmd::ReleaseTurn(ack_tx.clone())).is_ok())
+        .count();
+    drop(ack_tx);
+    for _ in 0..pending {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || ack_rx.recv_timeout(left).is_err() {
+            tracing::debug!("transport: TURN release did not confirm before the timeout");
+            return;
+        }
+    }
+}
+
+/// Add a host driver's command sender to [`HOST_DRIVERS`]; returns its id.
+fn register_host_driver(tx: mpsc::Sender<DriverCmd>) -> u64 {
+    let id = NEXT_DRIVER_ID.fetch_add(1, Ordering::Relaxed);
+    match HOST_DRIVERS.lock() {
+        Ok(mut drivers) => drivers.push((id, tx)),
+        Err(poisoned) => poisoned.into_inner().push((id, tx)),
+    }
+    id
+}
+
+/// Remove a host driver from [`HOST_DRIVERS`] (its thread is exiting).
+fn unregister_host_driver(id: u64) {
+    match HOST_DRIVERS.lock() {
+        Ok(mut drivers) => drivers.retain(|(i, _)| *i != id),
+        Err(poisoned) => poisoned.into_inner().retain(|(i, _)| *i != id),
+    }
 }
 
 /// Cloneable command side of the transport.
@@ -200,14 +261,30 @@ impl Transport {
         let (event_tx, event_rx) = mpsc::channel();
         let bitrate_bps = Arc::new(AtomicU32::new(config.video_bitrate_bps));
         let driver_bitrate = bitrate_bps.clone();
+        // Host drivers hold a TURN allocation: register them so the process can
+        // release it before it exits or re-execs (see `release_turn_allocations`).
+        let registry_id =
+            (config.role == TransportRole::Host).then(|| register_host_driver(cmd_tx.clone()));
 
-        let handle = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("rmd-transport".into())
             .spawn(move || {
                 if let Err(e) = driver::run(config, cmd_rx, event_tx, driver_bitrate) {
                     tracing::error!("transport driver exited with error: {e:?}");
                 }
-            })?;
+                if let Some(id) = registry_id {
+                    unregister_host_driver(id);
+                }
+            });
+        let handle = match spawned {
+            Ok(h) => h,
+            Err(e) => {
+                if let Some(id) = registry_id {
+                    unregister_host_driver(id);
+                }
+                return Err(e.into());
+            }
+        };
 
         Ok(Self {
             sender: TransportSender {

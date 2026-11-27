@@ -437,6 +437,12 @@ fn mapped_address(response: &Message) -> Option<SocketAddr> {
 /// How long to wait for the TURN Allocate handshake (Allocate → 401 → auth
 /// Allocate → success) before giving up and running relay-less.
 const TURN_SETUP_TIMEOUT: Duration = Duration::from_secs(4);
+/// How often an idle host retries a TURN allocation that failed at startup (most
+/// often a 437 Allocation Mismatch: the previous process's allocation on the same
+/// 5-tuple is still live on coturn until its lifetime runs out).
+const TURN_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+/// Upper bound on releasing the allocation (Refresh lifetime=0) at shutdown.
+const TURN_RELEASE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A TURN relay allocation held on the *host's* transport socket, plus the
 /// routing state that makes it transparent to the sans-IO `rtc` engine.
@@ -503,10 +509,14 @@ impl TurnRelay {
     /// same socket the session will use, before the event loop owns it. Returns
     /// `None` (run relay-less, no regression) if there's no TURN server, the
     /// server can't be resolved, or the allocation doesn't complete in time.
+    ///
+    /// `first_attempt` picks the log level of a server rejection: warn at startup,
+    /// debug on the idle retries that follow (see [`HostTurn`]).
     fn setup(
         socket: &UdpSocket,
         local_addr: SocketAddr,
         ice_servers: &[IceServer],
+        first_attempt: bool,
     ) -> Option<(TurnRelay, RTCIceCandidateInit)> {
         let (server_str, username, credential, url) = first_turn_server(ice_servers)?;
         let want_ipv4 = local_addr.is_ipv4();
@@ -562,7 +572,11 @@ impl TurnRelay {
                         break 'drive;
                     }
                     TurnEvent::AllocateError(_, e) => {
-                        tracing::warn!("transport: TURN allocate rejected: {e}");
+                        if first_attempt {
+                            tracing::warn!("transport: TURN allocate rejected: {e}");
+                        } else {
+                            tracing::debug!("transport: TURN allocate retry rejected: {e}");
+                        }
                         return None;
                     }
                     _ => {}
@@ -711,6 +725,180 @@ impl TurnRelay {
     fn handle_timeout(&mut self, now: Instant) {
         let _ = self.client.handle_timeout(now);
     }
+
+    /// Release the allocation on coturn (Refresh with LIFETIME 0, RFC 8656 §8) and
+    /// drive the client until it confirms or [`TURN_RELEASE_TIMEOUT`] passes.
+    /// Best effort and bounded: the relay is consumed either way. Inbound datagrams
+    /// from anyone but coturn are dropped meanwhile (the caller is tearing down).
+    /// Returns `true` once `Event::AllocationReleased` reports the release done.
+    fn release(mut self, socket: &UdpSocket, local_addr: SocketAddr) -> bool {
+        let relayed_addr = self.relayed_addr;
+        let start = Instant::now();
+        if let Err(e) = self
+            .client
+            .relay(relayed_addr)
+            .and_then(|mut relay| relay.close(start))
+        {
+            tracing::debug!(relay = %relayed_addr, "transport: TURN release failed to start: {e}");
+            return false;
+        }
+        let deadline = start + TURN_RELEASE_TIMEOUT;
+        let mut buf = vec![0u8; 2048];
+        loop {
+            self.pump_out(socket);
+            while let Some(ev) = self.client.poll_event() {
+                if let TurnEvent::AllocationReleased(addr) = ev
+                    && addr == relayed_addr
+                {
+                    tracing::info!(relay = %relayed_addr, "transport: TURN allocation released");
+                    return true;
+                }
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                tracing::debug!(relay = %relayed_addr, "transport: TURN release unconfirmed");
+                return false;
+            }
+            let to = self
+                .client
+                .poll_timeout()
+                .unwrap_or(now + Duration::from_millis(100))
+                .min(deadline);
+            if to <= now {
+                let _ = self.client.handle_timeout(now);
+                continue;
+            }
+            let _ = socket.set_read_timeout(Some((to - now).max(Duration::from_millis(1))));
+            if let Ok((n, from)) = socket.recv_from(&mut buf)
+                && from == self.server_addr
+            {
+                self.handle_server_input(TaggedBytesMut {
+                    now: Instant::now(),
+                    transport: TransportContext {
+                        local_addr,
+                        peer_addr: from,
+                        ecn: None,
+                        transport_protocol: TransportProtocol::UDP,
+                    },
+                    message: BytesMut::from(&buf[..n]),
+                });
+            }
+            let _ = self.client.handle_timeout(Instant::now());
+        }
+    }
+}
+
+/// The host's TURN state across sessions: the one allocation (and its candidate)
+/// that every session re-advertises, plus the idle retry when the startup
+/// allocation failed.
+///
+/// A restarted host allocates from the same 5-tuple as its predecessor, so while
+/// that one's allocation lingers on coturn the Allocate is answered 437
+/// (Allocation Mismatch). Without a retry the host would run relay-less for its
+/// whole lifetime; instead the event loop retries every [`TURN_RETRY_INTERVAL`]
+/// while no session is using the socket (setup blocks and reads it).
+struct HostTurn {
+    ice_servers: Vec<IceServer>,
+    relay: Option<TurnRelay>,
+    cand: Option<RTCIceCandidateInit>,
+    /// When to retry the allocation; `None` = nothing to retry (allocated, no
+    /// credentialed TURN server, or released for exit).
+    retry_at: Option<Instant>,
+    /// Failed allocation attempts so far, startup included.
+    attempts: u32,
+}
+
+impl HostTurn {
+    /// Allocate at startup; on failure with a credentialed TURN server configured,
+    /// schedule the idle retry.
+    fn start(socket: &UdpSocket, local_addr: SocketAddr, ice_servers: &[IceServer]) -> Self {
+        let mut this = Self {
+            ice_servers: ice_servers.to_vec(),
+            relay: None,
+            cand: None,
+            retry_at: None,
+            attempts: 0,
+        };
+        match TurnRelay::setup(socket, local_addr, ice_servers, true) {
+            Some((relay, cand)) => {
+                this.relay = Some(relay);
+                this.cand = Some(cand);
+            }
+            None if first_turn_server(ice_servers).is_some() => {
+                this.attempts = 1;
+                this.retry_at = Some(Instant::now() + TURN_RETRY_INTERVAL);
+                tracing::warn!(
+                    retry_secs = TURN_RETRY_INTERVAL.as_secs(),
+                    "transport: TURN relay unavailable; retrying while idle"
+                );
+            }
+            None => {}
+        }
+        this
+    }
+
+    fn relay_mut(&mut self) -> Option<&mut TurnRelay> {
+        self.relay.as_mut()
+    }
+
+    /// The next retry deadline, for the event loop's wake-up.
+    fn retry_deadline(&self) -> Option<Instant> {
+        self.retry_at
+    }
+
+    /// Retry the allocation if one is due. `idle` = no session is using the socket;
+    /// a due retry that isn't idle is pushed back a full interval, so `retry_at` is
+    /// always in the future afterwards (the loop never spins on it). Returns the new
+    /// relay candidate on success, already stored for later sessions.
+    fn maybe_retry(
+        &mut self,
+        socket: &UdpSocket,
+        local_addr: SocketAddr,
+        now: Instant,
+        idle: bool,
+    ) -> Option<RTCIceCandidateInit> {
+        let due = self.retry_at.is_some_and(|t| t <= now);
+        if !due {
+            return None;
+        }
+        if !idle {
+            self.retry_at = Some(now + TURN_RETRY_INTERVAL);
+            return None;
+        }
+        match TurnRelay::setup(socket, local_addr, &self.ice_servers, false) {
+            Some((relay, cand)) => {
+                tracing::info!(
+                    attempts = self.attempts,
+                    "transport: TURN relay recovered after {} attempts",
+                    self.attempts
+                );
+                self.relay = Some(relay);
+                self.cand = Some(cand.clone());
+                self.retry_at = None;
+                Some(cand)
+            }
+            None => {
+                self.attempts += 1;
+                self.retry_at = Some(Instant::now() + TURN_RETRY_INTERVAL);
+                tracing::debug!(
+                    attempts = self.attempts,
+                    "transport: TURN relay retry failed; next in {}s",
+                    TURN_RETRY_INTERVAL.as_secs()
+                );
+                None
+            }
+        }
+    }
+
+    /// Release the allocation (if any) and stop retrying: the process is exiting.
+    /// Returns `true` if an allocation was released and the server confirmed it.
+    fn release(&mut self, socket: &UdpSocket, local_addr: SocketAddr) -> bool {
+        self.retry_at = None;
+        self.cand = None;
+        self.relay
+            .take()
+            .is_some_and(|relay| relay.release(socket, local_addr))
+    }
 }
 
 /// Host: offerer + video sender, with sender-side GCC + TWCC.
@@ -727,10 +915,9 @@ fn run_host(
     // on coturn is rejected (Allocation Mismatch), which would drop reconnects back to
     // relay-less and break cross-NAT rapid reconnects. We keep the one allocation and
     // just re-advertise its candidate (and reset per-viewer routing state) each session.
-    let (mut turn, turn_cand) = match TurnRelay::setup(&socket, local_addr, &config.ice_servers) {
-        Some((relay, cand)) => (Some(relay), Some(cand)),
-        None => (None, None),
-    };
+    // If this first Allocate fails (typically 437 while a restarted predecessor's
+    // allocation lingers), the event loop retries it while idle (see `HostTurn`).
+    let mut turn = HostTurn::start(&socket, local_addr, &config.ice_servers);
 
     // One iteration per viewer session: build a fresh peer connection (offer +
     // control data channel), serve it, and rebuild from scratch when it drops so
@@ -820,7 +1007,7 @@ fn run_host(
         // connection and reset its per-viewer routing state. This is what lets a peer
         // behind symmetric NAT / CGNAT connect (the host otherwise offers host+srflx
         // only). The allocation itself was made once above and survives rebuilds.
-        if let (Some(relay), Some(cand)) = (turn.as_mut(), turn_cand.as_ref()) {
+        if let (Some(relay), Some(cand)) = (turn.relay.as_mut(), turn.cand.as_ref()) {
             relay.reset_session();
             if let Err(e) = pc.add_local_candidate(cand.clone()) {
                 tracing::debug!("transport: add relay candidate failed: {e}");
@@ -872,7 +1059,7 @@ fn run_host(
             &event_tx,
             &mut state,
             None,
-            turn.as_mut(),
+            Some(&mut turn),
         )? {
             LoopOutcome::Shutdown => return Ok(()),
             LoopOutcome::Reconnect(_) => {
@@ -1101,7 +1288,7 @@ fn event_loop(
     event_tx: &Sender<TransportEvent>,
     state: &mut RoleState,
     initial_signal: Option<SignalMsg>,
-    mut turn: Option<&mut TurnRelay>,
+    mut turn: Option<&mut HostTurn>,
 ) -> anyhow::Result<LoopOutcome> {
     let mut connected = false;
     let mut read_buf = vec![0u8; 2048];
@@ -1119,10 +1306,24 @@ fn event_loop(
     }
 
     loop {
-        // 1. Drain application commands.
-        if let CommandOutcome::Shutdown = drain_commands(pc, cmd_rx, event_tx, state) {
-            let _ = pc.close();
-            return Ok(LoopOutcome::Shutdown);
+        // 1. Drain application commands. Exiting (or about to `exec`) releases the
+        //    TURN allocation so the next process's Allocate isn't refused (437).
+        match drain_commands(pc, cmd_rx, event_tx, state) {
+            CommandOutcome::Continue => {}
+            CommandOutcome::Shutdown => {
+                if let Some(t) = turn.as_deref_mut() {
+                    t.release(socket, local_addr);
+                }
+                let _ = pc.close();
+                return Ok(LoopOutcome::Shutdown);
+            }
+            CommandOutcome::ReleaseTurn(ack) => {
+                if let Some(t) = turn.as_deref_mut() {
+                    t.release(socket, local_addr);
+                }
+                let _ = ack.send(());
+                continue; // drain any commands queued behind it
+            }
         }
 
         // 2. Flush all pending outbound datagrams. With a TURN relay, a datagram to
@@ -1132,7 +1333,8 @@ fn event_loop(
         while let Some(msg) = pc.poll_write() {
             let peer = msg.transport.peer_addr;
             let relayed = turn
-                .as_mut()
+                .as_deref_mut()
+                .and_then(HostTurn::relay_mut)
                 .map(|t| t.route_out(msg.transport.local_addr, peer, &msg.message))
                 .unwrap_or(false);
             if !relayed && let Err(e) = socket.send_to(&msg.message, peer) {
@@ -1143,7 +1345,7 @@ fn event_loop(
         // 2b. Flush the TURN client's own datagrams (allocation refresh, permission
         //     requests, ChannelData) and surface any relayed peer datagrams into the
         //     peer connection as if they'd arrived directly.
-        if let Some(t) = turn.as_mut() {
+        if let Some(t) = turn.as_deref_mut().and_then(HostTurn::relay_mut) {
             t.pump_out(socket);
             t.drain_events(pc);
         }
@@ -1175,12 +1377,33 @@ fn event_loop(
             }
         }
 
+        // 5b. Host whose startup TURN allocation failed: retry it when due, but only
+        //     while no session is on the socket (setup blocks up to
+        //     TURN_SETUP_TIMEOUT and consumes the socket's inbound datagrams). On
+        //     success advertise the relay on this peer connection exactly as
+        //     `run_host` does per session; later sessions pick it up from `HostTurn`.
+        if let Some(t) = turn.as_deref_mut() {
+            let idle = !connected && !state.remote_description_set;
+            if let Some(cand) = t.maybe_retry(socket, local_addr, Instant::now(), idle) {
+                if let Some(relay) = t.relay_mut() {
+                    relay.reset_session();
+                }
+                if let Err(e) = pc.add_local_candidate(cand.clone()) {
+                    tracing::debug!("transport: add relay candidate failed: {e}");
+                }
+                let _ = event_tx.send(TransportEvent::LocalSignal(SignalMsg::Candidate(
+                    cand.candidate.clone(),
+                )));
+                continue; // re-pump: setup blocked, so timers and writes are stale
+            }
+        }
+
         // 6. Service the sans-IO timer, then wait (bounded) for the next
         //    datagram so both timeouts and commands stay responsive. The TURN
         //    client's refresh timer is driven each pass and folded into the wait so
         //    we never sleep past an allocation/permission refresh.
         let now = Instant::now();
-        if let Some(t) = turn.as_mut() {
+        if let Some(t) = turn.as_deref_mut().and_then(HostTurn::relay_mut) {
             t.handle_timeout(now);
         }
         // The viewer's sample builder gives a gap up after its wait bound; drive its
@@ -1224,8 +1447,13 @@ fn event_loop(
         } else {
             refires = 0;
         }
-        let turn_deadline = turn.as_mut().and_then(|t| t.poll_timeout());
-        let deadline = [pc_deadline, turn_deadline, sb_deadline]
+        let turn_deadline = turn
+            .as_deref_mut()
+            .and_then(HostTurn::relay_mut)
+            .and_then(TurnRelay::poll_timeout);
+        // The idle TURN retry is always scheduled in the future (see `maybe_retry`).
+        let retry_deadline = turn.as_deref().and_then(HostTurn::retry_deadline);
+        let deadline = [pc_deadline, turn_deadline, sb_deadline, retry_deadline]
             .into_iter()
             .flatten()
             .min();
@@ -1254,7 +1482,7 @@ fn event_loop(
                 // responses, relayed peer data) — feed them to the TURN client and
                 // immediately surface any relayed media. Everything else is direct
                 // peer traffic for the peer connection.
-                match turn.as_mut() {
+                match turn.as_deref_mut().and_then(HostTurn::relay_mut) {
                     Some(t) if t.is_server(peer_addr) => {
                         t.handle_server_input(msg);
                         t.pump_out(socket);
@@ -1282,6 +1510,9 @@ fn event_loop(
 enum CommandOutcome {
     Continue,
     Shutdown,
+    /// Release the TURN allocation, then ack (see [`DriverCmd::ReleaseTurn`]).
+    /// Commands queued behind it are drained on the next pass.
+    ReleaseTurn(Sender<()>),
 }
 
 /// Apply every currently queued [`DriverCmd`].
@@ -1316,6 +1547,7 @@ fn drain_commands(
                     tracing::info!("transport: session rebuild requested");
                 }
             }
+            Ok(DriverCmd::ReleaseTurn(ack)) => return CommandOutcome::ReleaseTurn(ack),
             Ok(DriverCmd::Shutdown) => return CommandOutcome::Shutdown,
             Err(TryRecvError::Empty) => return CommandOutcome::Continue,
             // The Transport handle was dropped — tear down cleanly.
@@ -1763,5 +1995,284 @@ mod tests {
             "expected a public IPv4 srflx address, got {ip}"
         );
         eprintln!("discovered public srflx address: {ip}");
+    }
+
+    /// A minimal loopback TURN server (UDP, long-term credential, MD5 integrity)
+    /// standing in for coturn. It answers the first `reject_first` Allocates with
+    /// 437 Allocation Mismatch — what coturn says while a restarted host's previous
+    /// allocation on the same 5-tuple is still live — then serves Allocate (401
+    /// nonce challenge, then a signed success), Refresh and CreatePermission.
+    mod fake_turn {
+        use super::*;
+        use rtci::stun::attributes::ATTR_MESSAGE_INTEGRITY;
+        use rtci::stun::attributes::{ATTR_NONCE, ATTR_REALM};
+        use rtci::stun::error_code::{
+            CODE_ALLOC_MISMATCH, CODE_UNAUTHORIZED, ErrorCode, ErrorCodeAttribute,
+        };
+        use rtci::stun::fingerprint::FINGERPRINT;
+        use rtci::stun::integrity::MessageIntegrity;
+        use rtci::stun::message::{
+            CLASS_ERROR_RESPONSE, CLASS_REQUEST, CLASS_SUCCESS_RESPONSE, METHOD_ALLOCATE,
+            METHOD_REFRESH, MessageClass, MessageType, Setter,
+        };
+        use rtci::stun::textattrs::{Nonce, Realm};
+        use rtci::turn::proto::lifetime::Lifetime;
+        use rtci::turn::proto::relayaddr::RelayedAddress;
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        pub(super) const USERNAME: &str = "user";
+        pub(super) const PASSWORD: &str = "pass";
+        const REALM: &str = "rmd-test";
+        /// The relayed address the fake hands out (TEST-NET-1; never routed).
+        pub(super) const RELAYED: &str = "192.0.2.15:50000";
+
+        pub(super) struct FakeTurn {
+            pub(super) addr: SocketAddr,
+            /// Allocates refused with 437 so far.
+            pub(super) rejected: Arc<AtomicUsize>,
+            /// Signed Allocates granted so far.
+            pub(super) allocated: Arc<AtomicUsize>,
+            /// Whether a Refresh with LIFETIME 0 (a release) arrived.
+            pub(super) released: Arc<AtomicBool>,
+            stop: Arc<AtomicBool>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl FakeTurn {
+            pub(super) fn spawn(reject_first: usize) -> Self {
+                let socket = UdpSocket::bind("127.0.0.1:0").expect("bind fake TURN");
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(20)))
+                    .expect("read timeout");
+                let addr = socket.local_addr().expect("fake TURN addr");
+                let rejected = Arc::new(AtomicUsize::new(0));
+                let allocated = Arc::new(AtomicUsize::new(0));
+                let released = Arc::new(AtomicBool::new(false));
+                let stop = Arc::new(AtomicBool::new(false));
+                let (r, a, rel, st) = (
+                    rejected.clone(),
+                    allocated.clone(),
+                    released.clone(),
+                    stop.clone(),
+                );
+                let thread = std::thread::spawn(move || {
+                    serve(&socket, reject_first, &r, &a, &rel, &st);
+                });
+                Self {
+                    addr,
+                    rejected,
+                    allocated,
+                    released,
+                    stop,
+                    thread: Some(thread),
+                }
+            }
+
+            /// ICE config pointing at this server with its credential.
+            pub(super) fn ice_servers(&self) -> Vec<IceServer> {
+                vec![IceServer {
+                    urls: vec![format!("turn:{}?transport=udp", self.addr)],
+                    username: Some(USERNAME.to_owned()),
+                    credential: Some(PASSWORD.to_owned()),
+                }]
+            }
+        }
+
+        impl Drop for FakeTurn {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::Relaxed);
+                if let Some(t) = self.thread.take() {
+                    let _ = t.join();
+                }
+            }
+        }
+
+        fn serve(
+            socket: &UdpSocket,
+            reject_first: usize,
+            rejected: &AtomicUsize,
+            allocated: &AtomicUsize,
+            released: &AtomicBool,
+            stop: &AtomicBool,
+        ) {
+            let provider = rtci::crypto::default_provider().expect("crypto provider");
+            let key = MessageIntegrity::long_term_integrity_key(
+                USERNAME.to_owned(),
+                REALM.to_owned(),
+                PASSWORD.to_owned(),
+                provider.crypto(),
+            )
+            .expect("long-term key");
+            let relayed: SocketAddr = RELAYED.parse().unwrap();
+            let mut buf = vec![0u8; 2048];
+            while !stop.load(Ordering::Relaxed) {
+                let Ok((n, from)) = socket.recv_from(&mut buf) else {
+                    continue;
+                };
+                let mut req = Message::new();
+                if req.write(&buf[..n]).is_err() || req.typ.class != CLASS_REQUEST {
+                    continue; // indications / ChannelData / junk
+                }
+                let signed = req.contains(ATTR_MESSAGE_INTEGRITY);
+                let error = |code: ErrorCode, extra: Vec<Box<dyn Setter>>| {
+                    let mut attrs: Vec<Box<dyn Setter>> = vec![Box::new(ErrorCodeAttribute {
+                        code,
+                        reason: b"test".to_vec(),
+                    })];
+                    attrs.extend(extra);
+                    (CLASS_ERROR_RESPONSE, attrs, false)
+                };
+                let (class, attrs, sign): (MessageClass, Vec<Box<dyn Setter>>, bool) =
+                    if req.typ.method == METHOD_ALLOCATE && !signed {
+                        if rejected.load(Ordering::Relaxed) < reject_first {
+                            rejected.fetch_add(1, Ordering::Relaxed);
+                            error(CODE_ALLOC_MISMATCH, vec![])
+                        } else {
+                            error(
+                                CODE_UNAUTHORIZED,
+                                vec![
+                                    Box::new(Nonce::new(ATTR_NONCE, "nonce".to_owned())),
+                                    Box::new(Realm::new(ATTR_REALM, REALM.to_owned())),
+                                ],
+                            )
+                        }
+                    } else if req.typ.method == METHOD_ALLOCATE {
+                        allocated.fetch_add(1, Ordering::Relaxed);
+                        (
+                            CLASS_SUCCESS_RESPONSE,
+                            vec![
+                                Box::new(RelayedAddress {
+                                    ip: relayed.ip(),
+                                    port: relayed.port(),
+                                }),
+                                Box::new(XorMappedAddress {
+                                    ip: from.ip(),
+                                    port: from.port(),
+                                }),
+                                Box::new(Lifetime(Duration::from_secs(600))),
+                            ],
+                            true,
+                        )
+                    } else if req.typ.method == METHOD_REFRESH {
+                        let mut lifetime = Lifetime::default();
+                        let _ = lifetime.get_from(&req);
+                        if lifetime.0.is_zero() {
+                            released.store(true, Ordering::Relaxed);
+                        }
+                        (
+                            CLASS_SUCCESS_RESPONSE,
+                            vec![Box::new(lifetime) as Box<dyn Setter>],
+                            true,
+                        )
+                    } else {
+                        (CLASS_SUCCESS_RESPONSE, vec![], true) // CreatePermission etc.
+                    };
+                let mut setters: Vec<Box<dyn Setter + '_>> = vec![
+                    Box::new(req.transaction_id),
+                    Box::new(MessageType::new(req.typ.method, class)),
+                ];
+                setters.extend(attrs);
+                if sign {
+                    setters.push(Box::new(MessageIntegrity::new_raw_integrity_with_provider(
+                        key.clone(),
+                        provider.crypto(),
+                    )));
+                }
+                setters.push(Box::new(FINGERPRINT));
+                let mut reply = Message::new();
+                if reply.build(&setters).is_ok() {
+                    let _ = socket.send_to(&reply.raw, from);
+                }
+            }
+        }
+    }
+
+    /// A host whose startup Allocate is refused with 437 schedules an idle retry,
+    /// defers it while a session is on the socket, recovers the relay once idle,
+    /// and releases the allocation (Refresh lifetime=0, confirmed) at exit.
+    #[test]
+    fn host_turn_retries_after_437_then_releases() {
+        let server = fake_turn::FakeTurn::spawn(1);
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind host socket");
+        let local_addr = socket.local_addr().unwrap();
+
+        let mut turn = HostTurn::start(&socket, local_addr, &server.ice_servers());
+        assert_eq!(server.rejected.load(Ordering::Relaxed), 1);
+        assert!(turn.relay.is_none() && turn.cand.is_none());
+        assert_eq!(turn.attempts, 1);
+        let due = turn.retry_at.expect("a retry is scheduled after the 437");
+
+        // Not yet due: nothing happens.
+        assert!(
+            turn.maybe_retry(&socket, local_addr, due - Duration::from_secs(1), true)
+                .is_none()
+        );
+        assert_eq!(turn.retry_at, Some(due));
+
+        // Due but a session is on the socket: pushed back a full interval, no Allocate.
+        assert!(turn.maybe_retry(&socket, local_addr, due, false).is_none());
+        assert_eq!(turn.retry_at, Some(due + TURN_RETRY_INTERVAL));
+        assert_eq!(server.allocated.load(Ordering::Relaxed), 0);
+
+        // Due and idle: recovers, and the relay is stored for later sessions.
+        let due = turn.retry_at.unwrap();
+        let cand = turn
+            .maybe_retry(&socket, local_addr, due, true)
+            .expect("relay recovered on the idle retry");
+        assert!(cand.candidate.contains("typ relay"), "{}", cand.candidate);
+        assert!(
+            cand.candidate.contains("192.0.2.15 50000"),
+            "{}",
+            cand.candidate
+        );
+        assert_eq!(server.allocated.load(Ordering::Relaxed), 1);
+        assert!(turn.relay.is_some());
+        assert_eq!(turn.cand.as_ref(), Some(&cand));
+        assert_eq!(turn.retry_at, None, "no retry once allocated");
+
+        // Exit: the allocation is released on the server and confirmed.
+        assert!(turn.release(&socket, local_addr), "release confirmed");
+        assert!(server.released.load(Ordering::Relaxed));
+        assert!(turn.relay.is_none() && turn.cand.is_none() && turn.retry_at.is_none());
+    }
+
+    /// No credentialed TURN server: nothing to retry.
+    #[test]
+    fn host_turn_without_turn_server_never_retries() {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind host socket");
+        let local_addr = socket.local_addr().unwrap();
+        let stun_only = vec![IceServer::urls(vec!["stun:127.0.0.1:9".to_owned()])];
+        let turn = HostTurn::start(&socket, local_addr, &stun_only);
+        assert!(turn.relay.is_none() && turn.retry_at.is_none());
+    }
+
+    /// `release_turn_allocations` reaches a live host driver through the global
+    /// registry and blocks until its allocation is released on the server.
+    #[test]
+    fn release_turn_allocations_releases_live_host() {
+        let server = fake_turn::FakeTurn::spawn(0);
+        let transport = crate::Transport::spawn(TransportConfig {
+            role: TransportRole::Host,
+            ice_servers: server.ice_servers(),
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            video_bitrate_bps: 1_000_000,
+            video_codec: VideoCodec::H264,
+        })
+        .expect("spawn host transport");
+        // The driver allocates during startup; wait for it.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while server.allocated.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(server.allocated.load(Ordering::Relaxed), 1);
+        // Let the event loop take over the socket (the offer is emitted first).
+        let _ = transport.recv_event_timeout(Duration::from_secs(2));
+
+        crate::release_turn_allocations(Duration::from_millis(1500));
+        assert!(
+            server.released.load(Ordering::Relaxed),
+            "allocation released"
+        );
+        drop(transport);
     }
 }

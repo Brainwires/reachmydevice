@@ -258,6 +258,52 @@ fn spawn_turn_refresh(servers: &[IceServer], session_active: Arc<AtomicBool>) {
     });
 }
 
+/// On SIGTERM (service stop/restart) or SIGINT (Ctrl-C), release the host's TURN
+/// allocation (bounded wait) and exit 0. Without it coturn keeps the allocation for
+/// its full lifetime, so a host restarted within that window gets 437 Allocation
+/// Mismatch and runs relay-less. Runs on its own thread + current-thread runtime so
+/// it works alongside the tray's main-thread event loop. Best effort: if the
+/// handler can't be installed, the default signal disposition (terminate) stays.
+#[cfg(unix)]
+fn install_exit_handler() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let spawned = std::thread::Builder::new()
+        .name("rmd-exit-signal".into())
+        .spawn(|| {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_io()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::warn!(error = %e, "signal handler runtime failed; no TURN release on exit");
+                    return;
+                }
+            };
+            rt.block_on(async {
+                let (Ok(mut term), Ok(mut int)) = (
+                    signal(SignalKind::terminate()),
+                    signal(SignalKind::interrupt()),
+                ) else {
+                    tracing::warn!("could not install SIGTERM/SIGINT handler; no TURN release on exit");
+                    return;
+                };
+                let name = tokio::select! {
+                    _ = term.recv() => "SIGTERM",
+                    _ = int.recv() => "SIGINT",
+                };
+                tracing::info!("{name}: releasing TURN allocation and exiting");
+                rmd_transport::release_turn_allocations(
+                    rmd_session::rendezvous::TURN_RELEASE_BEFORE_EXIT,
+                );
+                std::process::exit(0);
+            });
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "signal handler thread failed; no TURN release on exit");
+    }
+}
+
 /// Load authorized viewer `device_id`s for unattended access. Reads
 /// `RMD_AUTHORIZED_KEYS` (or `~/.config/rmd/authorized_keys`): one
 /// device_id per line, `#` comments and blanks ignored.
@@ -1454,6 +1500,11 @@ fn main() -> anyhow::Result<()> {
     // Whether a viewer session is currently active — watched by the rendezvous
     // client so its wedged-resolver watchdog never restarts us mid-session.
     let session_active = Arc::new(AtomicBool::new(false));
+
+    // Release the TURN allocation on SIGTERM/SIGINT before exiting, so a restarted
+    // host's Allocate from the same 5-tuple isn't refused (437) by coturn.
+    #[cfg(unix)]
+    install_exit_handler();
 
     // Keep the TURN relay credential fresh: restart in place (when idle) before it
     // lapses, since the relay is allocated once at startup and never refreshed.
