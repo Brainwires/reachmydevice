@@ -29,7 +29,7 @@ if-addrs = "0.13"
 # (peer_connection, rtp, media, interceptor, sansio, sdp, shared, stun, turn) is
 # re-exported from the top-level `rtci` crate. rtci needs Rust 1.89, hence this
 # crate's own `rust-version` above.
-rtci = "0.2.0"
+rtci = "0.2.1"
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
